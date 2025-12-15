@@ -31,12 +31,12 @@ jobs:
       # Setup
       # ============================================
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 1  # Shallow clone for faster checkout
+          fetch-depth: 1
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: 'pip'
@@ -54,7 +54,6 @@ jobs:
       - name: Compute cache slot (weekly)
         id: cache-slot
         run: |
-          # ISO year-week, for example: 2025-07
           echo "CACHE_SLOT=$(date -u +%G-%V)" >> $GITHUB_ENV
 
       # ============================================
@@ -63,12 +62,10 @@ jobs:
       - name: Restore blocklist caches
         uses: actions/cache@v4
         with:
-          path: |
-            .cache
-          # Weekly cache prefix so runs within the same week share a single cache artifact
+          path: .cache
           key: blocklists-cache-v1-${{ env.CACHE_SLOT }}
           restore-keys: |
-            blocklists-cache-v1-${{ env.CACHE_SLOT }}-
+            blocklists-cache-v1-
 
       # ============================================
       # Fetch & Process
@@ -92,7 +89,6 @@ jobs:
           fetch_end=$(date +%s)
           echo "fetch_seconds=$((fetch_end - fetch_start))" >> $GITHUB_OUTPUT
           
-          # Count fetched files
           RAW_COUNT=$(find "${{ env.RAW_OUT }}" -type f -name "*.txt" | wc -l)
           echo "raw_files=$RAW_COUNT" >> $GITHUB_OUTPUT
           echo "✅ Fetched $RAW_COUNT source files"
@@ -104,14 +100,11 @@ jobs:
           echo "⚙️ Processing through pipeline..."
 
           pipeline_start=$(date +%s)
-          
-          # Run the full pipeline
           python -m scripts.pipeline "${{ env.RAW_OUT }}" "${{ env.MERGED_OUT }}"
-
           pipeline_end=$(date +%s)
+          
           echo "pipeline_seconds=$((pipeline_end - pipeline_start))" >> $GITHUB_OUTPUT
           
-          # Verify output exists
           if [ ! -f "${{ env.MERGED_OUT }}" ]; then
             echo "❌ ERROR: Merged output file not created"
             exit 1
@@ -124,16 +117,10 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Count total rules (non-comment, non-empty lines)
           TOTAL_RULES=$(grep -cvE '^\s*($|[#!])' "${{ env.MERGED_OUT }}" || echo "0")
-          
-          # Get file size
           FILE_SIZE=$(du -h "${{ env.MERGED_OUT }}" | cut -f1)
-          
-          # Count cache entries
           CACHE_FILES=$(find .cache -type f -name "*.txt" 2>/dev/null | wc -l || echo "0")
           
-          # Output to step outputs and environment
           echo "total_rules=$TOTAL_RULES" >> $GITHUB_OUTPUT
           echo "file_size=$FILE_SIZE" >> $GITHUB_OUTPUT
           echo "TOTAL_RULES=$TOTAL_RULES" >> $GITHUB_ENV
@@ -150,11 +137,9 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Check minimum rule count (prevent empty or broken releases)
           MIN_RULES=1000
           if [ "${{ steps.stats.outputs.total_rules }}" -lt "$MIN_RULES" ]; then
             echo "⚠️ WARNING: Only ${{ steps.stats.outputs.total_rules }} rules (expected >$MIN_RULES)"
-            echo "This might indicate a fetch/processing issue"
             exit 1
           fi
           
@@ -176,9 +161,13 @@ jobs:
           - **Total Rules**: ${{ steps.stats.outputs.total_rules }}
           - **File Size**: ${{ steps.stats.outputs.file_size }}
           - **Sources Processed**: ${{ steps.fetch.outputs.raw_files }}
-          EOF
           
-          echo "✅ Release notes generated"
+          ### Usage
+          Add this URL to AdGuard Home:
+          \`\`\`
+          https://github.com/${{ github.repository }}/releases/download/merged-latest/merged.txt
+          \`\`\`
+          EOF
 
       - name: Create or update release
         if: steps.stats.outputs.total_rules != '0'
@@ -196,16 +185,12 @@ jobs:
       # ============================================
       # Cleanup & Summary
       # ============================================
-      - name: Cleanup old cache entries
+      - name: Cleanup
         if: always()
         run: |
-          echo "🧹 Cleaning up old cache entries (>7 days)..."
           find .cache -type f -mtime +7 -delete 2>/dev/null || true
-          
-          # Clean up temporary raw files (keep caches)
           rm -rf "${{ env.RAW_OUT }}" 2>/dev/null || true
-          
-          echo "✅ Cleanup completed"
+          rm -f release_notes.md 2>/dev/null || true
 
       - name: Generate job summary
         if: always()
@@ -213,25 +198,13 @@ jobs:
           cat >> $GITHUB_STEP_SUMMARY << EOF
           # 📋 Blocklist Update Summary
           
-          ## Status
-          - **Workflow**: ${{ job.status }}
-          
-          ## Statistics
           | Metric | Value |
           |--------|-------|
           | Total Rules | ${{ steps.stats.outputs.total_rules || 'N/A' }} |
           | File Size | ${{ steps.stats.outputs.file_size || 'N/A' }} |
-          | Sources Fetched | ${{ steps.fetch.outputs.raw_files || 'N/A' }} |
-          | Fetch Duration (s) | ${{ steps.fetch.outputs.fetch_seconds || 'N/A' }} |
-          | Pipeline Duration (s) | ${{ steps.pipeline.outputs.pipeline_seconds || 'N/A' }} |
+          | Sources | ${{ steps.fetch.outputs.raw_files || 'N/A' }} |
+          | Fetch (s) | ${{ steps.fetch.outputs.fetch_seconds || 'N/A' }} |
+          | Pipeline (s) | ${{ steps.pipeline.outputs.pipeline_seconds || 'N/A' }} |
           
-          ## Timestamps
-          - **Started**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          - **Run ID**: ${{ github.run_id }}
-          - **Commit**: \`${{ github.sha }}\`
-          
-          ## Next Update
-          Scheduled for: **12 hours from now**
+          **Next Update**: 12 hours
           EOF
-          
-          echo "✅ Job summary generated"
