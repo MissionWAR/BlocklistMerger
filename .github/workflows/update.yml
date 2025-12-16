@@ -24,33 +24,28 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      # ── Setup ───────────────────────────────────────────────
-      - name: 📥 Checkout
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
-      - name: 🐍 Setup Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
 
-      - name: 📦 Install Dependencies
+      - name: Install Dependencies
         run: pip install -q .
 
-      # ── Cache ───────────────────────────────────────────────
-      - name: 💾 Restore Blocklist Cache
+      - name: Restore Cache
         uses: actions/cache@v4
         with:
           path: .cache
-          key: sources-${{ hashFiles('config/sources.txt') }}-${{ github.run_number }}
-          restore-keys: |
-            sources-${{ hashFiles('config/sources.txt') }}-
-            sources-
+          key: blocklists-${{ hashFiles('config/sources.txt') }}
+          restore-keys: blocklists-
 
-      # ── Process ─────────────────────────────────────────────
-      - name: 🌐 Fetch Sources
+      - name: Fetch Sources
         id: fetch
         run: |
           START=$(date +%s)
@@ -63,14 +58,14 @@ jobs:
           echo "time=$(($(date +%s) - START))s" >> $GITHUB_OUTPUT
           echo "count=$(find "$RAW_DIR" -name '*.txt' | wc -l)" >> $GITHUB_OUTPUT
 
-      - name: ⚙️ Compile & Deduplicate
+      - name: Compile Sources
         id: compile
         run: |
           START=$(date +%s)
           python -m scripts.pipeline "$RAW_DIR" "$OUTPUT" "$WHITELIST"
           echo "time=$(($(date +%s) - START))s" >> $GITHUB_OUTPUT
 
-      - name: 📊 Calculate Stats
+      - name: Calculate Stats
         id: stats
         run: |
           RULES=$(wc -l < "$OUTPUT")
@@ -78,33 +73,31 @@ jobs:
           echo "rules=$RULES" >> $GITHUB_OUTPUT
           echo "size=$SIZE" >> $GITHUB_OUTPUT
 
-      # ── Validate ────────────────────────────────────────────
-      - name: ✅ Validate Output
+      - name: Validate Output
         run: |
           RULES=${{ steps.stats.outputs.rules }}
           MIN=1000000
           if [ "$RULES" -lt "$MIN" ]; then
-            echo "::error::❌ Only $RULES rules (expected >$MIN)"
+            echo "::error::Only $RULES rules (expected >$MIN)"
             exit 1
           fi
-          echo "✅ Validation passed: $RULES rules"
+          echo "Validation passed: $RULES rules"
 
-      # ── Release ─────────────────────────────────────────────
-      - name: 🚀 Publish Release
+      - name: Publish Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Merged Blocklist
           body: |
-            ## 📋 Merged Blocklist
+            ## Merged Blocklist
             
-            | 📈 Stat | Value |
-            |---------|-------|
-            | Rules | **${{ steps.stats.outputs.rules }}** |
+            | Stat | Value |
+            |------|-------|
+            | Rules | ${{ steps.stats.outputs.rules }} |
             | Size | ${{ steps.stats.outputs.size }} |
             | Sources | ${{ steps.fetch.outputs.count }} |
             
-            ### 📥 Usage
+            ### Usage
             Add to AdGuard Home → Filters → DNS Blocklists:
             ```
             https://github.com/${{ github.repository }}/releases/download/latest/merged.txt
@@ -115,23 +108,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Cleanup ─────────────────────────────────────────────
-      - name: 🧹 Cleanup Old Cache
+      - name: Cleanup Cache
         if: always()
         run: find .cache -mtime +7 -delete 2>/dev/null || true
 
-      # ── Summary ─────────────────────────────────────────────
-      - name: 📝 Job Summary
+      - name: Summary
         if: always()
         run: |
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## 📊 Build Summary
+          ## Build Summary
           
-          | 📈 Metric | Value |
-          |-----------|-------|
-          | 📝 Rules | **${{ steps.stats.outputs.rules || 'N/A' }}** |
-          | 📦 Size | ${{ steps.stats.outputs.size || 'N/A' }} |
-          | 🌐 Sources | ${{ steps.fetch.outputs.count || 'N/A' }} |
-          | ⏱️ Fetch | ${{ steps.fetch.outputs.time || '?' }} |
-          | ⏱️ Compile | ${{ steps.compile.outputs.time || '?' }} |
+          | Metric | Value |
+          |--------|-------|
+          | Rules | ${{ steps.stats.outputs.rules || 'N/A' }} |
+          | Size | ${{ steps.stats.outputs.size || 'N/A' }} |
+          | Sources | ${{ steps.fetch.outputs.count || 'N/A' }} |
+          | Fetch Time | ${{ steps.fetch.outputs.time || '?' }} |
+          | Compile Time | ${{ steps.compile.outputs.time || '?' }} |
           EOF

@@ -1,28 +1,32 @@
 # Blocklist Merger
 
-Combines multiple DNS blocklists into one optimized file for AdGuard Home.
-
-## How to Use
-
-Add this URL to **AdGuard Home** → **Filters** → **DNS Blocklists**:
-
-```
-https://github.com/YOUR_USERNAME/YOUR_REPO/releases/download/latest/merged.txt
-```
-
-The list updates automatically every 12 hours.
+> [!NOTE]  
+> Made for personal use, but feel free to use it too.
 
 ## What It Does
 
-1. Downloads 70+ public blocklists
-2. Removes duplicates and redundant rules
-3. Outputs a single clean file
+- Fetches 80+ public DNS blocklists
+- Removes comments, cosmetic rules, and invalid entries
+- Deduplicates intelligently (subdomains covered by parent rules are removed)
+- Keeps only rules compatible with AdGuard Home
+- Updates automatically every 12 hours
 
-### Smart Deduplication
+## Usage
 
-If `||example.com^` exists, it already blocks all subdomains like `ads.example.com`. So those subdomain rules are removed - they're redundant.
+1. Open **AdGuard Home**
+2. Go to **Filters → DNS blocklists**
+3. Click **Add blocklist**
+4. Paste this URL:
 
-Same with TLD wildcards: `||*.xyz^` covers every `.xyz` domain, so individual rules aren't needed.
+```
+https://github.com/MissionWAR/Blocklist-Merger/releases/download/latest/merged.txt
+```
+
+## Sources
+
+Upstream blocklist URLs are in [`config/sources.txt`](config/sources.txt).
+
+Each list is maintained by its original author.
 
 ## Building Locally
 
@@ -30,6 +34,15 @@ Same with TLD wildcards: `||*.xyz^` covers every `.xyz` domain, so individual ru
 pip install .
 python run.py all
 ```
+
+## Thanks
+
+- **AdGuard Team** — for the idea and documentation
+- **Blocklist maintainers** — for keeping lists updated
+- **Open-source community** — tools that made this possible
+
+> [!CAUTION]  
+> Please respect the licenses of the original blocklists if you fork this project.
 
 ## License
 
