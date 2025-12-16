@@ -96,6 +96,7 @@ class CompileStats:
     duplicate_pruned: int = 0
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
+    hosts_compressed: int = 0  # Hosts rules converted to ABP format
 
 
 # ============================================================================
@@ -369,20 +370,38 @@ def compile_rules(
             continue
         
         # =====================================================================
-        # Hosts-style rules
+        # Hosts-style rules - COMPRESS TO ABP FORMAT
         # =====================================================================
         ip, domains = extract_hosts_info(line)
         if ip and domains:
-            hosts_lines.append((line, ip, domains))
+            for domain in domains:
+                # Skip local hostnames
+                if domain in LOCAL_HOSTNAMES:
+                    stats.local_hostname_pruned += 1
+                    continue
+                
+                # Convert to ABP format: 0.0.0.0 example.com → ||example.com^
+                abp_rule = f"||{domain}^"
+                if domain not in abp_rules:
+                    abp_rules[domain] = (abp_rule, frozenset(), False)
+                    stats.hosts_compressed += 1
+                else:
+                    stats.duplicate_pruned += 1
             continue
         
         # =====================================================================
-        # Plain domain
+        # Plain domain - COMPRESS TO ABP FORMAT
         # =====================================================================
         if PLAIN_DOMAIN_PATTERN.match(line):
             domain = normalize_domain(line)
             if domain and domain not in LOCAL_HOSTNAMES:
-                plain_domains.append((line, domain))
+                # Convert to ABP format: example.com → ||example.com^
+                abp_rule = f"||{domain}^"
+                if domain not in abp_rules:
+                    abp_rules[domain] = (abp_rule, frozenset(), False)
+                    stats.hosts_compressed += 1  # Reusing stat for both hosts and plain
+                else:
+                    stats.duplicate_pruned += 1
             else:
                 stats.local_hostname_pruned += 1
             continue

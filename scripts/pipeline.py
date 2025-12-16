@@ -56,6 +56,7 @@ def process_files(input_dir: str, output_file: str, whitelist_file: str | None =
         "duplicate_pruned": 0,
         "whitelist_conflict_pruned": 0,
         "local_hostname_pruned": 0,
+        "hosts_compressed": 0,
     }
     
     # =========================================================================
@@ -112,6 +113,7 @@ def process_files(input_dir: str, output_file: str, whitelist_file: str | None =
     stats["duplicate_pruned"] = compile_stats.duplicate_pruned
     stats["whitelist_conflict_pruned"] = compile_stats.whitelist_conflict_pruned
     stats["local_hostname_pruned"] = compile_stats.local_hostname_pruned
+    stats["hosts_compressed"] = compile_stats.hosts_compressed
     
     # Add format breakdown
     stats["abp_kept"] = compile_stats.abp_kept
@@ -164,7 +166,7 @@ def print_summary(stats: dict[str, int], whitelist_file: str | None = None) -> N
     print(f"   Local hostnames:   {stats['local_hostname_pruned']:>10,}")
     
     print(f"\n📦 Output breakdown:")
-    print(f"   ABP rules:   {stats.get('abp_kept', 0):>10,}")
+    print(f"   ABP rules:   {stats.get('abp_kept', 0):>10,} (incl. {stats.get('hosts_compressed', 0):,} compressed)")
     print(f"   Hosts rules: {stats.get('hosts_kept', 0):>10,}")
     print(f"   Plain rules: {stats.get('plain_kept', 0):>10,}")
     print(f"   Other rules: {stats.get('other_kept', 0):>10,}")
