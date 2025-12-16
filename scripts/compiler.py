@@ -84,19 +84,15 @@ class CompileStats:
     
     # By format
     abp_kept: int = 0
-    hosts_kept: int = 0
-    plain_kept: int = 0
-    allow_kept: int = 0
     other_kept: int = 0
     
     # Pruning
     abp_subdomain_pruned: int = 0
     tld_wildcard_pruned: int = 0
-    cross_format_pruned: int = 0
     duplicate_pruned: int = 0
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
-    hosts_compressed: int = 0  # Hosts rules converted to ABP format
+    hosts_compressed: int = 0  # Hosts/plain rules converted to ABP format
 
 
 # ============================================================================
@@ -286,7 +282,6 @@ def should_prune_by_modifiers(child_mods: frozenset, parent_mods: frozenset) -> 
 def compile_rules(
     lines: list[str],
     output_file: str,
-    whitelist_file: str | None = None,
 ) -> CompileStats:
     """
     Compile and deduplicate rules with two-phase approach.
@@ -526,15 +521,6 @@ def compile_rules(
         for rule in kept_other:
             f.write(rule + "\n")
             stats.other_kept += 1
-    
-    # Write whitelist file if requested
-    if whitelist_file and allow_rules:
-        wl_path = Path(whitelist_file)
-        wl_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(wl_path, "w", encoding="utf-8", newline="\n") as f:
-            for rule in allow_rules:
-                f.write(rule + "\n")
-        stats.allow_kept = len(allow_rules)
     
     stats.total_output = stats.abp_kept + stats.other_kept
     
