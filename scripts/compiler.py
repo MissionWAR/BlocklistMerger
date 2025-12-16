@@ -1,16 +1,44 @@
 #!/usr/bin/env python3
 """
-compiler.py
+compiler.py - Blocklist Compiler with Format Compression and Modifier-Aware Deduplication
 
-Modifier-aware deduplication with format compression for AdGuard Home.
+This module is the core of the blocklist merging pipeline. It takes cleaned rules
+from multiple blocklists and produces a minimal, deduplicated output file.
 
-Key features:
-- Format compression: hosts and plain domains converted to ABP format
-- Two-phase ABP processing (collect all, then prune subdomains)
-- TLD wildcard pruning (||*.tld^ covers all domains in that TLD)
-- Modifier-aware pruning (respects $important, $denyallow, $dnstype)
-- Whitelist conflict removal (@@rules cause blocking rules to be skipped)
+DESIGN GOALS:
+    1. Maximum blocking coverage - Every domain that should be blocked, IS blocked
+    2. Minimum rule count - Smaller lists = faster loading, less memory in AdGuard Home
+    3. Only output blocking rules - No whitelist/exception rules (@@) in output
+
+KEY INSIGHT - FORMAT COMPRESSION:
+    Instead of handling hosts, plain domains, and ABP rules separately, we CONVERT
+    everything to ABP format during parsing:
+    
+        0.0.0.0 ads.example.com  →  ||ads.example.com^
+        ads.example.com          →  ||ads.example.com^
+        ||ads.example.com^       →  ||ads.example.com^  (unchanged)
+    
+    This unification enables subdomain deduplication across ALL input formats:
+    If we have ||example.com^, then ||sub.example.com^ becomes redundant regardless
+    of whether it came from a hosts file or an ABP list.
+
+MODIFIER-AWARE PRUNING:
+    Not all subdomain rules can be pruned! AdGuard Home modifiers change behavior:
+    
+    - $important    → Child with $important must NOT be pruned by parent without it
+    - $badfilter    → Never prune by a $badfilter parent (it disables rules, not blocks)
+    - $dnsrewrite   → Never prune (has custom DNS response behavior)
+    - $denyallow    → Never prune (excludes specific domains)
+    - $dnstype      → Only prune if parent blocks ALL types
+    - $client/$ctag → Parent with restrictions can't prune unrestricted child
+
+WHITELIST HANDLING:
+    @@rules (whitelist/exception rules) are used ONLY to remove conflicting blocking
+    rules. The @@rules themselves are NOT output. This keeps the output file simple.
+
+See docs/LOGIC.md for detailed examples of each pruning rule.
 """
+
 from __future__ import annotations
 
 import re
@@ -218,57 +246,40 @@ def walk_parent_domains(domain: str) -> tuple[str, ...]:
 
 def should_prune_by_modifiers(child_mods: frozenset, parent_mods: frozenset) -> bool:
     """
-    Check if child rule can be pruned given parent's modifiers.
+    Determine if a child rule is redundant given the parent's modifiers.
     
-    Returns True if child is redundant (can be pruned).
+    Returns True if child can be safely pruned (parent covers it).
     
-    AGH Supported modifiers:
-    - $important: increases priority
-    - $badfilter: disables matching rules
-    - $dnsrewrite: rewrites DNS responses
-    - $denyallow: excludes domains from blocking
-    - $dnstype: filters by DNS record type (A, AAAA, CNAME, etc.)
-    - $client: client-specific (not in public lists)
-    - $ctag: client tags (not in public lists)
+    Key rules:
+    - $badfilter parent: Never prune (it disables rules, doesn't block)
+    - $important child: Keep if parent lacks $important (child takes priority)
+    - $dnsrewrite/$denyallow/$badfilter child: Never prune (special behavior)
+    - $dnstype mismatch: Child blocking ALL types not covered by parent blocking ONE type
+    - $client/$ctag parent: Child without restrictions blocks more broadly
     """
-    # Never prune if child has $important but parent doesn't
-    # Child's $important makes it take priority over parent
+    # $badfilter disables rules, it doesn't block anything
+    if "badfilter" in parent_mods:
+        return False
+    
+    # Child's $important overrides non-important parent
     if "important" in child_mods and "important" not in parent_mods:
         return False
     
-    # Never prune if child has behavior-modifying modifiers
-    # These rules have specific behaviors that parent can't cover
+    # Special behavior modifiers are never redundant
     if child_mods & {"badfilter", "dnsrewrite", "denyallow"}:
         return False
     
-    # Never prune if child has $dnstype (unless parent has same dnstype)
-    # Because ||example.com^$dnstype=A only blocks A records,
-    # it doesn't cover ||sub.example.com^$dnstype=AAAA
+    # Handle $dnstype: parent blocking ALL types covers child blocking specific type,
+    # but not vice versa (child blocking ALL not covered by parent blocking ONE)
     if "dnstype" in child_mods:
-        # If parent also has dnstype, we'd need to compare values
-        # For safety, if either has dnstype, don't prune unless both lack it
-        # (We don't have the values here, so be conservative)
-        if "dnstype" not in parent_mods:
-            # Parent blocks ALL types, child blocks specific type
-            # Parent DOES cover child, so pruning is OK
-            pass
-        else:
-            # Both have dnstype - can't tell if same value, be safe
-            return False
+        if "dnstype" in parent_mods:
+            return False  # Can't compare values, be conservative
+        # else: parent blocks ALL types, covers child's specific type
+    elif "dnstype" in parent_mods:
+        return False  # Child blocks ALL types, parent only blocks one type
     
-    # If parent has $dnstype but child doesn't:
-    # Parent blocks only specific type, child blocks ALL types
-    # Child is MORE restrictive, should NOT be pruned
-    if "dnstype" in parent_mods and "dnstype" not in child_mods:
-        return False
-    
-    # For other modifiers, child must not have modifiers parent lacks
-    # This ensures child isn't more specific than parent
-    excluded = {"important", "badfilter", "dnsrewrite", "denyallow", "dnstype"}
-    child_relevant = child_mods - excluded
-    parent_relevant = parent_mods - excluded
-    
-    if child_relevant and not child_relevant.issubset(parent_relevant):
+    # $client/$ctag restrict WHO is blocked. Unrestricted child is more general.
+    if (parent_mods & {"client", "ctag"}) and not (child_mods & {"client", "ctag"}):
         return False
     
     return True
@@ -472,11 +483,28 @@ def compile_rules(
         
         # Check if any parent domain blocks this
         should_prune = False
-        for parent in walk_parent_domains(clean_domain):
-            if parent in abp_blocking_domains:
-                # Find parent's modifiers
+        
+        # For wildcard rules (||*.example.com^), check if exact domain rule exists
+        # ||example.com^ covers ||*.example.com^ because it blocks domain AND all subdomains
+        if is_wildcard and clean_domain in abp_rules:
+            parent_mods = abp_rules[clean_domain][1]
+            if should_prune_by_modifiers(modifiers, parent_mods):
+                should_prune = True
+        
+        # Check parent domains (for both regular and wildcard rules)
+        if not should_prune:
+            for parent in walk_parent_domains(clean_domain):
+                # Check exact parent rule
                 if parent in abp_rules:
                     parent_mods = abp_rules[parent][1]
+                    if should_prune_by_modifiers(modifiers, parent_mods):
+                        should_prune = True
+                        break
+                
+                # Check wildcard parent rule (||*.parent^ covers ||sub.parent^)
+                wildcard_key = f"*.{parent}"
+                if wildcard_key in abp_rules:
+                    parent_mods = abp_rules[wildcard_key][1]
                     if should_prune_by_modifiers(modifiers, parent_mods):
                         should_prune = True
                         break
@@ -498,6 +526,10 @@ def compile_rules(
             kept_other.append(rule)
         else:
             stats.duplicate_pruned += 1
+    
+    # NOTE: Whitelist/exception rules (@@) are intentionally NOT output.
+    # They were only used internally to remove conflicting blocking rules.
+    # The final output contains only blocking rules.
     
     # =========================================================================
     # OUTPUT
@@ -532,34 +564,29 @@ def compile_rules(
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python -m scripts.compiler <input_file> <output_file> [whitelist_file]")
+        print("Usage: python -m scripts.compiler <input_file> <output_file>")
         sys.exit(1)
     
     input_file = sys.argv[1]
     output_file = sys.argv[2]
-    whitelist_file = sys.argv[3] if len(sys.argv) > 3 else None
     
     # Read input
     with open(input_file, encoding="utf-8-sig", errors="replace") as f:
         lines = f.readlines()
     
-    stats = compile_rules(lines, output_file, whitelist_file)
+    stats = compile_rules(lines, output_file)
     
     print(f"\nCompilation complete:")
     print(f"  Input:  {stats.total_input:,} rules")
     print(f"  Output: {stats.total_output:,} rules")
     print(f"  Reduction: {(1 - stats.total_output / max(stats.total_input, 1)) * 100:.1f}%")
-    print(f"\nBy format:")
-    print(f"  ABP:   {stats.abp_kept:,}")
-    print(f"  Hosts: {stats.hosts_kept:,}")
-    print(f"  Plain: {stats.plain_kept:,}")
-    print(f"  Other: {stats.other_kept:,}")
-    if whitelist_file:
-        print(f"  Allow: {stats.allow_kept:,} (separate file)")
+    print(f"\nBy type:")
+    print(f"  ABP rules:   {stats.abp_kept:,} (incl. {stats.hosts_compressed:,} compressed from hosts/plain)")
+    print(f"  Other rules: {stats.other_kept:,}")
     print(f"\nPruned:")
     print(f"  ABP subdomains:     {stats.abp_subdomain_pruned:,}")
     print(f"  TLD wildcards:      {stats.tld_wildcard_pruned:,}")
-    print(f"  Cross-format (ABP): {stats.cross_format_pruned:,}")
     print(f"  Duplicates:         {stats.duplicate_pruned:,}")
     print(f"  Whitelist conflicts:{stats.whitelist_conflict_pruned:,}")
     print(f"  Local hostnames:    {stats.local_hostname_pruned:,}")
+
