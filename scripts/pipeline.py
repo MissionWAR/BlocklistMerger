@@ -5,13 +5,13 @@ pipeline.py
 Main processing pipeline for blocklist compilation.
 
 Usage:
-    python -m scripts.pipeline <input_dir> <output_file> [whitelist_file]
+    python -m scripts.pipeline <input_dir> <output_file>
 
 Pipeline stages:
 1. Read all files from input_dir
 2. Clean each rule (remove comments, cosmetic, unsupported modifiers)
-3. Compile (deduplicate, prune subdomains, cross-format optimization)
-4. Write merged output + optional whitelist file
+3. Compile (compress formats, deduplicate, prune subdomains)
+4. Write merged output
 """
 from __future__ import annotations
 

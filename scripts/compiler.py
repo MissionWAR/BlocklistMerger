@@ -2,15 +2,14 @@
 """
 compiler.py
 
-Modifier-aware deduplication and cross-format optimization for AdGuard Home.
+Modifier-aware deduplication with format compression for AdGuard Home.
 
 Key features:
-- Two-phase ABP processing (collect all, then prune)
+- Format compression: hosts and plain domains converted to ABP format
+- Two-phase ABP processing (collect all, then prune subdomains)
 - TLD wildcard pruning (||*.tld^ covers all domains in that TLD)
-- Cross-format optimization (ABP > hosts > plain)
-- Hosts multi-domain splitting (remove only covered domains)
-- Whitelist extraction to separate file
-- Modifier-aware pruning (respects $important, $denyallow)
+- Modifier-aware pruning (respects $important, $denyallow, $dnstype)
+- Whitelist conflict removal (@@rules cause blocking rules to be skipped)
 """
 from __future__ import annotations
 
