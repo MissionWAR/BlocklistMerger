@@ -1,4 +1,4 @@
-name: Merge Blocklists
+name: Update Blocklist
 
 on:
   workflow_dispatch:
@@ -6,117 +6,132 @@ on:
     - cron: "0 */12 * * *"
 
 env:
-  RAW_OUT: lists/_raw
-  MERGED_OUT: lists/merged.txt
-  WHITELIST_OUT: lists/whitelist.txt
   SOURCES: config/sources.txt
+  RAW_DIR: lists/_raw
+  OUTPUT: lists/merged.txt
+  WHITELIST: lists/whitelist.txt
 
 permissions:
   contents: write
 
 concurrency:
-  group: merge-blocklists
+  group: blocklist-update
   cancel-in-progress: true
 
 jobs:
-  update:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
-      - name: Checkout
+      # ── Setup ───────────────────────────────────────────────
+      - name: 📥 Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          sparse-checkout: |
-            scripts
-            config
-            pyproject.toml
 
-      - name: Set up Python
+      - name: 🐍 Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
-      - name: Install uv and dependencies
-        run: |
-          pip install -q uv
-          uv pip install --system -q .
+      - name: 📦 Install Dependencies
+        run: pip install -q .
 
-      - name: Restore cache
+      # ── Cache ───────────────────────────────────────────────
+      - name: 💾 Restore Blocklist Cache
         uses: actions/cache@v4
         with:
           path: .cache
-          key: blocklists-${{ github.run_id }}
-          restore-keys: blocklists-
+          key: sources-${{ hashFiles('config/sources.txt') }}-${{ github.run_number }}
+          restore-keys: |
+            sources-${{ hashFiles('config/sources.txt') }}-
+            sources-
 
-      - name: Fetch sources
+      # ── Process ─────────────────────────────────────────────
+      - name: 🌐 Fetch Sources
         id: fetch
         run: |
-          start=$(date +%s)
+          START=$(date +%s)
           python -m scripts.fetch_sources \
             --sources "$SOURCES" \
-            --outdir "$RAW_OUT" \
+            --outdir "$RAW_DIR" \
             --cache .cache \
             --concurrency 10 \
             --timeout 25
-          echo "seconds=$(($(date +%s) - start))" >> $GITHUB_OUTPUT
-          echo "files=$(find "$RAW_OUT" -name "*.txt" | wc -l)" >> $GITHUB_OUTPUT
+          echo "time=$(($(date +%s) - START))s" >> $GITHUB_OUTPUT
+          echo "count=$(find "$RAW_DIR" -name '*.txt' | wc -l)" >> $GITHUB_OUTPUT
 
-      - name: Compile
+      - name: ⚙️ Compile & Deduplicate
         id: compile
         run: |
-          start=$(date +%s)
-          python -m scripts.pipeline "$RAW_OUT" "$MERGED_OUT" "$WHITELIST_OUT"
-          echo "seconds=$(($(date +%s) - start))" >> $GITHUB_OUTPUT
+          START=$(date +%s)
+          python -m scripts.pipeline "$RAW_DIR" "$OUTPUT" "$WHITELIST"
+          echo "time=$(($(date +%s) - START))s" >> $GITHUB_OUTPUT
 
-      - name: Stats
+      - name: 📊 Calculate Stats
         id: stats
         run: |
-          echo "rules=$(wc -l < "$MERGED_OUT")" >> $GITHUB_OUTPUT
-          echo "size=$(du -h "$MERGED_OUT" | cut -f1)" >> $GITHUB_OUTPUT
-          echo "whitelist=$(wc -l < "$WHITELIST_OUT" 2>/dev/null || echo 0)" >> $GITHUB_OUTPUT
+          RULES=$(wc -l < "$OUTPUT")
+          SIZE=$(du -h "$OUTPUT" | cut -f1)
+          echo "rules=$RULES" >> $GITHUB_OUTPUT
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
 
-      - name: Validate
+      # ── Validate ────────────────────────────────────────────
+      - name: ✅ Validate Output
         run: |
           RULES=${{ steps.stats.outputs.rules }}
-          [ "$RULES" -ge 100000 ] || { echo "::error::Too few rules: $RULES"; exit 1; }
+          MIN=1000000
+          if [ "$RULES" -lt "$MIN" ]; then
+            echo "::error::❌ Only $RULES rules (expected >$MIN)"
+            exit 1
+          fi
+          echo "✅ Validation passed: $RULES rules"
 
-      - name: Release
+      # ── Release ─────────────────────────────────────────────
+      - name: 🚀 Publish Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
           name: Merged Blocklist
           body: |
-            ## Merged Blocklist
+            ## 📋 Merged Blocklist
             
-            | Stat | Value |
-            |------|-------|
-            | Rules | ${{ steps.stats.outputs.rules }} |
+            | 📈 Stat | Value |
+            |---------|-------|
+            | Rules | **${{ steps.stats.outputs.rules }}** |
             | Size | ${{ steps.stats.outputs.size }} |
-            | Sources | ${{ steps.fetch.outputs.files }} |
+            | Sources | ${{ steps.fetch.outputs.count }} |
             
-            **Usage**: Add this URL to AdGuard Home:
+            ### 📥 Usage
+            Add to AdGuard Home → Filters → DNS Blocklists:
             ```
             https://github.com/${{ github.repository }}/releases/download/latest/merged.txt
             ```
           files: |
-            ${{ env.MERGED_OUT }}
-            ${{ env.WHITELIST_OUT }}
+            ${{ env.OUTPUT }}
+            ${{ env.WHITELIST }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cleanup
+      # ── Cleanup ─────────────────────────────────────────────
+      - name: 🧹 Cleanup Old Cache
         if: always()
-        run: find .cache -mtime +3 -delete 2>/dev/null || true
+        run: find .cache -mtime +7 -delete 2>/dev/null || true
 
-      - name: Summary
+      # ── Summary ─────────────────────────────────────────────
+      - name: 📝 Job Summary
         if: always()
         run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          | Metric | Value |
-          |--------|-------|
-          | Rules | ${{ steps.stats.outputs.rules || 'N/A' }} |
-          | Fetch | ${{ steps.fetch.outputs.seconds || '?' }}s |
-          | Compile | ${{ steps.compile.outputs.seconds || '?' }}s |
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          ## 📊 Build Summary
+          
+          | 📈 Metric | Value |
+          |-----------|-------|
+          | 📝 Rules | **${{ steps.stats.outputs.rules || 'N/A' }}** |
+          | 📦 Size | ${{ steps.stats.outputs.size || 'N/A' }} |
+          | 🌐 Sources | ${{ steps.fetch.outputs.count || 'N/A' }} |
+          | ⏱️ Fetch | ${{ steps.fetch.outputs.time || '?' }} |
+          | ⏱️ Compile | ${{ steps.compile.outputs.time || '?' }} |
           EOF
