@@ -38,11 +38,15 @@ jobs:
       - name: Install Dependencies
         run: pip install -q .
 
+      - name: Get Cache Key
+        id: cache-key
+        run: echo "week=$(date -u +%Y-%V)" >> $GITHUB_OUTPUT
+
       - name: Restore Cache
         uses: actions/cache@v4
         with:
           path: .cache
-          key: blocklists-${{ hashFiles('config/sources.txt') }}
+          key: blocklists-${{ steps.cache-key.outputs.week }}
           restore-keys: blocklists-
 
       - name: Fetch Sources
