@@ -308,9 +308,7 @@ def compile_rules(
     allow_rules: list[str] = []
     allow_domains: set[str] = set()  # Domains covered by @@rules
     
-    # Other formats (to process after ABP)
-    hosts_lines: list[tuple[str, str, list[str]]] = []  # (original, ip, domains)
-    plain_domains: list[tuple[str, str]] = []  # (original, domain)
+    # Other rules (regex, partial matches, etc.)
     other_rules: list[str] = []
     
     for line in lines:
@@ -495,65 +493,7 @@ def compile_rules(
             pruned_abp[domain] = (rule, modifiers, is_wildcard)
     
     # =========================================================================
-    # PHASE 4: Process hosts rules (split multi-domain, prune covered)
-    # =========================================================================
-    
-    kept_hosts: dict[str, str] = {}  # domain -> original line or rebuilt line
-    
-    for original, ip, domains in hosts_lines:
-        kept_domains = []
-        
-        for domain in domains:
-            if domain in LOCAL_HOSTNAMES:
-                stats.local_hostname_pruned += 1
-                continue
-            
-            if is_whitelisted(domain):
-                stats.whitelist_conflict_pruned += 1
-                continue
-            
-            if is_covered_by_abp(domain):
-                stats.cross_format_pruned += 1
-                continue
-            
-            # Check if already in hosts
-            if domain in kept_hosts:
-                stats.duplicate_pruned += 1
-                continue
-            
-            kept_domains.append(domain)
-        
-        # Add remaining domains
-        for domain in kept_domains:
-            kept_hosts[domain] = f"{ip} {domain}"
-    
-    # =========================================================================
-    # PHASE 5: Process plain domains
-    # =========================================================================
-    
-    kept_plain: dict[str, str] = {}  # domain -> original
-    
-    for original, domain in plain_domains:
-        if is_whitelisted(domain):
-            stats.whitelist_conflict_pruned += 1
-            continue
-        
-        if is_covered_by_abp(domain):
-            stats.cross_format_pruned += 1
-            continue
-        
-        if domain in kept_hosts:
-            stats.duplicate_pruned += 1
-            continue
-        
-        if domain in kept_plain:
-            stats.duplicate_pruned += 1
-            continue
-        
-        kept_plain[domain] = original
-    
-    # =========================================================================
-    # PHASE 6: Deduplicate other rules
+    # PHASE 4: Deduplicate other rules (regex, partial matches, etc.)
     # =========================================================================
     
     seen_other: set[str] = set()
@@ -582,17 +522,7 @@ def compile_rules(
             f.write(rule + "\n")
             stats.abp_kept += 1
         
-        # Hosts rules
-        for domain, rule in kept_hosts.items():
-            f.write(rule + "\n")
-            stats.hosts_kept += 1
-        
-        # Plain rules
-        for domain, rule in kept_plain.items():
-            f.write(rule + "\n")
-            stats.plain_kept += 1
-        
-        # Other rules
+        # Other rules (regex, partial matches, etc.)
         for rule in kept_other:
             f.write(rule + "\n")
             stats.other_kept += 1
@@ -606,7 +536,7 @@ def compile_rules(
                 f.write(rule + "\n")
         stats.allow_kept = len(allow_rules)
     
-    stats.total_output = stats.abp_kept + stats.hosts_kept + stats.plain_kept + stats.other_kept
+    stats.total_output = stats.abp_kept + stats.other_kept
     
     return stats
 
