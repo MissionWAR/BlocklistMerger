@@ -1,15 +1,37 @@
 #!/usr/bin/env python3
 """
-cleaner.py
+cleaner.py - Rule Filtering and Validation for AdGuard Home
 
-Clean and validate blocklist rules for AdGuard Home compatibility.
+This module filters blocklist rules to keep only those compatible with AdGuard Home.
+It's the first stage of the pipeline, running BEFORE the compiler.
 
-Key operations:
-- Remove comments (full and trailing inline)
-- Discard cosmetic/element-hiding rules (AGH is DNS-only)
-- Discard rules with unsupported modifiers (to avoid false positives)
-- Keep only AGH-compatible rules
+CRITICAL UNDERSTANDING - DNS vs Browser Blocking:
+    AdGuard Home is a DNS-level blocker, NOT a browser extension. This means:
+    
+    - DNS only sees domain names, not URLs, request types, or page content
+    - Cosmetic rules (##) that hide page elements are USELESS at DNS level
+    - Modifiers like $script, $image, $third-party are browser-only concepts
+    
+    Example: ||ads.example.com^$script,third-party
+    - In browser: Block ads.example.com ONLY when loading scripts from third-party context
+    - In DNS: ??? DNS can't know if a request is for a script or from third-party
+    
+    If we stripped the modifiers, we'd get ||ads.example.com^ which blocks EVERYTHING
+    from that domain - a much more aggressive rule than intended! This could break sites.
+
+DESIGN DECISION - Discard, Don't Strip:
+    Rules with unsupported modifiers are COMPLETELY DISCARDED, not stripped.
+    This prevents false positives and unexpected site breakage.
+    
+    A smaller, more accurate blocklist is better than a larger, overly-aggressive one.
+
+KEY OPERATIONS:
+    1. Remove comments (# and ! lines)
+    2. Discard cosmetic/element-hiding rules (##, #@#, #$#, etc.)
+    3. Discard rules with browser-only modifiers
+    4. Keep hosts, plain domains, and ABP rules with supported modifiers
 """
+
 from __future__ import annotations
 
 import re

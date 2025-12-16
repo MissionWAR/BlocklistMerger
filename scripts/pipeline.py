@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 from scripts.cleaner import clean_line
-from scripts.compiler import compile_rules, CompileStats
+from scripts.compiler import compile_rules
 
 
 def process_files(input_dir: str, output_file: str) -> dict[str, int]:
