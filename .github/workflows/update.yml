@@ -3,20 +3,17 @@ name: Merge Blocklists
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */12 * * *"   # Every 12 hours (00:00, 12:00 UTC)
+    - cron: "0 */12 * * *"
 
 env:
   RAW_OUT: lists/_raw
   MERGED_OUT: lists/merged.txt
-  FETCH_CONCURRENCY: 8
-  FETCH_RETRIES: 3
-  FETCH_TIMEOUT: 30
-  PYTHON_VERSION: "3.11"
+  WHITELIST_OUT: lists/whitelist.txt
+  SOURCES: config/sources.txt
 
 permissions:
   contents: write
 
-# Ensure only a single workflow run is active at a time
 concurrency:
   group: merge-blocklists
   cancel-in-progress: true
@@ -24,187 +21,102 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
 
     steps:
-      # ============================================
-      # Setup
-      # ============================================
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+          sparse-checkout: |
+            scripts
+            config
+            pyproject.toml
 
-      - name: Set up Python ${{ env.PYTHON_VERSION }}
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-          cache: 'pip'
-          cache-dependency-path: requirements.txt
+          python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install uv and dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install --no-cache-dir -r requirements.txt
-          echo "✅ Dependencies installed"
+          pip install -q uv
+          uv pip install --system -q .
 
-      # ============================================
-      # Cache slot (weekly)
-      # ============================================
-      - name: Compute cache slot (weekly)
-        id: cache-slot
-        run: |
-          echo "CACHE_SLOT=$(date -u +%G-%V)" >> $GITHUB_ENV
-
-      # ============================================
-      # Caching
-      # ============================================
-      - name: Restore blocklist caches
+      - name: Restore cache
         uses: actions/cache@v4
         with:
           path: .cache
-          key: blocklists-cache-v1-${{ env.CACHE_SLOT }}
-          restore-keys: |
-            blocklists-cache-v1-
+          key: blocklists-${{ github.run_id }}
+          restore-keys: blocklists-
 
-      # ============================================
-      # Fetch & Process
-      # ============================================
-      - name: Fetch blocklist sources
+      - name: Fetch sources
         id: fetch
         run: |
-          set -euo pipefail
-          echo "🔄 Fetching blocklists from sources..."
-
-          fetch_start=$(date +%s)
-          
+          start=$(date +%s)
           python -m scripts.fetch_sources \
-            --sources sources.txt \
-            --outdir "${{ env.RAW_OUT }}" \
+            --sources "$SOURCES" \
+            --outdir "$RAW_OUT" \
             --cache .cache \
-            --concurrency "${{ env.FETCH_CONCURRENCY }}" \
-            --retries "${{ env.FETCH_RETRIES }}" \
-            --timeout "${{ env.FETCH_TIMEOUT }}"
+            --concurrency 10 \
+            --timeout 25
+          echo "seconds=$(($(date +%s) - start))" >> $GITHUB_OUTPUT
+          echo "files=$(find "$RAW_OUT" -name "*.txt" | wc -l)" >> $GITHUB_OUTPUT
 
-          fetch_end=$(date +%s)
-          echo "fetch_seconds=$((fetch_end - fetch_start))" >> $GITHUB_OUTPUT
-          
-          RAW_COUNT=$(find "${{ env.RAW_OUT }}" -type f -name "*.txt" | wc -l)
-          echo "raw_files=$RAW_COUNT" >> $GITHUB_OUTPUT
-          echo "✅ Fetched $RAW_COUNT source files"
-
-      - name: Process blocklists through pipeline
-        id: pipeline
+      - name: Compile
+        id: compile
         run: |
-          set -euo pipefail
-          echo "⚙️ Processing through pipeline..."
+          start=$(date +%s)
+          python -m scripts.pipeline "$RAW_OUT" "$MERGED_OUT" "$WHITELIST_OUT"
+          echo "seconds=$(($(date +%s) - start))" >> $GITHUB_OUTPUT
 
-          pipeline_start=$(date +%s)
-          python -m scripts.pipeline "${{ env.RAW_OUT }}" "${{ env.MERGED_OUT }}"
-          pipeline_end=$(date +%s)
-          
-          echo "pipeline_seconds=$((pipeline_end - pipeline_start))" >> $GITHUB_OUTPUT
-          
-          if [ ! -f "${{ env.MERGED_OUT }}" ]; then
-            echo "❌ ERROR: Merged output file not created"
-            exit 1
-          fi
-          
-          echo "✅ Pipeline completed successfully"
-
-      - name: Calculate statistics
+      - name: Stats
         id: stats
         run: |
-          set -euo pipefail
-          
-          TOTAL_RULES=$(grep -cvE '^\s*($|[#!])' "${{ env.MERGED_OUT }}" || echo "0")
-          FILE_SIZE=$(du -h "${{ env.MERGED_OUT }}" | cut -f1)
-          CACHE_FILES=$(find .cache -type f -name "*.txt" 2>/dev/null | wc -l || echo "0")
-          
-          echo "total_rules=$TOTAL_RULES" >> $GITHUB_OUTPUT
-          echo "file_size=$FILE_SIZE" >> $GITHUB_OUTPUT
-          echo "TOTAL_RULES=$TOTAL_RULES" >> $GITHUB_ENV
-          
-          echo "📊 Statistics:"
-          echo "  - Total rules: $TOTAL_RULES"
-          echo "  - File size: $FILE_SIZE"
-          echo "  - Cached sources: $CACHE_FILES"
+          echo "rules=$(wc -l < "$MERGED_OUT")" >> $GITHUB_OUTPUT
+          echo "size=$(du -h "$MERGED_OUT" | cut -f1)" >> $GITHUB_OUTPUT
+          echo "whitelist=$(wc -l < "$WHITELIST_OUT" 2>/dev/null || echo 0)" >> $GITHUB_OUTPUT
 
-      # ============================================
-      # Validation
-      # ============================================
-      - name: Validate output
+      - name: Validate
         run: |
-          set -euo pipefail
-          
-          MIN_RULES=1000
-          if [ "${{ steps.stats.outputs.total_rules }}" -lt "$MIN_RULES" ]; then
-            echo "⚠️ WARNING: Only ${{ steps.stats.outputs.total_rules }} rules (expected >$MIN_RULES)"
-            exit 1
-          fi
-          
-          echo "✅ Output validated (${{ steps.stats.outputs.total_rules }} rules)"
+          RULES=${{ steps.stats.outputs.rules }}
+          [ "$RULES" -ge 100000 ] || { echo "::error::Too few rules: $RULES"; exit 1; }
 
-      # ============================================
-      # Release
-      # ============================================
-      - name: Generate release notes
-        id: release_notes
-        if: steps.stats.outputs.total_rules != '0'
-        run: |
-          cat > release_notes.md << EOF
-          ## Merged Blocklist
-          
-          **Updated**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          
-          ### Statistics
-          - **Total Rules**: ${{ steps.stats.outputs.total_rules }}
-          - **File Size**: ${{ steps.stats.outputs.file_size }}
-          - **Sources Processed**: ${{ steps.fetch.outputs.raw_files }}
-          
-          ### Usage
-          Add this URL to AdGuard Home:
-          \`\`\`
-          https://github.com/${{ github.repository }}/releases/download/merged-latest/merged.txt
-          \`\`\`
-          EOF
-
-      - name: Create or update release
-        if: steps.stats.outputs.total_rules != '0'
+      - name: Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: merged-latest
-          name: Merged Blocklist (Latest)
-          body_path: release_notes.md
-          files: ${{ env.MERGED_OUT }}
-          draft: false
-          prerelease: false
+          tag_name: latest
+          name: Merged Blocklist
+          body: |
+            ## Merged Blocklist
+            
+            | Stat | Value |
+            |------|-------|
+            | Rules | ${{ steps.stats.outputs.rules }} |
+            | Size | ${{ steps.stats.outputs.size }} |
+            | Sources | ${{ steps.fetch.outputs.files }} |
+            
+            **Usage**: Add this URL to AdGuard Home:
+            ```
+            https://github.com/${{ github.repository }}/releases/download/latest/merged.txt
+            ```
+          files: |
+            ${{ env.MERGED_OUT }}
+            ${{ env.WHITELIST_OUT }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ============================================
-      # Cleanup & Summary
-      # ============================================
       - name: Cleanup
         if: always()
-        run: |
-          find .cache -type f -mtime +7 -delete 2>/dev/null || true
-          rm -rf "${{ env.RAW_OUT }}" 2>/dev/null || true
-          rm -f release_notes.md 2>/dev/null || true
+        run: find .cache -mtime +3 -delete 2>/dev/null || true
 
-      - name: Generate job summary
+      - name: Summary
         if: always()
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          # 📋 Blocklist Update Summary
-          
           | Metric | Value |
           |--------|-------|
-          | Total Rules | ${{ steps.stats.outputs.total_rules || 'N/A' }} |
-          | File Size | ${{ steps.stats.outputs.file_size || 'N/A' }} |
-          | Sources | ${{ steps.fetch.outputs.raw_files || 'N/A' }} |
-          | Fetch (s) | ${{ steps.fetch.outputs.fetch_seconds || 'N/A' }} |
-          | Pipeline (s) | ${{ steps.pipeline.outputs.pipeline_seconds || 'N/A' }} |
-          
-          **Next Update**: 12 hours
+          | Rules | ${{ steps.stats.outputs.rules || 'N/A' }} |
+          | Fetch | ${{ steps.fetch.outputs.seconds || '?' }}s |
+          | Compile | ${{ steps.compile.outputs.seconds || '?' }}s |
           EOF

@@ -5,13 +5,13 @@ pipeline.py
 Main processing pipeline for blocklist compilation.
 
 Usage:
-    python -m scripts.pipeline <input_dir> <output_file>
+    python -m scripts.pipeline <input_dir> <output_file> [whitelist_file]
 
 Pipeline stages:
 1. Read all files from input_dir
 2. Clean each rule (remove comments, cosmetic, unsupported modifiers)
 3. Compile (deduplicate, prune subdomains, cross-format optimization)
-4. Write merged output
+4. Write merged output + optional whitelist file
 """
 from __future__ import annotations
 
@@ -19,23 +19,23 @@ import sys
 import time
 from pathlib import Path
 
-from scripts.cleaner import clean_line, CleanStats
+from scripts.cleaner import clean_line
 from scripts.compiler import compile_rules, CompileStats
 
 
-def process_files(input_dir: str, output_file: str) -> dict[str, int]:
+def process_files(input_dir: str, output_file: str, whitelist_file: str | None = None) -> dict[str, int]:
     """
     Run the full pipeline on input directory.
     
     Args:
         input_dir: Directory containing raw blocklist files
         output_file: Path to output merged list
+        whitelist_file: Optional path for extracted whitelist
     
     Returns:
         Statistics dictionary
     """
     input_path = Path(input_dir)
-    output_path = Path(output_file)
     
     if not input_path.is_dir():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
@@ -49,15 +49,18 @@ def process_files(input_dir: str, output_file: str) -> dict[str, int]:
         "cosmetic_removed": 0,
         "unsupported_removed": 0,
         "empty_removed": 0,
-        "subdomain_pruned": 0,
+        "trimmed": 0,
+        "abp_subdomain_pruned": 0,
+        "tld_wildcard_pruned": 0,
         "cross_format_pruned": 0,
         "duplicate_pruned": 0,
-        "cautious_kept": 0,
+        "whitelist_conflict_pruned": 0,
+        "local_hostname_pruned": 0,
     }
     
-    # -------------------------------------------------------------------------
+    # =========================================================================
     # Stage 1: Read and clean all files
-    # -------------------------------------------------------------------------
+    # =========================================================================
     print("📖 Stage 1: Reading and cleaning files...")
     stage1_start = time.time()
     
@@ -72,7 +75,10 @@ def process_files(input_dir: str, output_file: str) -> dict[str, int]:
                 stats["lines_raw"] += 1
                 
                 # Clean the line
-                result = clean_line(line)
+                result, was_trimmed = clean_line(line)
+                
+                if was_trimmed:
+                    stats["trimmed"] += 1
                 
                 if result.discarded:
                     if result.reason == "comment":
@@ -91,42 +97,36 @@ def process_files(input_dir: str, output_file: str) -> dict[str, int]:
     print(f"   Processed {stats['files_processed']} files, {stats['lines_raw']:,} lines")
     print(f"   Kept {stats['lines_clean']:,} clean rules ({stage1_time:.1f}s)")
     
-    # -------------------------------------------------------------------------
+    # =========================================================================
     # Stage 2: Compile and deduplicate
-    # -------------------------------------------------------------------------
+    # =========================================================================
     print("\n⚙️  Stage 2: Compiling and deduplicating...")
     stage2_start = time.time()
     
-    output_rules, compile_stats = compile_rules(all_cleaned)
+    compile_stats = compile_rules(all_cleaned, output_file, whitelist_file)
     
     stats["lines_output"] = compile_stats.total_output
-    stats["subdomain_pruned"] = compile_stats.subdomain_pruned
+    stats["abp_subdomain_pruned"] = compile_stats.abp_subdomain_pruned
+    stats["tld_wildcard_pruned"] = compile_stats.tld_wildcard_pruned
     stats["cross_format_pruned"] = compile_stats.cross_format_pruned
     stats["duplicate_pruned"] = compile_stats.duplicate_pruned
-    stats["cautious_kept"] = compile_stats.cautious_kept
+    stats["whitelist_conflict_pruned"] = compile_stats.whitelist_conflict_pruned
+    stats["local_hostname_pruned"] = compile_stats.local_hostname_pruned
+    
+    # Add format breakdown
+    stats["abp_kept"] = compile_stats.abp_kept
+    stats["hosts_kept"] = compile_stats.hosts_kept
+    stats["plain_kept"] = compile_stats.plain_kept
+    stats["allow_kept"] = compile_stats.allow_kept
+    stats["other_kept"] = compile_stats.other_kept
     
     stage2_time = time.time() - stage2_start
     print(f"   Output: {stats['lines_output']:,} rules ({stage2_time:.1f}s)")
     
-    # -------------------------------------------------------------------------
-    # Stage 3: Write output
-    # -------------------------------------------------------------------------
-    print("\n💾 Stage 3: Writing output...")
-    stage3_start = time.time()
-    
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_path, "w", encoding="utf-8", newline="\n") as f:
-        for rule in output_rules:
-            f.write(rule + "\n")
-    
-    stage3_time = time.time() - stage3_start
-    print(f"   Written to {output_file} ({stage3_time:.1f}s)")
-    
     return stats
 
 
-def print_summary(stats: dict[str, int]) -> None:
+def print_summary(stats: dict[str, int], whitelist_file: str | None = None) -> None:
     """Print formatted summary."""
     print("\n" + "=" * 60)
     print("📊 PIPELINE SUMMARY")
@@ -153,33 +153,44 @@ def print_summary(stats: dict[str, int]) -> None:
     print(f"   Cosmetic rules:    {stats['cosmetic_removed']:>10,}")
     print(f"   Unsupported mods:  {stats['unsupported_removed']:>10,}")
     print(f"   Empty lines:       {stats['empty_removed']:>10,}")
+    print(f"   Trimmed:           {stats['trimmed']:>10,}")
     
-    print(f"\n🔧 Compilation:")
-    print(f"   Subdomain pruned:  {stats['subdomain_pruned']:>10,}")
+    print(f"\n🔧 Compilation pruned:")
+    print(f"   ABP subdomains:    {stats['abp_subdomain_pruned']:>10,}")
+    print(f"   TLD wildcards:     {stats['tld_wildcard_pruned']:>10,}")
     print(f"   Cross-format:      {stats['cross_format_pruned']:>10,}")
     print(f"   Duplicates:        {stats['duplicate_pruned']:>10,}")
-    if stats["cautious_kept"] > 0:
-        print(f"   ⚠️  Cautious keeps: {stats['cautious_kept']:>10,}")
+    print(f"   Whitelist conflict:{stats['whitelist_conflict_pruned']:>10,}")
+    print(f"   Local hostnames:   {stats['local_hostname_pruned']:>10,}")
+    
+    print(f"\n📦 Output breakdown:")
+    print(f"   ABP rules:   {stats.get('abp_kept', 0):>10,}")
+    print(f"   Hosts rules: {stats.get('hosts_kept', 0):>10,}")
+    print(f"   Plain rules: {stats.get('plain_kept', 0):>10,}")
+    print(f"   Other rules: {stats.get('other_kept', 0):>10,}")
+    if whitelist_file:
+        print(f"   Whitelist:   {stats.get('allow_kept', 0):>10,} (separate file)")
 
 
 def main() -> int:
     """Main entry point."""
     if len(sys.argv) < 3:
-        print("Usage: python -m scripts.pipeline <input_dir> <output_file>")
+        print("Usage: python -m scripts.pipeline <input_dir> <output_file> [whitelist_file]")
         return 2
     
     input_dir = sys.argv[1]
     output_file = sys.argv[2]
+    whitelist_file = sys.argv[3] if len(sys.argv) > 3 else None
     
     try:
         print("🚀 Starting blocklist pipeline...")
         print("-" * 60)
         
         start_time = time.time()
-        stats = process_files(input_dir, output_file)
+        stats = process_files(input_dir, output_file, whitelist_file)
         total_time = time.time() - start_time
         
-        print_summary(stats)
+        print_summary(stats, whitelist_file)
         print(f"\n⏱️  Total time: {total_time:.1f}s")
         print("✅ Pipeline completed successfully!")
         

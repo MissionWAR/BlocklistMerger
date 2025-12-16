@@ -5,62 +5,70 @@ compiler.py
 Modifier-aware deduplication and cross-format optimization for AdGuard Home.
 
 Key features:
-- ABP format prioritization (broader coverage)
-- Subdomain pruning (||example.com^ covers *.example.com)
-- Modifier-aware pruning (respects $important, $client, $denyallow)
-- Logging of "kept for caution" rules for safety review
+- Two-phase ABP processing (collect all, then prune)
+- TLD wildcard pruning (||*.tld^ covers all domains in that TLD)
+- Cross-format optimization (ABP > hosts > plain)
+- Hosts multi-domain splitting (remove only covered domains)
+- Whitelist extraction to separate file
+- Modifier-aware pruning (respects $important, $denyallow)
 """
 from __future__ import annotations
 
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Callable
 
 import tldextract
 
+# Pre-configure tldextract for better performance (no updates check)
+_tld_extract = tldextract.TLDExtract(suffix_list_urls=None)
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-# Enable verbose logging of cautious prunes
-VERBOSE_LOGGING = True
-
+VERBOSE_LOGGING = False  # Set True for detailed prune logging
 
 # ============================================================================
 # REGEX PATTERNS
 # ============================================================================
 
 # ABP domain pattern: ||domain^ or ||*.domain^
+# Also matches IP addresses like ||100.48.203.212^
 ABP_DOMAIN_PATTERN = re.compile(
-    r"^@@?\|\|"           # Start with || or @@||
-    r"(\*\.)?([^\^$|*]+)"  # Optional *. then domain
-    r"\^"                  # Separator
+    r"^(@@)?\|\|"              # Start with || or @@||  (capture @@ for exception check)
+    r"(\*\.)?"                 # Optional *. for wildcard
+    r"([^^\$|*\s]+)"           # Domain/IP (anything except ^$|* or whitespace)
+    r"\^"                      # Separator
 )
 
 # Hosts format: IP domain [domain2 ...]
 HOSTS_PATTERN = re.compile(
-    r"^([\d.:a-fA-F]+)\s+"  # IP address (IPv4 or IPv6)
-    r"([a-zA-Z0-9][\w.-]+)"  # First domain
+    r"^([\d.:a-fA-F]+)\s+"   # IP address (IPv4 or IPv6)
+    r"(.+)$"                 # Rest of line (domains)
 )
+
+# Valid domain/IP for hosts
+HOSTS_DOMAIN_PATTERN = re.compile(r"^[a-zA-Z0-9][\w.-]*$")
 
 # Plain domain (simple domain name, no special chars except . and -)
 PLAIN_DOMAIN_PATTERN = re.compile(
-    r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"  # First label
-    r"(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"  # More labels
+    r"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+    r"(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
 )
 
-# Local addresses to ignore in hosts format
-LOCAL_IPS = frozenset({
-    "0.0.0.0", "127.0.0.1", "::1", "::0", "0:0:0:0:0:0:0:0", "0:0:0:0:0:0:0:1",
+# Local/blocking IPs in hosts format
+BLOCKING_IPS = frozenset({
+    "0.0.0.0", "127.0.0.1", "::1", "::0", "::","0:0:0:0:0:0:0:0", "0:0:0:0:0:0:0:1",
 })
 
-# Local hostnames to ignore
+# Local hostnames to skip
 LOCAL_HOSTNAMES = frozenset({
     "localhost", "localhost.localdomain", "local", "broadcasthost",
     "ip6-localhost", "ip6-loopback", "ip6-localnet",
+    "ip6-mcastprefix", "ip6-allnodes", "ip6-allrouters", "ip6-allhosts",
 })
 
 
@@ -69,51 +77,25 @@ LOCAL_HOSTNAMES = frozenset({
 # ============================================================================
 
 @dataclass
-class ParsedRule:
-    """Parsed representation of a blocking rule."""
-    original: str              # Original rule text
-    domain: str                # Normalized domain (lowercase)
-    rule_type: str             # "abp", "abp_wildcard", "hosts", "plain", "other"
-    is_exception: bool         # @@rules
-    modifiers: frozenset       # Set of modifiers (for ABP rules)
-    
-    def __hash__(self):
-        return hash(self.original)
-
-
-@dataclass
-class CompileState:
-    """State during compilation."""
-    abp_rules: dict[str, ParsedRule] = field(default_factory=dict)    # domain -> rule
-    abp_wildcards: dict[str, ParsedRule] = field(default_factory=dict)  # domain -> rule
-    hosts_rules: dict[str, ParsedRule] = field(default_factory=dict)  # domain -> rule
-    plain_rules: dict[str, ParsedRule] = field(default_factory=dict)  # domain -> rule
-    allow_rules: list[str] = field(default_factory=list)              # @@rules kept intact
-    other_rules: list[str] = field(default_factory=list)              # regex, etc.
-    
-    # Logging for safety review
-    pruned_rules: list[tuple[str, str]] = field(default_factory=list)  # (rule, reason)
-    kept_cautious: list[tuple[str, str]] = field(default_factory=list)  # (rule, reason)
-
-
-@dataclass
 class CompileStats:
     """Statistics from compilation."""
     total_input: int = 0
     total_output: int = 0
+    
+    # By format
     abp_kept: int = 0
     hosts_kept: int = 0
     plain_kept: int = 0
     allow_kept: int = 0
     other_kept: int = 0
     
-    # Pruning stats
-    subdomain_pruned: int = 0
+    # Pruning
+    abp_subdomain_pruned: int = 0
+    tld_wildcard_pruned: int = 0
     cross_format_pruned: int = 0
     duplicate_pruned: int = 0
-    
-    # Cautious keeps
-    cautious_kept: int = 0
+    whitelist_conflict_pruned: int = 0
+    local_hostname_pruned: int = 0
 
 
 # ============================================================================
@@ -125,21 +107,21 @@ def normalize_domain(domain: str) -> str:
     return domain.lower().strip().rstrip(".")
 
 
-def extract_abp_info(rule: str) -> tuple[str | None, frozenset, bool]:
+def extract_abp_info(rule: str) -> tuple[str | None, frozenset, bool, bool]:
     """
-    Extract domain, modifiers, and exception status from ABP rule.
+    Extract domain, modifiers, exception status, and wildcard status from ABP rule.
     
     Returns:
-        (domain, modifiers, is_exception) or (None, frozenset(), False) if not ABP
+        (domain, modifiers, is_exception, is_wildcard)
     """
-    is_exception = rule.startswith("@@")
-    
     match = ABP_DOMAIN_PATTERN.match(rule)
     if not match:
-        return None, frozenset(), is_exception
+        return None, frozenset(), False, False
     
-    is_wildcard = match.group(1) is not None  # Has *.
-    domain = normalize_domain(match.group(2))
+    # Group 1: @@ (exception marker), Group 2: *. (wildcard), Group 3: domain
+    is_exception = match.group(1) is not None
+    is_wildcard = match.group(2) is not None
+    domain = normalize_domain(match.group(3))
     
     # Extract modifiers
     modifiers = set()
@@ -152,486 +134,460 @@ def extract_abp_info(rule: str) -> tuple[str | None, frozenset, bool]:
             if mod_name:
                 modifiers.add(mod_name)
     
-    if is_wildcard:
-        # For wildcard rules, prepend *. to domain for tracking
-        domain = f"*.{domain}"
-    
-    return domain, frozenset(modifiers), is_exception
+    return domain, frozenset(modifiers), is_exception, is_wildcard
 
 
-def extract_hosts_domains(rule: str) -> list[str]:
+def extract_hosts_info(rule: str) -> tuple[str | None, list[str]]:
     """
-    Extract domains from hosts-style rule.
+    Extract IP and domains from hosts-style rule.
     
-    Example: "0.0.0.0 example.com ad.example.com" -> ["example.com", "ad.example.com"]
+    Returns:
+        (ip, [domains]) or (None, []) if not valid hosts
     """
     match = HOSTS_PATTERN.match(rule)
     if not match:
-        return []
+        return None, []
     
     ip = match.group(1)
-    # Only process blocking IPs (0.0.0.0, 127.0.0.1, etc.)
-    if ip not in LOCAL_IPS and not ip.startswith("0.") and not ip.startswith("127."):
-        # Non-blocking IP (like real DNS rewrites), skip
-        return []
+    rest = match.group(2)
     
-    # Extract all domains after the IP
-    parts = rule.split()
+    # Only process blocking IPs
+    if ip not in BLOCKING_IPS and not ip.startswith("0.") and not ip.startswith("127."):
+        return None, []
+    
     domains = []
-    for part in parts[1:]:
+    for part in rest.split():
         # Stop at comments
         if part.startswith("#"):
             break
-        domain = normalize_domain(part)
-        if domain and domain not in LOCAL_HOSTNAMES:
-            domains.append(domain)
+        if HOSTS_DOMAIN_PATTERN.match(part):
+            domain = normalize_domain(part)
+            if domain and domain not in LOCAL_HOSTNAMES:
+                domains.append(domain)
     
-    return domains
+    return ip, domains
 
 
-def is_plain_domain(rule: str) -> bool:
-    """Check if rule is a plain domain (no special syntax)."""
-    return bool(PLAIN_DOMAIN_PATTERN.match(rule))
+@lru_cache(maxsize=65536)
+def _extract_domain_parts(domain: str) -> tuple[str, str, str]:
+    """Cached tldextract extraction. Returns (subdomain, domain, suffix)."""
+    ext = _tld_extract(domain)
+    return ext.subdomain, ext.domain, ext.suffix
 
 
-def get_parent_domain(domain: str) -> str | None:
-    """
-    Get parent domain.
-    
-    Example: "sub.example.com" -> "example.com"
-    
-    Uses tldextract to avoid cutting into TLD.
-    """
-    # Handle wildcard format
-    if domain.startswith("*."):
-        domain = domain[2:]
-    
-    ext = tldextract.extract(domain)
-    if not ext.suffix or not ext.domain:
-        return None
-    
-    # If there's a subdomain, remove one level
-    if ext.subdomain:
-        parts = ext.subdomain.split(".")
-        if len(parts) > 1:
-            new_subdomain = ".".join(parts[1:])
-            return f"{new_subdomain}.{ext.domain}.{ext.suffix}"
-        else:
-            return f"{ext.domain}.{ext.suffix}"
-    
+def get_tld(domain: str) -> str | None:
+    """Get the TLD (suffix) of a domain."""
+    _, _, suffix = _extract_domain_parts(domain)
+    return suffix if suffix else None
+
+
+def get_registered_domain(domain: str) -> str | None:
+    """Get registered domain (domain.tld) from full domain."""
+    _, dom, suffix = _extract_domain_parts(domain)
+    if suffix and dom:
+        return f"{dom}.{suffix}"
     return None
 
 
-def walk_parents(domain: str) -> list[str]:
-    """Walk up the domain tree to find all parent domains."""
+@lru_cache(maxsize=65536)
+def walk_parent_domains(domain: str) -> tuple[str, ...]:
+    """
+    Walk up the domain hierarchy to find all parent domains.
+    
+    Example: "a.b.example.com" -> ("b.example.com", "example.com")
+    
+    Returns tuple for hashability (caching).
+    """
+    subdomain, dom, suffix = _extract_domain_parts(domain)
+    if not suffix or not dom:
+        return ()
+    
+    registered = f"{dom}.{suffix}"
+    
+    if not subdomain:
+        return ()
+    
+    parts = subdomain.split(".")
     parents = []
-    current = domain
+    # Build parents from most specific to least
+    for i in range(1, len(parts) + 1):
+        if i == len(parts):
+            parents.append(registered)
+        else:
+            suffix_parts = parts[i:]
+            parents.append(f"{'.'.join(suffix_parts)}.{registered}")
     
-    # Handle wildcard format
-    if current.startswith("*."):
-        current = current[2:]
-    
-    while True:
-        parent = get_parent_domain(current)
-        if not parent:
-            break
-        parents.append(parent)
-        current = parent
-    
-    return parents
+    return tuple(parents)
 
 
-# ============================================================================
-# PRUNING LOGIC
-# ============================================================================
-
-def should_prune_abp(
-    child: ParsedRule,
-    parent: ParsedRule,
-    state: CompileState,
-) -> tuple[bool, str]:
+def should_prune_by_modifiers(child_mods: frozenset, parent_mods: frozenset) -> bool:
     """
-    Determine if child ABP rule is redundant given parent ABP rule.
+    Check if child rule can be pruned given parent's modifiers.
     
-    Returns:
-        (should_prune, reason)
+    Returns True if child is redundant (can be pruned).
     
-    SAFETY PRINCIPLE: When in doubt, KEEP the rule.
-    False positives (keeping redundant rules) waste RAM but work.
-    False negatives (removing necessary rules) break blocking.
+    AGH Supported modifiers:
+    - $important: increases priority
+    - $badfilter: disables matching rules
+    - $dnsrewrite: rewrites DNS responses
+    - $denyallow: excludes domains from blocking
+    - $dnstype: filters by DNS record type (A, AAAA, CNAME, etc.)
+    - $client: client-specific (not in public lists)
+    - $ctag: client tags (not in public lists)
     """
-    # NEVER prune exception rules
-    if child.is_exception:
-        return False, "exception_rule"
+    # Never prune if child has $important but parent doesn't
+    # Child's $important makes it take priority over parent
+    if "important" in child_mods and "important" not in parent_mods:
+        return False
     
-    # NEVER prune if child has $badfilter
-    if "badfilter" in child.modifiers:
-        return False, "has_badfilter"
+    # Never prune if child has behavior-modifying modifiers
+    # These rules have specific behaviors that parent can't cover
+    if child_mods & {"badfilter", "dnsrewrite", "denyallow"}:
+        return False
     
-    # NEVER prune if child has $dnsrewrite (specific behavior)
-    if "dnsrewrite" in child.modifiers:
-        return False, "has_dnsrewrite"
+    # Never prune if child has $dnstype (unless parent has same dnstype)
+    # Because ||example.com^$dnstype=A only blocks A records,
+    # it doesn't cover ||sub.example.com^$dnstype=AAAA
+    if "dnstype" in child_mods:
+        # If parent also has dnstype, we'd need to compare values
+        # For safety, if either has dnstype, don't prune unless both lack it
+        # (We don't have the values here, so be conservative)
+        if "dnstype" not in parent_mods:
+            # Parent blocks ALL types, child blocks specific type
+            # Parent DOES cover child, so pruning is OK
+            pass
+        else:
+            # Both have dnstype - can't tell if same value, be safe
+            return False
     
-    # Parent must be a blocking rule (not exception)
-    if parent.is_exception:
-        return False, "parent_is_exception"
+    # If parent has $dnstype but child doesn't:
+    # Parent blocks only specific type, child blocks ALL types
+    # Child is MORE restrictive, should NOT be pruned
+    if "dnstype" in parent_mods and "dnstype" not in child_mods:
+        return False
     
-    # -------------------------------------------------------------------------
-    # $important handling
-    # If child has $important but parent doesn't, child takes priority
-    # Example: Parent: ||example.com^  Child: ||sub.example.com^$important
-    # Child MUST be kept because $important overrides parent's block
-    # -------------------------------------------------------------------------
-    child_important = "important" in child.modifiers
-    parent_important = "important" in parent.modifiers
+    # For other modifiers, child must not have modifiers parent lacks
+    # This ensures child isn't more specific than parent
+    excluded = {"important", "badfilter", "dnsrewrite", "denyallow", "dnstype"}
+    child_relevant = child_mods - excluded
+    parent_relevant = parent_mods - excluded
     
-    if child_important and not parent_important:
-        if VERBOSE_LOGGING:
-            state.kept_cautious.append((child.original, "child_has_important"))
-        return False, "child_has_important"
+    if child_relevant and not child_relevant.issubset(parent_relevant):
+        return False
     
-    # -------------------------------------------------------------------------
-    # $denyallow handling
-    # If child has $denyallow, it's more specific, keep it
-    # -------------------------------------------------------------------------
-    if "denyallow" in child.modifiers:
-        if VERBOSE_LOGGING:
-            state.kept_cautious.append((child.original, "child_has_denyallow"))
-        return False, "child_has_denyallow"
-    
-    # -------------------------------------------------------------------------
-    # $client handling (commented out per user request - public lists don't use)
-    # -------------------------------------------------------------------------
-    # child_client = [m for m in child.modifiers if m.startswith("client")]
-    # parent_client = [m for m in parent.modifiers if m.startswith("client")]
-    # if child_client != parent_client:
-    #     return False, "different_client_scope"
-    
-    # -------------------------------------------------------------------------
-    # General modifier comparison
-    # Parent should be AT LEAST as restrictive as child
-    # If child has modifiers that parent lacks, child is more specific
-    # -------------------------------------------------------------------------
-    child_mods = child.modifiers - {"important", "badfilter", "dnsrewrite"}
-    parent_mods = parent.modifiers - {"important", "badfilter", "dnsrewrite"}
-    
-    if child_mods and not child_mods.issubset(parent_mods):
-        if VERBOSE_LOGGING:
-            state.kept_cautious.append((child.original, f"child_more_specific: {child_mods - parent_mods}"))
-        return False, "child_more_specific"
-    
-    # All checks passed - safe to prune
-    return True, "covered_by_parent"
-
-
-def is_covered_by_abp(domain: str, state: CompileState) -> bool:
-    """
-    Check if a domain is covered by an existing ABP rule.
-    
-    Coverage logic:
-    - ||example.com^ covers example.com AND all subdomains
-    - ||*.example.com^ covers subdomains but NOT example.com itself
-    """
-    # Check direct match
-    if domain in state.abp_rules:
-        return True
-    
-    # Check if any parent domain has an ABP rule
-    for parent in walk_parents(domain):
-        if parent in state.abp_rules:
-            return True
-        # Wildcard match (*.example.com covers sub.example.com but not example.com)
-        wildcard_key = f"*.{parent}"
-        if wildcard_key in state.abp_wildcards:
-            return True
-    
-    return False
+    return True
 
 
 # ============================================================================
 # MAIN COMPILATION
 # ============================================================================
 
-def parse_rule(line: str) -> ParsedRule | None:
-    """Parse a single rule line into ParsedRule."""
-    line = line.strip()
-    if not line:
-        return None
-    
-    # ABP-style rule
-    if line.startswith("||") or line.startswith("@@||"):
-        domain, modifiers, is_exception = extract_abp_info(line)
-        if domain:
-            rule_type = "abp_wildcard" if domain.startswith("*.") else "abp"
-            return ParsedRule(
-                original=line,
-                domain=domain,
-                rule_type=rule_type,
-                is_exception=is_exception,
-                modifiers=modifiers,
-            )
-    
-    # Exception rule (non-ABP format)
-    if line.startswith("@@"):
-        return ParsedRule(
-            original=line,
-            domain="",
-            rule_type="other",
-            is_exception=True,
-            modifiers=frozenset(),
-        )
-    
-    # Hosts-style rule
-    domains = extract_hosts_domains(line)
-    if domains:
-        # Return a rule for the first domain (hosts rules can have multiple)
-        return ParsedRule(
-            original=line,
-            domain=domains[0],
-            rule_type="hosts",
-            is_exception=False,
-            modifiers=frozenset(),
-        )
-    
-    # Plain domain
-    if is_plain_domain(line):
-        return ParsedRule(
-            original=line,
-            domain=normalize_domain(line),
-            rule_type="plain",
-            is_exception=False,
-            modifiers=frozenset(),
-        )
-    
-    # Regex or other rule
-    if line.startswith("/") or "|" in line or "*" in line:
-        return ParsedRule(
-            original=line,
-            domain="",
-            rule_type="other",
-            is_exception=False,
-            modifiers=frozenset(),
-        )
-    
-    return None
-
-
-def compile_rules(lines: list[str]) -> tuple[list[str], CompileStats]:
+def compile_rules(
+    lines: list[str],
+    output_file: str,
+    whitelist_file: str | None = None,
+) -> CompileStats:
     """
-    Compile and deduplicate rules.
+    Compile and deduplicate rules with two-phase approach.
     
-    Returns:
-        (output_rules, stats)
+    Phase 1: Collect all rules and build lookup structures
+    Phase 2: Filter and deduplicate
     """
-    state = CompileState()
     stats = CompileStats()
     
-    # -------------------------------------------------------------------------
-    # Pass 1: Parse all rules and categorize
-    # -------------------------------------------------------------------------
-    parsed_rules: list[ParsedRule] = []
+    # =========================================================================
+    # PHASE 1: Parse and categorize all rules
+    # =========================================================================
+    
+    # ABP blocking rules: domain -> (original_rule, modifiers, is_wildcard)
+    abp_rules: dict[str, tuple[str, frozenset, bool]] = {}
+    abp_wildcards: dict[str, tuple[str, frozenset]] = {}  # TLD wildcards: tld -> rule
+    
+    # Exception rules
+    allow_rules: list[str] = []
+    allow_domains: set[str] = set()  # Domains covered by @@rules
+    
+    # Other formats (to process after ABP)
+    hosts_lines: list[tuple[str, str, list[str]]] = []  # (original, ip, domains)
+    plain_domains: list[tuple[str, str]] = []  # (original, domain)
+    other_rules: list[str] = []
+    
     for line in lines:
         stats.total_input += 1
-        rule = parse_rule(line)
-        if rule:
-            parsed_rules.append(rule)
-    
-    # -------------------------------------------------------------------------
-    # Pass 2: Process exception rules first (never pruned, used for whitelist)
-    # -------------------------------------------------------------------------
-    for rule in parsed_rules:
-        if rule.is_exception:
-            state.allow_rules.append(rule.original)
-            stats.allow_kept += 1
-    
-    # -------------------------------------------------------------------------
-    # Pass 3: Process ABP rules (highest priority, broadest coverage)
-    # -------------------------------------------------------------------------
-    for rule in parsed_rules:
-        if rule.rule_type == "abp" and not rule.is_exception:
-            domain = rule.domain
-            
-            # Check for duplicates
-            if domain in state.abp_rules:
-                existing = state.abp_rules[domain]
-                # Keep the one with more restrictive modifiers
-                if "important" in rule.modifiers and "important" not in existing.modifiers:
-                    state.abp_rules[domain] = rule
-                stats.duplicate_pruned += 1
-                continue
-            
-            # Check if subdomain is covered by parent
-            should_prune = False
-            prune_reason = ""
-            
-            for parent in walk_parents(domain):
-                if parent in state.abp_rules:
-                    parent_rule = state.abp_rules[parent]
-                    should_prune, prune_reason = should_prune_abp(rule, parent_rule, state)
-                    if should_prune:
-                        break
-            
-            if should_prune:
-                stats.subdomain_pruned += 1
-                state.pruned_rules.append((rule.original, prune_reason))
-            else:
-                state.abp_rules[domain] = rule
+        line = line.strip()
+        if not line:
+            continue
         
-        elif rule.rule_type == "abp_wildcard" and not rule.is_exception:
-            domain = rule.domain
+        # =====================================================================
+        # ABP-style rules (highest priority)
+        # =====================================================================
+        if line.startswith("||") or line.startswith("@@||"):
+            domain, modifiers, is_exception, is_wildcard = extract_abp_info(line)
             
-            if domain in state.abp_wildcards:
-                stats.duplicate_pruned += 1
+            if not domain:
+                other_rules.append(line)
                 continue
             
-            # Check if parent apex rule exists (||example.com^ covers *.example.com)
-            apex = domain[2:]  # Remove *.
-            if apex in state.abp_rules:
-                stats.subdomain_pruned += 1
-                state.pruned_rules.append((rule.original, "wildcard_covered_by_apex"))
+            if is_exception:
+                allow_rules.append(line)
+                # Track whitelisted domains for conflict removal
+                if is_wildcard:
+                    # @@||*.example.com^ - covers all subdomains
+                    allow_domains.add(f"*.{domain}")
+                else:
+                    allow_domains.add(domain)
+                continue
+            
+            # Blocking rule
+            if is_wildcard:
+                # Check if this is a TLD wildcard like ||*.autos^
+                tld = get_tld(domain)
+                if tld and domain == tld:
+                    # This is ||*.tld^ - covers entire TLD
+                    if tld not in abp_wildcards:
+                        abp_wildcards[tld] = (line, modifiers)
+                else:
+                    # Regular subdomain wildcard like ||*.example.com^
+                    key = f"*.{domain}"
+                    if key not in abp_rules:
+                        abp_rules[key] = (line, modifiers, True)
             else:
-                state.abp_wildcards[domain] = rule
+                # Regular ABP rule
+                if domain not in abp_rules:
+                    abp_rules[domain] = (line, modifiers, False)
+                else:
+                    # Duplicate - prefer one with $important
+                    existing = abp_rules[domain]
+                    if "important" in modifiers and "important" not in existing[1]:
+                        abp_rules[domain] = (line, modifiers, False)
+                    stats.duplicate_pruned += 1
+            continue
+        
+        # Other exception rules
+        if line.startswith("@@"):
+            allow_rules.append(line)
+            continue
+        
+        # =====================================================================
+        # Hosts-style rules
+        # =====================================================================
+        ip, domains = extract_hosts_info(line)
+        if ip and domains:
+            hosts_lines.append((line, ip, domains))
+            continue
+        
+        # =====================================================================
+        # Plain domain
+        # =====================================================================
+        if PLAIN_DOMAIN_PATTERN.match(line):
+            domain = normalize_domain(line)
+            if domain and domain not in LOCAL_HOSTNAMES:
+                plain_domains.append((line, domain))
+            else:
+                stats.local_hostname_pruned += 1
+            continue
+        
+        # =====================================================================
+        # Other (regex, etc.)
+        # =====================================================================
+        if line.startswith("/") or "|" in line or "*" in line:
+            other_rules.append(line)
+            continue
     
-    # -------------------------------------------------------------------------
-    # Pass 4: Process hosts rules (lower priority than ABP)
-    # -------------------------------------------------------------------------
-    for rule in parsed_rules:
-        if rule.rule_type == "hosts":
-            domain = rule.domain
+    # =========================================================================
+    # PHASE 2: Build coverage lookup sets
+    # =========================================================================
+    
+    # All ABP blocking domains (for subdomain checks)
+    abp_blocking_domains: set[str] = set()
+    for domain, (rule, mods, is_wc) in abp_rules.items():
+        if not is_wc:  # Don't add wildcard keys like "*.example.com"
+            abp_blocking_domains.add(domain)
+        else:
+            # For wildcards, add the base domain for coverage checking
+            abp_blocking_domains.add(domain[2:])  # Remove "*."
+    
+    # TLD wildcards
+    tld_wildcards: set[str] = set(abp_wildcards.keys())
+    
+    def is_covered_by_abp(domain: str) -> bool:
+        """Check if domain is covered by any ABP rule."""
+        # Direct match
+        if domain in abp_blocking_domains:
+            return True
+        
+        # TLD wildcard check
+        tld = get_tld(domain)
+        if tld and tld in tld_wildcards:
+            return True
+        
+        # Parent domain check
+        for parent in walk_parent_domains(domain):
+            if parent in abp_blocking_domains:
+                return True
+        
+        return False
+    
+    def is_whitelisted(domain: str) -> bool:
+        """Check if domain is whitelisted."""
+        if domain in allow_domains:
+            return True
+        # Check wildcard whitelists
+        for parent in walk_parent_domains(domain):
+            if f"*.{parent}" in allow_domains:
+                return True
+        return False
+    
+    # =========================================================================
+    # PHASE 3: Prune ABP subdomain rules
+    # =========================================================================
+    
+    pruned_abp: dict[str, tuple[str, frozenset, bool]] = {}
+    
+    for domain, (rule, modifiers, is_wildcard) in abp_rules.items():
+        # Skip if whitelisted
+        clean_domain = domain[2:] if domain.startswith("*.") else domain
+        if is_whitelisted(clean_domain):
+            stats.whitelist_conflict_pruned += 1
+            continue
+        
+        # TLD wildcard coverage
+        tld = get_tld(clean_domain)
+        if tld and tld in tld_wildcards and clean_domain != tld:
+            parent_mods = abp_wildcards[tld][1]
+            if should_prune_by_modifiers(modifiers, parent_mods):
+                stats.tld_wildcard_pruned += 1
+                continue
+        
+        # Check if any parent domain blocks this
+        should_prune = False
+        for parent in walk_parent_domains(clean_domain):
+            if parent in abp_blocking_domains:
+                # Find parent's modifiers
+                if parent in abp_rules:
+                    parent_mods = abp_rules[parent][1]
+                    if should_prune_by_modifiers(modifiers, parent_mods):
+                        should_prune = True
+                        break
+        
+        if should_prune:
+            stats.abp_subdomain_pruned += 1
+        else:
+            pruned_abp[domain] = (rule, modifiers, is_wildcard)
+    
+    # =========================================================================
+    # PHASE 4: Process hosts rules (split multi-domain, prune covered)
+    # =========================================================================
+    
+    kept_hosts: dict[str, str] = {}  # domain -> original line or rebuilt line
+    
+    for original, ip, domains in hosts_lines:
+        kept_domains = []
+        
+        for domain in domains:
+            if domain in LOCAL_HOSTNAMES:
+                stats.local_hostname_pruned += 1
+                continue
             
-            # Skip if covered by ABP
-            if is_covered_by_abp(domain, state):
+            if is_whitelisted(domain):
+                stats.whitelist_conflict_pruned += 1
+                continue
+            
+            if is_covered_by_abp(domain):
                 stats.cross_format_pruned += 1
-                state.pruned_rules.append((rule.original, "covered_by_abp"))
                 continue
             
-            # Skip duplicates
-            if domain in state.hosts_rules:
+            # Check if already in hosts
+            if domain in kept_hosts:
                 stats.duplicate_pruned += 1
                 continue
             
-            state.hosts_rules[domain] = rule
+            kept_domains.append(domain)
+        
+        # Add remaining domains
+        for domain in kept_domains:
+            kept_hosts[domain] = f"{ip} {domain}"
     
-    # -------------------------------------------------------------------------
-    # Pass 5: Process plain domains (lowest priority)
-    # -------------------------------------------------------------------------
-    for rule in parsed_rules:
-        if rule.rule_type == "plain":
-            domain = rule.domain
-            
-            # Skip if covered by ABP
-            if is_covered_by_abp(domain, state):
-                stats.cross_format_pruned += 1
-                state.pruned_rules.append((rule.original, "covered_by_abp"))
-                continue
-            
-            # Skip if same domain in hosts
-            if domain in state.hosts_rules:
-                stats.duplicate_pruned += 1
-                continue
-            
-            # Skip duplicates
-            if domain in state.plain_rules:
-                stats.duplicate_pruned += 1
-                continue
-            
-            state.plain_rules[domain] = rule
+    # =========================================================================
+    # PHASE 5: Process plain domains
+    # =========================================================================
     
-    # -------------------------------------------------------------------------
-    # Pass 6: Process other rules (regex, etc.)
-    # -------------------------------------------------------------------------
+    kept_plain: dict[str, str] = {}  # domain -> original
+    
+    for original, domain in plain_domains:
+        if is_whitelisted(domain):
+            stats.whitelist_conflict_pruned += 1
+            continue
+        
+        if is_covered_by_abp(domain):
+            stats.cross_format_pruned += 1
+            continue
+        
+        if domain in kept_hosts:
+            stats.duplicate_pruned += 1
+            continue
+        
+        if domain in kept_plain:
+            stats.duplicate_pruned += 1
+            continue
+        
+        kept_plain[domain] = original
+    
+    # =========================================================================
+    # PHASE 6: Deduplicate other rules
+    # =========================================================================
+    
     seen_other: set[str] = set()
-    for rule in parsed_rules:
-        if rule.rule_type == "other" and not rule.is_exception:
-            if rule.original not in seen_other:
-                seen_other.add(rule.original)
-                state.other_rules.append(rule.original)
+    kept_other: list[str] = []
+    for rule in other_rules:
+        if rule not in seen_other:
+            seen_other.add(rule)
+            kept_other.append(rule)
+        else:
+            stats.duplicate_pruned += 1
     
-    # -------------------------------------------------------------------------
-    # Build output
-    # -------------------------------------------------------------------------
-    output: list[str] = []
+    # =========================================================================
+    # OUTPUT
+    # =========================================================================
     
-    # Add allow rules first
-    output.extend(state.allow_rules)
-    
-    # Add ABP rules
-    for rule in state.abp_rules.values():
-        output.append(rule.original)
-        stats.abp_kept += 1
-    
-    for rule in state.abp_wildcards.values():
-        output.append(rule.original)
-        stats.abp_kept += 1
-    
-    # Add hosts rules
-    for rule in state.hosts_rules.values():
-        output.append(rule.original)
-        stats.hosts_kept += 1
-    
-    # Add plain rules
-    for rule in state.plain_rules.values():
-        output.append(rule.original)
-        stats.plain_kept += 1
-    
-    # Add other rules
-    output.extend(state.other_rules)
-    stats.other_kept = len(state.other_rules)
-    
-    stats.total_output = len(output)
-    stats.cautious_kept = len(state.kept_cautious)
-    
-    # -------------------------------------------------------------------------
-    # Log cautious keeps if verbose
-    # -------------------------------------------------------------------------
-    if VERBOSE_LOGGING and state.kept_cautious:
-        print(f"\n[KEEP-CAUTION] {len(state.kept_cautious)} rules kept for safety:")
-        for rule, reason in state.kept_cautious[:20]:  # Show first 20
-            print(f"  {rule[:60]}... - {reason}")
-        if len(state.kept_cautious) > 20:
-            print(f"  ... and {len(state.kept_cautious) - 20} more")
-    
-    return output, stats
-
-
-def compile_files(input_dir: str, output_file: str) -> CompileStats:
-    """
-    Compile all files in input directory.
-    
-    Args:
-        input_dir: Directory containing cleaned rule files
-        output_file: Output file path
-    
-    Returns:
-        CompileStats
-    """
-    from scripts.cleaner import clean_line
-    
-    input_path = Path(input_dir)
     output_path = Path(output_file)
-    
-    if not input_path.is_dir():
-        raise FileNotFoundError(f"Input directory not found: {input_dir}")
-    
-    # Collect all lines from all files
-    all_lines: list[str] = []
-    
-    for file in sorted(input_path.glob("*.txt")):
-        with open(file, encoding="utf-8-sig", errors="replace") as f:
-            for line in f:
-                # Clean each line
-                result = clean_line(line)
-                if not result.discarded and result.line:
-                    all_lines.append(result.line)
-    
-    # Compile
-    output_rules, stats = compile_rules(all_lines)
-    
-    # Write output
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    
     with open(output_path, "w", encoding="utf-8", newline="\n") as f:
-        for rule in output_rules:
+        # ABP rules (including TLD wildcards)
+        for tld, (rule, mods) in abp_wildcards.items():
             f.write(rule + "\n")
+            stats.abp_kept += 1
+        
+        for domain, (rule, mods, is_wc) in pruned_abp.items():
+            f.write(rule + "\n")
+            stats.abp_kept += 1
+        
+        # Hosts rules
+        for domain, rule in kept_hosts.items():
+            f.write(rule + "\n")
+            stats.hosts_kept += 1
+        
+        # Plain rules
+        for domain, rule in kept_plain.items():
+            f.write(rule + "\n")
+            stats.plain_kept += 1
+        
+        # Other rules
+        for rule in kept_other:
+            f.write(rule + "\n")
+            stats.other_kept += 1
+    
+    # Write whitelist file if requested
+    if whitelist_file and allow_rules:
+        wl_path = Path(whitelist_file)
+        wl_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(wl_path, "w", encoding="utf-8", newline="\n") as f:
+            for rule in allow_rules:
+                f.write(rule + "\n")
+        stats.allow_kept = len(allow_rules)
+    
+    stats.total_output = stats.abp_kept + stats.hosts_kept + stats.plain_kept + stats.other_kept
     
     return stats
 
@@ -642,26 +598,34 @@ def compile_files(input_dir: str, output_file: str) -> CompileStats:
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python -m scripts.compiler <input_dir> <output_file>")
+        print("Usage: python -m scripts.compiler <input_file> <output_file> [whitelist_file]")
         sys.exit(1)
     
-    input_dir = sys.argv[1]
+    input_file = sys.argv[1]
     output_file = sys.argv[2]
+    whitelist_file = sys.argv[3] if len(sys.argv) > 3 else None
     
-    stats = compile_files(input_dir, output_file)
+    # Read input
+    with open(input_file, encoding="utf-8-sig", errors="replace") as f:
+        lines = f.readlines()
+    
+    stats = compile_rules(lines, output_file, whitelist_file)
     
     print(f"\nCompilation complete:")
-    print(f"  Input:  {stats.total_input} rules")
-    print(f"  Output: {stats.total_output} rules")
+    print(f"  Input:  {stats.total_input:,} rules")
+    print(f"  Output: {stats.total_output:,} rules")
     print(f"  Reduction: {(1 - stats.total_output / max(stats.total_input, 1)) * 100:.1f}%")
-    print(f"\nBreakdown:")
-    print(f"  ABP rules:   {stats.abp_kept}")
-    print(f"  Hosts rules: {stats.hosts_kept}")
-    print(f"  Plain rules: {stats.plain_kept}")
-    print(f"  Allow rules: {stats.allow_kept}")
-    print(f"  Other rules: {stats.other_kept}")
-    print(f"\nPruning:")
-    print(f"  Subdomain pruned:    {stats.subdomain_pruned}")
-    print(f"  Cross-format pruned: {stats.cross_format_pruned}")
-    print(f"  Duplicates:          {stats.duplicate_pruned}")
-    print(f"  Cautious keeps:      {stats.cautious_kept}")
+    print(f"\nBy format:")
+    print(f"  ABP:   {stats.abp_kept:,}")
+    print(f"  Hosts: {stats.hosts_kept:,}")
+    print(f"  Plain: {stats.plain_kept:,}")
+    print(f"  Other: {stats.other_kept:,}")
+    if whitelist_file:
+        print(f"  Allow: {stats.allow_kept:,} (separate file)")
+    print(f"\nPruned:")
+    print(f"  ABP subdomains:     {stats.abp_subdomain_pruned:,}")
+    print(f"  TLD wildcards:      {stats.tld_wildcard_pruned:,}")
+    print(f"  Cross-format (ABP): {stats.cross_format_pruned:,}")
+    print(f"  Duplicates:         {stats.duplicate_pruned:,}")
+    print(f"  Whitelist conflicts:{stats.whitelist_conflict_pruned:,}")
+    print(f"  Local hostnames:    {stats.local_hostname_pruned:,}")

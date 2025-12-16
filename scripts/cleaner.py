@@ -116,6 +116,7 @@ class CleanStats(NamedTuple):
     unsupported_modifier_removed: int
     empty_removed: int
     invalid_removed: int
+    trimmed: int  # Lines that had whitespace trimmed
 
 
 # ============================================================================
@@ -195,31 +196,37 @@ def has_unsupported_modifiers(modifiers: set[str]) -> bool:
     return bool(modifiers & UNSUPPORTED_MODIFIERS)
 
 
-def clean_line(line: str) -> CleanResult:
+def clean_line(line: str) -> tuple[CleanResult, bool]:
     """
     Clean a single rule line.
     
     Returns:
-        CleanResult with cleaned line or discard reason
+        (CleanResult, was_trimmed) - was_trimmed is True if whitespace was removed
     """
+    original = line
+    
     # Strip whitespace
     line = line.strip()
+    was_trimmed = len(line) != len(original) and len(line) > 0
     
     # Skip empty lines
     if not line:
-        return CleanResult(None, True, "empty")
+        return CleanResult(None, True, "empty"), False
     
     # Remove full-line comments
     if is_comment(line):
-        return CleanResult(None, True, "comment")
+        return CleanResult(None, True, "comment"), False
     
     # Discard cosmetic/element-hiding rules
     # Example: example.com##.ad-banner, example.com#$#div
     if is_cosmetic_rule(line):
-        return CleanResult(None, True, "cosmetic")
+        return CleanResult(None, True, "cosmetic"), False
     
     # Strip trailing inline comments
+    line_before_comment = line
     line = strip_trailing_comment(line)
+    if len(line) != len(line_before_comment):
+        was_trimmed = True
     
     # For ABP-style rules, check modifiers
     if line.startswith("||") or line.startswith("@@||"):
@@ -228,16 +235,16 @@ def clean_line(line: str) -> CleanResult:
             # DISCARD entire rule (as per user's requirement)
             # This prevents false positives like blocking google.com when
             # the original rule was "$third-party" (third-party connections only)
-            return CleanResult(None, True, "unsupported_modifier")
+            return CleanResult(None, True, "unsupported_modifier"), False
     
     # Handle rules with just $ and modifiers (no pattern)
     if line.startswith("$") or ("|" not in line and "$" in line):
         modifiers = extract_modifiers(line)
         if modifiers and has_unsupported_modifiers(modifiers):
-            return CleanResult(None, True, "unsupported_modifier")
+            return CleanResult(None, True, "unsupported_modifier"), False
     
     # Line is valid, return cleaned version
-    return CleanResult(line, False, None)
+    return CleanResult(line, False, None), was_trimmed
 
 
 def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
@@ -256,11 +263,15 @@ def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
         "unsupported_modifier": 0,
         "empty": 0,
         "invalid": 0,
+        "trimmed": 0,
     }
     
     for line in lines:
         stats["total"] += 1
-        result = clean_line(line)
+        result, was_trimmed = clean_line(line)
+        
+        if was_trimmed:
+            stats["trimmed"] += 1
         
         if result.discarded:
             if result.reason == "comment":
@@ -285,6 +296,7 @@ def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
         unsupported_modifier_removed=stats["unsupported_modifier"],
         empty_removed=stats["empty"],
         invalid_removed=stats["invalid"],
+        trimmed=stats["trimmed"],
     )
 
 

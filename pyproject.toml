@@ -1,0 +1,19 @@
+[project]
+name = "blocklist-merger"
+version = "1.0.0"
+description = "AdGuard Home blocklist compiler with intelligent deduplication"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.31.0",
+    "tldextract>=5.1.0",
+    "aiohttp>=3.9.0",
+    "aiofiles>=23.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+]
+
+[project.scripts]
+blocklist-merge = "scripts.pipeline:main"
