@@ -9,7 +9,6 @@ env:
   SOURCES: config/sources.txt
   RAW_DIR: lists/_raw
   OUTPUT: lists/merged.txt
-  WHITELIST: lists/whitelist.txt
 
 permissions:
   contents: write
@@ -66,7 +65,7 @@ jobs:
         id: compile
         run: |
           START=$(date +%s)
-          python -m scripts.pipeline "$RAW_DIR" "$OUTPUT" "$WHITELIST"
+          python -m scripts.pipeline "$RAW_DIR" "$OUTPUT"
           echo "time=$(($(date +%s) - START))s" >> $GITHUB_OUTPUT
 
       - name: Calculate Stats
@@ -108,7 +107,6 @@ jobs:
             ```
           files: |
             ${{ env.OUTPUT }}
-            ${{ env.WHITELIST }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
