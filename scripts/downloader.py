@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-fetch_sources.py
+downloader.py - Async Blocklist Downloader with Smart Caching
 
-Download blocklists with smart ETag/Last-Modified caching and concurrent fetching.
+Downloads blocklists with ETag/Last-Modified caching and concurrent fetching.
+Falls back to cached files if download fails.
 
 Usage:
-    python -m scripts.fetch_sources --sources sources.txt --outdir data/ --cache .cache
+    python -m scripts.downloader --sources sources.txt --outdir data/ --cache .cache
 """
 from __future__ import annotations
 
