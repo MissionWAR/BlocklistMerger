@@ -52,7 +52,7 @@ python run.py all
 
 ## Acknowledgments
 
-- [AdGuard](https://adguard.com) — for AdGuard Home and their documentation
+- [AdGuard Team](https://adguard.com) — for AdGuard Home and their documentation
 - Blocklist maintainers — for keeping their lists updated
 - Open-source community — for the tools that made this possible
 
