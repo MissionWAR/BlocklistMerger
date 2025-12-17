@@ -532,18 +532,25 @@ def compile_rules(
     # The final output contains only blocking rules.
     
     # =========================================================================
-    # OUTPUT
+    # OUTPUT (atomic write to prevent corruption on crash)
     # =========================================================================
     
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    with open(output_path, "w", encoding="utf-8", newline="\n") as f:
-        # ABP rules (including TLD wildcards)
+    # Write to temp file first, then atomically rename
+    temp_path = output_path.with_suffix(".tmp")
+    
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+        # TLD wildcards (check whitelist before writing)
         for tld, (rule, mods) in abp_wildcards.items():
-            f.write(rule + "\n")
-            stats.abp_kept += 1
+            if tld not in allow_domains and f"*.{tld}" not in allow_domains:
+                f.write(rule + "\n")
+                stats.abp_kept += 1
+            else:
+                stats.whitelist_conflict_pruned += 1
         
+        # ABP rules (already whitelist-checked during pruning)
         for domain, (rule, mods, is_wc) in pruned_abp.items():
             f.write(rule + "\n")
             stats.abp_kept += 1
@@ -552,6 +559,9 @@ def compile_rules(
         for rule in kept_other:
             f.write(rule + "\n")
             stats.other_kept += 1
+    
+    # Atomic rename (prevents partial file on crash)
+    temp_path.replace(output_path)
     
     stats.total_output = stats.abp_kept + stats.other_kept
     
