@@ -2,7 +2,7 @@
 scripts package - AdGuard Home Blocklist Compiler
 
 Modules:
-    fetch_sources: Download blocklists with ETag/Last-Modified caching
+    downloader: Download blocklists with ETag/Last-Modified caching
     cleaner: Clean and validate rules for AGH compatibility
     compiler: Modifier-aware deduplication
     pipeline: Main processing pipeline

@@ -52,7 +52,7 @@ jobs:
         id: fetch
         run: |
           START=$(date +%s)
-          python -m scripts.fetch_sources \
+          python -m scripts.downloader \
             --sources "$SOURCES" \
             --outdir "$RAW_DIR" \
             --cache .cache \
