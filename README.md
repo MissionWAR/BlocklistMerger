@@ -1,6 +1,5 @@
 # Blocklist Merger
 
-[![Update Status](https://github.com/MissionWAR/BlocklistMerger/actions/workflows/update.yml/badge.svg?branch=main)](https://github.com/MissionWAR/BlocklistMerger/actions/workflows/update.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 A tool that merges public DNS blocklists into a single, deduplicated file optimized for [AdGuard Home](https://adguard.com/adguard-home/overview.html).
