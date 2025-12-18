@@ -63,9 +63,10 @@ def load_sources(sources_file: str) -> list[str]:
     
     with open(path, encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            # Skip empty lines and comments
-            if not line or line.startswith("#"):
+            # Strip comments and whitespace
+            line = line.split("#", 1)[0].strip()
+            
+            if not line:
                 continue
             urls.append(line)
     
