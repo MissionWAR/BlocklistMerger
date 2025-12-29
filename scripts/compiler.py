@@ -415,13 +415,11 @@ def compile_rules(
     # =========================================================================
     
     # All ABP blocking domains (for subdomain checks)
-    abp_blocking_domains: set[str] = set()
-    for domain, (rule, mods, is_wc) in abp_rules.items():
-        if not is_wc:  # Don't add wildcard keys like "*.example.com"
-            abp_blocking_domains.add(domain)
-        else:
-            # For wildcards, add the base domain for coverage checking
-            abp_blocking_domains.add(domain[2:])  # Remove "*."
+    # Use set comprehension for efficiency
+    abp_blocking_domains: set[str] = {
+        domain if not is_wc else domain[2:]  # Remove "*." prefix for wildcards
+        for domain, (_, _, is_wc) in abp_rules.items()
+    }
     
     # TLD wildcards
     tld_wildcards: set[str] = set(abp_wildcards.keys())
@@ -445,11 +443,21 @@ def compile_rules(
         return False
     
     def is_whitelisted(domain: str) -> bool:
-        """Check if domain is whitelisted."""
+        """Check if domain is whitelisted.
+        
+        A domain is whitelisted if:
+        1. It's directly in allow_domains (@@||domain^)
+        2. Any parent domain is whitelisted (@@||parent^ covers subdomains)
+        3. A wildcard whitelist covers it (@@||*.parent^)
+        """
         if domain in allow_domains:
             return True
-        # Check wildcard whitelists
+        # Check parent domains and wildcard whitelists
         for parent in walk_parent_domains(domain):
+            # @@||parent^ whitelists parent AND all subdomains
+            if parent in allow_domains:
+                return True
+            # @@||*.parent^ whitelists all subdomains of parent
             if f"*.{parent}" in allow_domains:
                 return True
         return False
