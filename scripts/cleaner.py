@@ -106,8 +106,7 @@ COSMETIC_PATTERN = re.compile(
 # Pattern to detect if a line is likely a comment
 COMMENT_PATTERN = re.compile(r"^\s*[#!]")
 
-# Pattern to extract trailing inline comment (be careful not to match URLs)
-# Only match # comments that are clearly at end of rule, not in URLs
+# Trailing inline comment: match "# comment" preceded by whitespace
 TRAILING_COMMENT_PATTERN = re.compile(r"\s+#\s+.*$")
 
 # Pattern to extract modifier section from ABP rule
@@ -260,6 +259,7 @@ def clean_line(line: str) -> tuple[CleanResult, bool]:
             return CleanResult(None, True, "unsupported_modifier"), False
     
     # Handle rules with just $ and modifiers (no pattern)
+    # e.g., "$script,third-party" without a domain prefix
     if line.startswith("$") or ("|" not in line and "$" in line):
         modifiers = extract_modifiers(line)
         if modifiers and has_unsupported_modifiers(modifiers):
