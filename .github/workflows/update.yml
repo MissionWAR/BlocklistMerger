@@ -12,6 +12,7 @@ env:
 
 permissions:
   contents: write
+  actions: write  # Required for cache management
 
 concurrency:
   group: blocklist-update
@@ -24,12 +25,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
@@ -37,15 +38,14 @@ jobs:
       - name: Install Dependencies
         run: pip install -q .
 
-      - name: Get Cache Key
-        id: cache-key
-        run: echo "week=$(date -u +%Y-%V)" >> $GITHUB_OUTPUT
-
+      # Restore latest available cache (prefix match)
+      # The key will never match exactly, so restore-keys finds the most recent
       - name: Restore Cache
-        uses: actions/cache@v5
+        id: cache-restore
+        uses: actions/cache/restore@v4
         with:
           path: .cache
-          key: blocklists-${{ steps.cache-key.outputs.week }}
+          key: blocklists-${{ github.run_id }}
           restore-keys: blocklists-
 
       - name: Fetch Sources
@@ -110,9 +110,30 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cleanup Cache
-        if: always()
-        run: find .cache -mtime +7 -delete 2>/dev/null || true
+      # Save cache after successful fetch (even if compile/publish fails)
+      # This ensures we don't lose downloaded lists on downstream failures
+      - name: Save Cache
+        uses: actions/cache/save@v4
+        if: always() && steps.fetch.outcome == 'success'
+        with:
+          path: .cache
+          key: blocklists-${{ github.run_id }}
+
+      # Remove old caches to stay within storage limits (keep last 3)
+      - name: Cleanup Old Caches
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh cache list --repo ${{ github.repository }} \
+            --key blocklists- \
+            --sort created_at \
+            --order desc \
+            --limit 100 \
+            --json key \
+            --jq '.[3:] | .[].key' | while read -r key; do
+              gh cache delete "$key" --repo ${{ github.repository }} --confirm || true
+          done
 
       - name: Summary
         if: always()
@@ -127,4 +148,5 @@ jobs:
           | Sources | ${{ steps.fetch.outputs.count || 'N/A' }} |
           | Fetch Time | ${{ steps.fetch.outputs.time || '?' }} |
           | Compile Time | ${{ steps.compile.outputs.time || '?' }} |
+          | Cache | ${{ steps.cache-restore.outputs.cache-matched-key || 'None' }} |
           EOF
