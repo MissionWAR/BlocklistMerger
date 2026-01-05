@@ -12,7 +12,7 @@ env:
 
 permissions:
   contents: write
-  actions: write  # Required for cache management
+  actions: write
 
 concurrency:
   group: blocklist-update
@@ -32,20 +32,22 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: pip
 
       - name: Install Dependencies
         run: pip install -q .
 
-      # Restore latest available cache (prefix match)
-      # The key will never match exactly, so restore-keys finds the most recent
+      - name: Get Cache Key
+        id: cache-key
+        run: echo "date=$(date -u +'%Y-%m-%d_%H%M')" >> $GITHUB_OUTPUT
+
       - name: Restore Cache
         id: cache-restore
         uses: actions/cache/restore@v4
         with:
           path: .cache
-          key: blocklists-${{ github.run_id }}
+          key: blocklists-${{ steps.cache-key.outputs.date }}
           restore-keys: blocklists-
 
       - name: Fetch Sources
@@ -110,16 +112,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Save cache after successful fetch (even if compile/publish fails)
-      # This ensures we don't lose downloaded lists on downstream failures
       - name: Save Cache
         uses: actions/cache/save@v4
         if: always() && steps.fetch.outcome == 'success'
         with:
           path: .cache
-          key: blocklists-${{ github.run_id }}
+          key: blocklists-${{ steps.cache-key.outputs.date }}
 
-      # Remove old caches to stay within storage limits (keep last 3)
       - name: Cleanup Old Caches
         if: success()
         env:
@@ -149,5 +148,5 @@ jobs:
           | Sources | ${{ steps.fetch.outputs.count || 'N/A' }} |
           | Fetch Time | ${{ steps.fetch.outputs.time || '?' }} |
           | Compile Time | ${{ steps.compile.outputs.time || '?' }} |
-          | Cache | ${{ steps.cache-restore.outputs.cache-matched-key || 'None' }} |
+          | Cache | ${{ steps.cache-restore.outputs.cache-matched-key || 'New' }} |
           EOF
