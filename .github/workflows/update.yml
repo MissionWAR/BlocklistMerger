@@ -132,7 +132,8 @@ jobs:
             --limit 100 \
             --json key \
             --jq '.[3:] | .[].key' | while read -r key; do
-              gh cache delete "$key" --repo ${{ github.repository }} --confirm || true
+              echo "Deleting cache: $key"
+              gh cache delete "$key" --repo ${{ github.repository }} || true
           done
 
       - name: Summary
