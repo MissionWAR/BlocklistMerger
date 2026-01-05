@@ -303,9 +303,8 @@ def compile_rules(
     abp_rules: dict[str, tuple[str, frozenset, bool]] = {}
     abp_wildcards: dict[str, tuple[str, frozenset]] = {}  # TLD wildcards: tld -> rule
     
-    # Exception rules
-    allow_rules: list[str] = []
-    allow_domains: set[str] = set()  # Domains covered by @@rules
+    # Whitelisted domains (from @@rules)
+    allow_domains: set[str] = set()
     
     # Other rules (regex, partial matches, etc.)
     other_rules: list[str] = []
@@ -327,7 +326,6 @@ def compile_rules(
                 continue
             
             if is_exception:
-                allow_rules.append(line)
                 # Track whitelisted domains for conflict removal
                 if is_wildcard:
                     # @@||*.example.com^ - covers all subdomains
@@ -361,9 +359,9 @@ def compile_rules(
                     stats.duplicate_pruned += 1
             continue
         
-        # Other exception rules
+        # Other exception rules (non-ABP format like /regex/)
         if line.startswith("@@"):
-            allow_rules.append(line)
+            # Can't extract domain from non-ABP exceptions, skip for now
             continue
         
         # =====================================================================
