@@ -92,6 +92,12 @@ LOCAL_HOSTNAMES = frozenset({
     "ip6-mcastprefix", "ip6-allnodes", "ip6-allrouters", "ip6-allhosts",
 })
 
+# Modifiers with special behavior that should never be pruned
+SPECIAL_BEHAVIOR_MODIFIERS = frozenset({"badfilter", "dnsrewrite", "denyallow"})
+
+# Modifiers that restrict who is blocked
+CLIENT_RESTRICTION_MODIFIERS = frozenset({"client", "ctag"})
+
 
 # ============================================================================
 # DATA STRUCTURES
@@ -260,7 +266,7 @@ def should_prune_by_modifiers(child_mods: frozenset, parent_mods: frozenset) -> 
         return False
     
     # Special behavior modifiers are never redundant
-    if child_mods & {"badfilter", "dnsrewrite", "denyallow"}:
+    if child_mods & SPECIAL_BEHAVIOR_MODIFIERS:
         return False
     
     # Handle $dnstype: parent blocking ALL types covers child blocking specific type,
@@ -273,7 +279,7 @@ def should_prune_by_modifiers(child_mods: frozenset, parent_mods: frozenset) -> 
         return False  # Child blocks ALL types, parent only blocks one type
     
     # $client/$ctag restrict WHO is blocked. Unrestricted child is more general.
-    if (parent_mods & {"client", "ctag"}) and not (child_mods & {"client", "ctag"}):
+    if (parent_mods & CLIENT_RESTRICTION_MODIFIERS) and not (child_mods & CLIENT_RESTRICTION_MODIFIERS):
         return False
     
     return True
