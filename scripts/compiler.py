@@ -56,12 +56,11 @@ _tld_extract = tldextract.TLDExtract(suffix_list_urls=None)
 # REGEX PATTERNS
 # ============================================================================
 
-# ABP domain pattern: ||domain^ or ||*.domain^
-# Also matches IP addresses like ||100.48.203.212^
+# ABP pattern: ||[*.]domain^ (including IP addresses)
 ABP_DOMAIN_PATTERN = re.compile(
-    r"^(@@)?\|\|"              # Start with || or @@||  (capture @@ for exception check)
-    r"(\*\.)?"                 # Optional *. for wildcard
-    r"([^^\$|*\s]+)"           # Domain/IP (anything except ^$|* or whitespace)
+    r"^(@@)?\|\|"              # Start: || or @@|| (group 1: exception marker)
+    r"(\*\.)?"                 # Optional *. wildcard (group 2)
+    r"([^^\$|*\s]+)"           # Domain/IP (group 3)
     r"\^"                      # Separator
 )
 
@@ -80,9 +79,10 @@ PLAIN_DOMAIN_PATTERN = re.compile(
     r"(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
 )
 
-# Local/blocking IPs in hosts format
+# Local/blocking IPs recognized in hosts format
 BLOCKING_IPS = frozenset({
-    "0.0.0.0", "127.0.0.1", "::1", "::0", "::","0:0:0:0:0:0:0:0", "0:0:0:0:0:0:0:1",
+    "0.0.0.0", "127.0.0.1", "::1", "::0", "::",
+    "0:0:0:0:0:0:0:0", "0:0:0:0:0:0:0:1",
 })
 
 # Local hostnames to skip
@@ -142,7 +142,7 @@ def extract_abp_info(rule: str) -> tuple[str | None, frozenset, bool, bool]:
     if not match:
         return None, frozenset(), False, False
     
-    # Group 1: @@ (exception marker), Group 2: *. (wildcard), Group 3: domain
+    # Groups: (1) @@ exception, (2) *. wildcard, (3) domain
     is_exception = match.group(1) is not None
     is_wildcard = match.group(2) is not None
     domain = normalize_domain(match.group(3))
@@ -603,6 +603,6 @@ if __name__ == "__main__":
     print(f"  ABP subdomains:     {stats.abp_subdomain_pruned:,}")
     print(f"  TLD wildcards:      {stats.tld_wildcard_pruned:,}")
     print(f"  Duplicates:         {stats.duplicate_pruned:,}")
-    print(f"  Whitelist conflicts:{stats.whitelist_conflict_pruned:,}")
+    print(f"  Whitelist conflicts: {stats.whitelist_conflict_pruned:,}")
     print(f"  Local hostnames:    {stats.local_hostname_pruned:,}")
 
