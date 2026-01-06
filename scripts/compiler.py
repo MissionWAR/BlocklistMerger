@@ -40,7 +40,6 @@ See docs/LOGIC.md for detailed examples of each pruning rule.
 """
 
 import re
-import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -577,6 +576,8 @@ def compile_rules(
 # ============================================================================
 
 if __name__ == "__main__":
+    import sys
+    
     if len(sys.argv) < 3:
         print("Usage: python -m scripts.compiler <input_file> <output_file>")
         sys.exit(1)
