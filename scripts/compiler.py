@@ -241,7 +241,7 @@ def walk_parent_domains(domain: str) -> tuple[str, ...]:
     return tuple(parents)
 
 
-def should_prune_by_modifiers(child_mods: frozenset, parent_mods: frozenset) -> bool:
+def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset[str]) -> bool:
     """
     Determine if a child rule is redundant given the parent's modifiers.
     
