@@ -32,8 +32,6 @@ KEY OPERATIONS:
     4. Keep hosts, plain domains, and ABP rules with supported modifiers
 """
 
-from __future__ import annotations
-
 import re
 from typing import NamedTuple
 
