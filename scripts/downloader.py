@@ -8,7 +8,6 @@ Falls back to cached files if download fails.
 Usage:
     python -m scripts.downloader --sources sources.txt --outdir data/ --cache .cache
 """
-from __future__ import annotations
 
 import argparse
 import asyncio

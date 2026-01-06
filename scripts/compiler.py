@@ -39,8 +39,6 @@ WHITELIST HANDLING:
 See docs/LOGIC.md for detailed examples of each pruning rule.
 """
 
-from __future__ import annotations
-
 import re
 import sys
 from dataclasses import dataclass

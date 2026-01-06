@@ -44,11 +44,6 @@ Each list is maintained by its original author. This project only merges and ded
 
 ```bash
 pip install .
-
-# Option 1: Using run.py (recommended)
-python run.py all
-
-# Option 2: Running modules directly
 python -m scripts.downloader --sources config/sources.txt --outdir lists/_raw --cache .cache
 python -m scripts.pipeline lists/_raw lists/merged.txt
 ```
