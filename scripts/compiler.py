@@ -39,10 +39,7 @@ WHITELIST HANDLING:
 See docs/LOGIC.md for detailed examples of each pruning rule.
 """
 
-from __future__ import annotations
-
 import re
-import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -56,12 +53,11 @@ _tld_extract = tldextract.TLDExtract(suffix_list_urls=None)
 # REGEX PATTERNS
 # ============================================================================
 
-# ABP domain pattern: ||domain^ or ||*.domain^
-# Also matches IP addresses like ||100.48.203.212^
+# ABP pattern: ||[*.]domain^ (including IP addresses)
 ABP_DOMAIN_PATTERN = re.compile(
-    r"^(@@)?\|\|"              # Start with || or @@||  (capture @@ for exception check)
-    r"(\*\.)?"                 # Optional *. for wildcard
-    r"([^^\$|*\s]+)"           # Domain/IP (anything except ^$|* or whitespace)
+    r"^(@@)?\|\|"              # Start: || or @@|| (group 1: exception marker)
+    r"(\*\.)?"                 # Optional *. wildcard (group 2)
+    r"([^^\$|*\s]+)"           # Domain/IP (group 3)
     r"\^"                      # Separator
 )
 
@@ -80,9 +76,10 @@ PLAIN_DOMAIN_PATTERN = re.compile(
     r"(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$"
 )
 
-# Local/blocking IPs in hosts format
+# Local/blocking IPs recognized in hosts format
 BLOCKING_IPS = frozenset({
-    "0.0.0.0", "127.0.0.1", "::1", "::0", "::","0:0:0:0:0:0:0:0", "0:0:0:0:0:0:0:1",
+    "0.0.0.0", "127.0.0.1", "::1", "::0", "::",
+    "0:0:0:0:0:0:0:0", "0:0:0:0:0:0:0:1",
 })
 
 # Local hostnames to skip
@@ -91,6 +88,12 @@ LOCAL_HOSTNAMES = frozenset({
     "ip6-localhost", "ip6-loopback", "ip6-localnet",
     "ip6-mcastprefix", "ip6-allnodes", "ip6-allrouters", "ip6-allhosts",
 })
+
+# Modifiers with special behavior that should never be pruned
+SPECIAL_BEHAVIOR_MODIFIERS = frozenset({"badfilter", "dnsrewrite", "denyallow"})
+
+# Modifiers that restrict who is blocked
+CLIENT_RESTRICTION_MODIFIERS = frozenset({"client", "ctag"})
 
 
 # ============================================================================
@@ -136,7 +139,7 @@ def extract_abp_info(rule: str) -> tuple[str | None, frozenset, bool, bool]:
     if not match:
         return None, frozenset(), False, False
     
-    # Group 1: @@ (exception marker), Group 2: *. (wildcard), Group 3: domain
+    # Groups: (1) @@ exception, (2) *. wildcard, (3) domain
     is_exception = match.group(1) is not None
     is_wildcard = match.group(2) is not None
     domain = normalize_domain(match.group(3))
@@ -238,7 +241,7 @@ def walk_parent_domains(domain: str) -> tuple[str, ...]:
     return tuple(parents)
 
 
-def should_prune_by_modifiers(child_mods: frozenset, parent_mods: frozenset) -> bool:
+def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset[str]) -> bool:
     """
     Determine if a child rule is redundant given the parent's modifiers.
     
@@ -260,7 +263,7 @@ def should_prune_by_modifiers(child_mods: frozenset, parent_mods: frozenset) -> 
         return False
     
     # Special behavior modifiers are never redundant
-    if child_mods & {"badfilter", "dnsrewrite", "denyallow"}:
+    if child_mods & SPECIAL_BEHAVIOR_MODIFIERS:
         return False
     
     # Handle $dnstype: parent blocking ALL types covers child blocking specific type,
@@ -273,7 +276,7 @@ def should_prune_by_modifiers(child_mods: frozenset, parent_mods: frozenset) -> 
         return False  # Child blocks ALL types, parent only blocks one type
     
     # $client/$ctag restrict WHO is blocked. Unrestricted child is more general.
-    if (parent_mods & {"client", "ctag"}) and not (child_mods & {"client", "ctag"}):
+    if (parent_mods & CLIENT_RESTRICTION_MODIFIERS) and not (child_mods & CLIENT_RESTRICTION_MODIFIERS):
         return False
     
     return True
@@ -303,9 +306,8 @@ def compile_rules(
     abp_rules: dict[str, tuple[str, frozenset, bool]] = {}
     abp_wildcards: dict[str, tuple[str, frozenset]] = {}  # TLD wildcards: tld -> rule
     
-    # Exception rules
-    allow_rules: list[str] = []
-    allow_domains: set[str] = set()  # Domains covered by @@rules
+    # Whitelisted domains (from @@rules)
+    allow_domains: set[str] = set()
     
     # Other rules (regex, partial matches, etc.)
     other_rules: list[str] = []
@@ -327,7 +329,6 @@ def compile_rules(
                 continue
             
             if is_exception:
-                allow_rules.append(line)
                 # Track whitelisted domains for conflict removal
                 if is_wildcard:
                     # @@||*.example.com^ - covers all subdomains
@@ -361,9 +362,9 @@ def compile_rules(
                     stats.duplicate_pruned += 1
             continue
         
-        # Other exception rules
+        # Other exception rules (non-ABP format like /regex/)
         if line.startswith("@@"):
-            allow_rules.append(line)
+            # Can't extract domain from non-ABP exceptions, skip for now
             continue
         
         # =====================================================================
@@ -415,13 +416,11 @@ def compile_rules(
     # =========================================================================
     
     # All ABP blocking domains (for subdomain checks)
-    abp_blocking_domains: set[str] = set()
-    for domain, (rule, mods, is_wc) in abp_rules.items():
-        if not is_wc:  # Don't add wildcard keys like "*.example.com"
-            abp_blocking_domains.add(domain)
-        else:
-            # For wildcards, add the base domain for coverage checking
-            abp_blocking_domains.add(domain[2:])  # Remove "*."
+    # Use set comprehension for efficiency
+    abp_blocking_domains: set[str] = {
+        domain if not is_wc else domain[2:]  # Remove "*." prefix for wildcards
+        for domain, (_, _, is_wc) in abp_rules.items()
+    }
     
     # TLD wildcards
     tld_wildcards: set[str] = set(abp_wildcards.keys())
@@ -445,11 +444,21 @@ def compile_rules(
         return False
     
     def is_whitelisted(domain: str) -> bool:
-        """Check if domain is whitelisted."""
+        """Check if domain is whitelisted.
+        
+        A domain is whitelisted if:
+        1. It's directly in allow_domains (@@||domain^)
+        2. Any parent domain is whitelisted (@@||parent^ covers subdomains)
+        3. A wildcard whitelist covers it (@@||*.parent^)
+        """
         if domain in allow_domains:
             return True
-        # Check wildcard whitelists
+        # Check parent domains and wildcard whitelists
         for parent in walk_parent_domains(domain):
+            # @@||parent^ whitelists parent AND all subdomains
+            if parent in allow_domains:
+                return True
+            # @@||*.parent^ whitelists all subdomains of parent
             if f"*.{parent}" in allow_domains:
                 return True
         return False
@@ -567,6 +576,8 @@ def compile_rules(
 # ============================================================================
 
 if __name__ == "__main__":
+    import sys
+    
     if len(sys.argv) < 3:
         print("Usage: python -m scripts.compiler <input_file> <output_file>")
         sys.exit(1)
@@ -591,6 +602,6 @@ if __name__ == "__main__":
     print(f"  ABP subdomains:     {stats.abp_subdomain_pruned:,}")
     print(f"  TLD wildcards:      {stats.tld_wildcard_pruned:,}")
     print(f"  Duplicates:         {stats.duplicate_pruned:,}")
-    print(f"  Whitelist conflicts:{stats.whitelist_conflict_pruned:,}")
+    print(f"  Whitelist conflicts: {stats.whitelist_conflict_pruned:,}")
     print(f"  Local hostnames:    {stats.local_hostname_pruned:,}")
 

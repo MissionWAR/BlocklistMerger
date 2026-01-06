@@ -13,7 +13,6 @@ Pipeline stages:
 3. Compile (compress formats, deduplicate, prune subdomains)
 4. Write merged output
 """
-from __future__ import annotations
 
 import sys
 import time
