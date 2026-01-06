@@ -32,8 +32,6 @@ KEY OPERATIONS:
     4. Keep hosts, plain domains, and ABP rules with supported modifiers
 """
 
-from __future__ import annotations
-
 import re
 from typing import NamedTuple
 
@@ -41,17 +39,6 @@ from typing import NamedTuple
 # ============================================================================
 # MODIFIER DEFINITIONS (based on official AdGuard DNS filtering syntax docs)
 # ============================================================================
-
-# Modifiers supported by AdGuard Home DNS filtering
-SUPPORTED_MODIFIERS = frozenset({
-    "important",       # Increases rule priority
-    "badfilter",       # Disables matching rules
-    "dnsrewrite",      # Rewrites DNS responses
-    "denyallow",       # Excludes domains from blocking
-    "client",          # Restricts to specific clients
-    "dnstype",         # Filters by DNS record type
-    "ctag",            # Client tags (keeping for completeness, though rare in public lists)
-})
 
 # Modifiers that are browser-only and NOT supported by AGH
 # If a rule contains ANY of these, the ENTIRE RULE should be discarded
@@ -84,7 +71,6 @@ UNSUPPORTED_MODIFIERS = frozenset({
     "app",
     # Method restrictions (browser-only)
     "method",
-    # Any other modifiers not in supported list
 })
 
 
@@ -106,16 +92,12 @@ COSMETIC_PATTERN = re.compile(
 # Pattern to detect if a line is likely a comment
 COMMENT_PATTERN = re.compile(r"^\s*[#!]")
 
-# Pattern to extract trailing inline comment (be careful not to match URLs)
-# Only match # comments that are clearly at end of rule, not in URLs
+# Trailing inline comment: match "# comment" preceded by whitespace
 TRAILING_COMMENT_PATTERN = re.compile(r"\s+#\s+.*$")
 
 # Pattern to extract modifier section from ABP rule
 # Matches: $modifier1,modifier2,... at end of rule
 MODIFIER_PATTERN = re.compile(r"\$([^$]+)$")
-
-# Pattern to validate basic ABP format
-ABP_RULE_PATTERN = re.compile(r"^@@?\|\|[^\s|^]+\^")
 
 
 # ============================================================================
@@ -260,6 +242,7 @@ def clean_line(line: str) -> tuple[CleanResult, bool]:
             return CleanResult(None, True, "unsupported_modifier"), False
     
     # Handle rules with just $ and modifiers (no pattern)
+    # e.g., "$script,third-party" without a domain prefix
     if line.startswith("$") or ("|" not in line and "$" in line):
         modifiers = extract_modifiers(line)
         if modifiers and has_unsupported_modifiers(modifiers):

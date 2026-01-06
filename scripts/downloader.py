@@ -8,7 +8,6 @@ Falls back to cached files if download fails.
 Usage:
     python -m scripts.downloader --sources sources.txt --outdir data/ --cache .cache
 """
-from __future__ import annotations
 
 import argparse
 import asyncio
@@ -24,9 +23,9 @@ import aiofiles
 
 
 # Default configuration
-DEFAULT_TIMEOUT = 30
-DEFAULT_RETRIES = 3
-DEFAULT_CONCURRENCY = 8
+DEFAULT_TIMEOUT = 30        # seconds per request
+DEFAULT_RETRIES = 3         # attempts before giving up
+DEFAULT_CONCURRENCY = 8     # simultaneous connections
 
 # State file for ETag/Last-Modified tracking
 STATE_FILE = "state.json"

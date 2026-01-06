@@ -12,6 +12,7 @@ env:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: blocklist-update
@@ -24,14 +25,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
         with:
           fetch-depth: 1
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548  # v6.1.0
         with:
-          python-version: "3.12"
+          python-version: "3.14"
           cache: pip
 
       - name: Install Dependencies
@@ -39,13 +40,14 @@ jobs:
 
       - name: Get Cache Key
         id: cache-key
-        run: echo "week=$(date -u +%Y-%V)" >> $GITHUB_OUTPUT
+        run: echo "date=$(date -u +'%Y-%m-%d_%H%M')" >> $GITHUB_OUTPUT
 
       - name: Restore Cache
-        uses: actions/cache@v5
+        id: cache-restore
+        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
         with:
           path: .cache
-          key: blocklists-${{ steps.cache-key.outputs.week }}
+          key: blocklists-${{ steps.cache-key.outputs.date }}
           restore-keys: blocklists-
 
       - name: Fetch Sources
@@ -87,7 +89,7 @@ jobs:
           echo "Validation passed: $RULES rules"
 
       - name: Publish Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b  # v2.5.0
         with:
           tag_name: latest
           name: Merged Blocklist
@@ -110,9 +112,28 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cleanup Cache
-        if: always()
-        run: find .cache -mtime +7 -delete 2>/dev/null || true
+      - name: Save Cache
+        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
+        if: always() && steps.fetch.outcome == 'success'
+        with:
+          path: .cache
+          key: blocklists-${{ steps.cache-key.outputs.date }}
+
+      - name: Cleanup Old Caches
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh cache list --repo ${{ github.repository }} \
+            --key blocklists- \
+            --sort created_at \
+            --order desc \
+            --limit 100 \
+            --json key \
+            --jq '.[3:] | .[].key' | while read -r key; do
+              echo "Deleting cache: $key"
+              gh cache delete "$key" --repo ${{ github.repository }} || true
+          done
 
       - name: Summary
         if: always()
@@ -127,4 +148,5 @@ jobs:
           | Sources | ${{ steps.fetch.outputs.count || 'N/A' }} |
           | Fetch Time | ${{ steps.fetch.outputs.time || '?' }} |
           | Compile Time | ${{ steps.compile.outputs.time || '?' }} |
+          | Cache | ${{ steps.cache-restore.outputs.cache-matched-key || 'New' }} |
           EOF
