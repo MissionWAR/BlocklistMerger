@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8  # v6.0.1
         with:
           fetch-depth: 1
 
@@ -44,7 +44,7 @@ jobs:
 
       - name: Restore Cache
         id: cache-restore
-        uses: actions/cache/restore@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
+        uses: actions/cache/restore@9255dc7a253b0ccc959486e2bca901246202afeb  # v5.0.1
         with:
           path: .cache
           key: blocklists-${{ steps.cache-key.outputs.date }}
@@ -113,7 +113,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Save Cache
-        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57  # v4.2.0
+        uses: actions/cache/save@9255dc7a253b0ccc959486e2bca901246202afeb  # v5.0.1
         if: always() && steps.fetch.outcome == 'success'
         with:
           path: .cache
