@@ -75,7 +75,7 @@ https://divested.dev/hosts-domains-wildcards
 https://feodotracker.abuse.ch/downloads/ipblocklist.txt
 https://hostfiles.frogeye.fr/firstparty-trackers-hosts.txt
 https://hblock.molinero.dev/hosts_adblock.txt
-https://o0.pages.dev/Xtra/adblock.txt
+https://github.com/badmojr/1Hosts/releases/download/latest/1hosts-Xtra_adblock.txt
 https://adaway.org/hosts.txt
 https://lists.cyberhost.uk/malware.txt
 https://hosts.tweedge.net/malicious.txt
