@@ -7,15 +7,11 @@ updates:
       day: "monday"
     commit-message:
       prefix: "ci"
-    labels:
-      - "dependencies"
-      - "github-actions"
     groups:
       actions:
         patterns:
           - "*"
 
-  # Python dependencies
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
@@ -23,10 +19,8 @@ updates:
       day: "monday"
     commit-message:
       prefix: "deps"
-    labels:
-      - "dependencies"
-      - "python"
     groups:
       python-deps:
         patterns:
           - "*"
+
