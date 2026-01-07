@@ -121,11 +121,13 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
     stage1_start = time.time()
     
     all_cleaned: list[str] = []
+    files = sorted(input_path.glob("*.txt"))
     
-    # Process .txt files in sorted order for deterministic results
-    for file in sorted(input_path.glob("*.txt")):
+    # Process files (deterministic order for reproducibility)
+    for file in files:
         stats["files_processed"] += 1
         
+        # Read and clean each file
         with open(file, encoding="utf-8-sig", errors="replace") as f:
             for line in f:
                 stats["lines_raw"] += 1
@@ -137,14 +139,15 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
                     stats["trimmed"] += 1
                 
                 if result.discarded:
-                    if result.reason == "comment":
-                        stats["comments_removed"] += 1
-                    elif result.reason == "cosmetic":
-                        stats["cosmetic_removed"] += 1
-                    elif result.reason == "unsupported_modifier":
-                        stats["unsupported_removed"] += 1
-                    elif result.reason == "empty":
-                        stats["empty_removed"] += 1
+                    match result.reason:
+                        case "comment":
+                            stats["comments_removed"] += 1
+                        case "cosmetic":
+                            stats["cosmetic_removed"] += 1
+                        case "unsupported_modifier":
+                            stats["unsupported_removed"] += 1
+                        case "empty":
+                            stats["empty_removed"] += 1
                 else:
                     all_cleaned.append(result.line)  # type: ignore[arg-type]
     
