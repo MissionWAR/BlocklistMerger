@@ -527,8 +527,8 @@ def compile_rules(
     # Whitelisted domains (from @@rules)
     allow_domains: set[str] = set()
     
-    # Other rules (regex, partial matches, etc.)
-    other_rules: list[str] = []
+    # Other rules (regex, partial matches, etc.) - use set for inline dedup
+    other_rules: set[str] = set()
     
     for line in lines:
         stats.total_input += 1
@@ -626,10 +626,13 @@ def compile_rules(
             continue
         
         # -----------------------------------------------------------------
-        # Other (regex, etc.)
+        # Other (regex, etc.) - inline duplicate check with set
         # -----------------------------------------------------------------
         if line.startswith("/") or "|" in line or "*" in line:
-            other_rules.append(line)
+            if line not in other_rules:
+                other_rules.add(line)
+            else:
+                stats.duplicate_pruned += 1
             continue
     
     # =========================================================================
@@ -739,20 +742,8 @@ def compile_rules(
         else:
             pruned_abp[domain] = (rule, modifiers, is_wildcard)
     
-    # =========================================================================
-    # PHASE 4: Deduplicate other rules (regex, partial matches, etc.)
-    # =========================================================================
-    
-    seen_other: set[str] = set()
-    kept_other: list[str] = []
-    for rule in other_rules:
-        if rule not in seen_other:
-            seen_other.add(rule)
-            kept_other.append(rule)
-        else:
-            stats.duplicate_pruned += 1
-    
-    # NOTE: Whitelist/exception rules (@@) are intentionally NOT output.
+    # NOTE: other_rules is already deduplicated (used set during parse)
+    # Whitelist/exception rules (@@) are intentionally NOT output.
     # They were only used internally to remove conflicting blocking rules.
     # The final output contains only blocking rules.
     
@@ -780,8 +771,8 @@ def compile_rules(
             f.write(rule + "\n")
             stats.abp_kept += 1
         
-        # Other rules (regex, partial matches, etc.)
-        for rule in kept_other:
+        # Other rules (regex, partial matches, etc.) - already deduplicated
+        for rule in other_rules:
             f.write(rule + "\n")
             stats.other_kept += 1
     
