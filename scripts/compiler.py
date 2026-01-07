@@ -42,10 +42,10 @@ Whitelist Handling:
 """
 
 import re
-import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from sys import intern
 from typing import Final
 
 import tldextract
@@ -68,6 +68,9 @@ WildcardEntry = tuple[str, frozenset[str]]
 
 #: LRU cache size for domain extraction (covers most unique domains in a run)
 LRU_CACHE_SIZE: Final[int] = 65536
+
+#: Pre-allocated empty frozenset to avoid repeated allocations
+EMPTY_FROZENSET: Final[frozenset[str]] = frozenset()
 
 # Pre-configure tldextract for better performance (no online updates check)
 _tld_extract = tldextract.TLDExtract(suffix_list_urls=None)
@@ -202,17 +205,20 @@ def normalize_domain(domain: str) -> str:
     """
     Normalize a domain to lowercase, stripped of whitespace and trailing dots.
     
+    Uses sys.intern() to deduplicate domain strings in memory, which also
+    speeds up dictionary lookups (pointer comparison vs string comparison).
+    
     Args:
         domain: The domain string to normalize
         
     Returns:
-        Normalized domain string
+        Normalized and interned domain string
         
     Example:
         >>> normalize_domain("  Example.COM.  ")
         'example.com'
     """
-    return domain.lower().strip().rstrip(".")
+    return intern(domain.lower().strip().rstrip("."))
 
 
 def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]:
@@ -237,7 +243,7 @@ def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]
     """
     match = ABP_DOMAIN_PATTERN.match(rule)
     if not match:
-        return None, frozenset(), False, False
+        return None, EMPTY_FROZENSET, False, False
     
     # Groups: (1) @@ exception, (2) *. wildcard, (3) domain
     is_exception = match.group(1) is not None
@@ -245,18 +251,21 @@ def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]
     domain = normalize_domain(match.group(3))
     
     # Extract modifiers from $modifier1,modifier2,...
-    modifiers: set[str] = set()
-    if "$" in rule:
-        mod_part = rule.split("$", 1)[1]
-        for mod in mod_part.split(","):
-            mod_name = mod.split("=")[0].strip().lower()
-            # Handle negation prefix (e.g., ~third-party)
-            if mod_name.startswith("~"):
-                mod_name = mod_name[1:]
-            if mod_name:
-                modifiers.add(mod_name)
+    # Fast path: no $ means no modifiers (common case)
+    if "$" not in rule:
+        return domain, EMPTY_FROZENSET, is_exception, is_wildcard
     
-    return domain, frozenset(modifiers), is_exception, is_wildcard
+    modifiers: set[str] = set()
+    mod_part = rule.split("$", 1)[1]
+    for mod in mod_part.split(","):
+        mod_name = mod.split("=")[0].strip().lower()
+        # Handle negation prefix (e.g., ~third-party)
+        if mod_name.startswith("~"):
+            mod_name = mod_name[1:]
+        if mod_name:
+            modifiers.add(mod_name)
+    
+    return domain, frozenset(modifiers) if modifiers else EMPTY_FROZENSET, is_exception, is_wildcard
 
 
 def extract_hosts_info(rule: str) -> tuple[str | None, list[str]]:
@@ -439,6 +448,11 @@ def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset
         >>> should_prune_by_modifiers(frozenset({'important'}), frozenset())
         False  # Child's $important takes priority
     """
+    # Fast path: no modifiers on either side (most common case ~90%+)
+    # This avoids all the set operations below
+    if not child_mods and not parent_mods:
+        return True
+    
     # $badfilter disables rules, it doesn't block anything
     if "badfilter" in parent_mods:
         return False
@@ -518,14 +532,16 @@ def compile_rules(
     
     for line in lines:
         stats.total_input += 1
-        line = line.strip()
-        if not line:
+        
+        # Early exit for empty lines (walrus operator avoids assignment for empty)
+        if not (line := line.strip()):
             continue
         
         # -----------------------------------------------------------------
         # ABP-style rules (highest priority)
         # -----------------------------------------------------------------
-        if line.startswith("||") or line.startswith("@@||"):
+        # Use tuple form for single startswith call (faster than OR)
+        if line.startswith(("||", "@@||")):
             domain, modifiers, is_exception, is_wildcard = extract_abp_info(line)
             
             if not domain:
@@ -586,7 +602,7 @@ def compile_rules(
                 # Convert to ABP format: 0.0.0.0 example.com → ||example.com^
                 abp_rule = f"||{domain}^"
                 if domain not in abp_rules:
-                    abp_rules[domain] = (abp_rule, frozenset(), False)
+                    abp_rules[domain] = (abp_rule, EMPTY_FROZENSET, False)
                     stats.formats_compressed += 1
                 else:
                     stats.duplicate_pruned += 1
@@ -601,7 +617,7 @@ def compile_rules(
                 # Convert to ABP format: example.com → ||example.com^
                 abp_rule = f"||{domain}^"
                 if domain not in abp_rules:
-                    abp_rules[domain] = (abp_rule, frozenset(), False)
+                    abp_rules[domain] = (abp_rule, EMPTY_FROZENSET, False)
                     stats.formats_compressed += 1
                 else:
                     stats.duplicate_pruned += 1
@@ -782,6 +798,8 @@ def compile_rules(
 # =============================================================================
 
 if __name__ == "__main__":
+    import sys
+    
     if len(sys.argv) < 3:
         print("Usage: python -m scripts.compiler <input_file> <output_file>")
         sys.exit(1)

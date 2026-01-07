@@ -416,7 +416,8 @@ def clean_line(line: str) -> tuple[CleanResult, bool]:
         was_trimmed = True
     
     # For ABP-style rules, check modifiers
-    if line.startswith("||") or line.startswith("@@||"):
+    # Use tuple form for single startswith call (faster than OR)
+    if line.startswith(("||", "@@||")):
         modifiers = extract_modifiers(line)
         if modifiers and has_unsupported_modifiers(modifiers):
             # DISCARD entire rule (as per design decision)
