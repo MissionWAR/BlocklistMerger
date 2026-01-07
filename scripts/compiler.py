@@ -116,7 +116,7 @@ class CompileStats:
     duplicate_pruned: int = 0
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
-    hosts_compressed: int = 0  # Hosts/plain rules converted to ABP format
+    formats_compressed: int = 0  # Hosts/plain domains converted to ABP format
 
 
 # ============================================================================
@@ -382,7 +382,7 @@ def compile_rules(
                 abp_rule = f"||{domain}^"
                 if domain not in abp_rules:
                     abp_rules[domain] = (abp_rule, frozenset(), False)
-                    stats.hosts_compressed += 1
+                    stats.formats_compressed += 1
                 else:
                     stats.duplicate_pruned += 1
             continue
@@ -397,7 +397,7 @@ def compile_rules(
                 abp_rule = f"||{domain}^"
                 if domain not in abp_rules:
                     abp_rules[domain] = (abp_rule, frozenset(), False)
-                    stats.hosts_compressed += 1  # Reusing stat for both hosts and plain
+                    stats.formats_compressed += 1  # Reusing stat for both hosts and plain
                 else:
                     stats.duplicate_pruned += 1
             else:
@@ -596,7 +596,7 @@ if __name__ == "__main__":
     print(f"  Output: {stats.total_output:,} rules")
     print(f"  Reduction: {(1 - stats.total_output / max(stats.total_input, 1)) * 100:.1f}%")
     print(f"\nBy type:")
-    print(f"  ABP rules:   {stats.abp_kept:,} (incl. {stats.hosts_compressed:,} compressed from hosts/plain)")
+    print(f"  ABP rules:   {stats.abp_kept:,} (incl. {stats.formats_compressed:,} compressed from hosts/plain)")
     print(f"  Other rules: {stats.other_kept:,}")
     print(f"\nPruned:")
     print(f"  ABP subdomains:     {stats.abp_subdomain_pruned:,}")
