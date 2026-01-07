@@ -20,9 +20,6 @@ Example:
     >>> import asyncio
     >>> results = asyncio.run(fetch_all(urls, output_dir, cache_dir, 8, 30, 3))
     >>> print(f"Downloaded {sum(r.success for r in results)} of {len(results)} sources")
-
-See Also:
-    - docs/ARCHITECTURE.md for caching strategy details
 """
 
 import argparse

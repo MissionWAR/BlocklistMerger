@@ -30,10 +30,6 @@ Key Operations:
     2. Discard cosmetic/element-hiding rules (##, #@#, #$#, etc.)
     3. Discard rules with browser-only modifiers
     4. Keep hosts, plain domains, and ABP rules with supported modifiers
-    
-See Also:
-    - docs/ARCHITECTURE.md for pipeline overview
-    - docs/PROJECT.md for project goals
 """
 
 import re
