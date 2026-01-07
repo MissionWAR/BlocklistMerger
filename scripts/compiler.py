@@ -117,6 +117,7 @@ class CompileStats:
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
     formats_compressed: int = 0  # Hosts/plain domains converted to ABP format
+    malformed_discarded: int = 0  # Malformed rules (e.g., ||^) discarded
 
 
 # ============================================================================
@@ -325,7 +326,8 @@ def compile_rules(
             domain, modifiers, is_exception, is_wildcard = extract_abp_info(line)
             
             if not domain:
-                other_rules.append(line)
+                # Malformed ABP rule (e.g., ||^ or ||$modifier) - discard
+                stats.malformed_discarded += 1
                 continue
             
             if is_exception:
