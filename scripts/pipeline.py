@@ -21,6 +21,7 @@ Example:
     >>> print(f"Output {stats['lines_output']:,} rules")
 """
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -228,6 +229,28 @@ def print_summary(stats: PipelineStats) -> None:
     print(f"   Other rules: {stats['other_kept']:>10,}")
 
 
+def save_stats_json(stats: PipelineStats, output_path: str, total_time: float) -> None:
+    """
+    Save pipeline statistics to a JSON file.
+    
+    Args:
+        stats: Pipeline statistics dictionary
+        output_path: Path to write JSON file
+        total_time: Total execution time in seconds
+    """
+    output = {
+        "version": "1.4.0",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "execution_time_seconds": round(total_time, 2),
+        "statistics": dict(stats),
+    }
+    
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2)
+
+
 # =============================================================================
 # CLI INTERFACE
 # =============================================================================
@@ -239,12 +262,26 @@ def main() -> int:
     Returns:
         Exit code (0 for success, 1 for error, 2 for usage error)
     """
-    if len(sys.argv) < 3:
-        print("Usage: python -m scripts.pipeline <input_dir> <output_file>")
+    # Parse arguments
+    args = sys.argv[1:]
+    json_stats_path: str | None = None
+    
+    # Check for --json-stats flag
+    if "--json-stats" in args:
+        idx = args.index("--json-stats")
+        if idx + 1 < len(args):
+            json_stats_path = args[idx + 1]
+            args = args[:idx] + args[idx + 2:]
+        else:
+            print("Error: --json-stats requires a path argument", file=sys.stderr)
+            return 2
+    
+    if len(args) < 2:
+        print("Usage: python -m scripts.pipeline <input_dir> <output_file> [--json-stats <path>]")
         return 2
     
-    input_dir = sys.argv[1]
-    output_file = sys.argv[2]
+    input_dir = args[0]
+    output_file = args[1]
     
     try:
         print("🚀 Starting blocklist pipeline...")
@@ -256,6 +293,12 @@ def main() -> int:
         
         print_summary(stats)
         print(f"\n⏱️  Total time: {total_time:.1f}s")
+        
+        # Save JSON stats if requested
+        if json_stats_path:
+            save_stats_json(stats, json_stats_path, total_time)
+            print(f"📊 Stats saved to: {json_stats_path}")
+        
         print("✅ Pipeline completed successfully!")
         
         return 0
