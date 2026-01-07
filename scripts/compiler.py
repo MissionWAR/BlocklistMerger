@@ -100,7 +100,7 @@ CLIENT_RESTRICTION_MODIFIERS = frozenset({"client", "ctag"})
 # DATA STRUCTURES
 # ============================================================================
 
-@dataclass
+@dataclass(slots=True)
 class CompileStats:
     """Statistics from compilation."""
     total_input: int = 0
