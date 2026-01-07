@@ -39,10 +39,6 @@ Modifier-Aware Pruning:
 Whitelist Handling:
     @@rules (whitelist/exception rules) are used ONLY to remove conflicting blocking
     rules. The @@rules themselves are NOT output. This keeps the output file simple.
-
-See Also:
-    - docs/LOGIC.md for detailed examples of each pruning rule
-    - docs/ARCHITECTURE.md for pipeline flow and data structures
 """
 
 import re

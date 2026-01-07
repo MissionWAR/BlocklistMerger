@@ -19,10 +19,6 @@ Example:
     >>> from scripts.pipeline import process_files
     >>> stats = process_files("lists/_raw", "lists/merged.txt")
     >>> print(f"Output {stats['lines_output']:,} rules")
-
-See Also:
-    - docs/ARCHITECTURE.md for pipeline flow diagram
-    - docs/PROJECT.md for project overview
 """
 
 import sys
