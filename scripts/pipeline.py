@@ -265,26 +265,23 @@ def main() -> int:
     Returns:
         Exit code (0 for success, 1 for error, 2 for usage error)
     """
-    # Parse arguments
-    args = sys.argv[1:]
-    json_stats_path: str | None = None
+    import argparse
     
-    # Check for --json-stats flag
-    if "--json-stats" in args:
-        idx = args.index("--json-stats")
-        if idx + 1 < len(args):
-            json_stats_path = args[idx + 1]
-            args = args[:idx] + args[idx + 2:]
-        else:
-            print("Error: --json-stats requires a path argument", file=sys.stderr)
-            return 2
+    parser = argparse.ArgumentParser(
+        prog="scripts.pipeline",
+        description="Blocklist compilation pipeline — clean, compress, and deduplicate.",
+    )
+    parser.add_argument("input_dir", help="Directory containing raw blocklist .txt files")
+    parser.add_argument("output_file", help="Path for the merged output file")
+    parser.add_argument(
+        "--json-stats", dest="json_stats", metavar="PATH",
+        help="Save detailed statistics to a JSON file",
+    )
     
-    if len(args) < 2:
-        print("Usage: python -m scripts.pipeline <input_dir> <output_file> [--json-stats <path>]")
-        return 2
-    
-    input_dir = args[0]
-    output_file = args[1]
+    parsed = parser.parse_args()
+    input_dir = parsed.input_dir
+    output_file = parsed.output_file
+    json_stats_path = parsed.json_stats
     
     try:
         print("🚀 Starting blocklist pipeline...")
