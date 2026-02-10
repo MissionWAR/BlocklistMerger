@@ -307,11 +307,19 @@ def extract_hosts_info(rule: str) -> tuple[str | None, list[str]]:
         if part.startswith("#"):
             break
         if HOSTS_DOMAIN_PATTERN.match(part):
-            domain = normalize_domain(part)
-            if domain and domain not in LOCAL_HOSTNAMES:
-                domains.append(domain)
+            # Pre-check local hostnames before interning to avoid
+            # wasteful sys.intern() calls on discarded entries
+            lower_part = part.lower().strip().rstrip(".")
+            if lower_part and lower_part not in LOCAL_HOSTNAMES:
+                domains.append(intern(lower_part))
     
     return ip, domains
+
+
+def clear_caches() -> None:
+    """Clear all LRU caches. Useful for testing or memory management."""
+    _extract_domain_parts.cache_clear()
+    walk_parent_domains.cache_clear()
 
 
 @lru_cache(maxsize=LRU_CACHE_SIZE)

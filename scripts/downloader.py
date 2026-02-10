@@ -30,6 +30,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Final, NamedTuple
+from urllib.parse import urlparse
 
 import aiohttp
 import aiofiles
@@ -101,7 +102,6 @@ def url_to_filename(url: str) -> str:
     url_hash = hashlib.sha256(url.encode()).hexdigest()[:16]
     # Extract domain for readability
     try:
-        from urllib.parse import urlparse
         domain = urlparse(url).netloc.replace(".", "_")[:30]
     except Exception:
         domain = "unknown"

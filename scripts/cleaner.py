@@ -478,16 +478,17 @@ def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
             stats["trimmed"] += 1
         
         if result.discarded:
-            if result.reason == "comment":
-                stats["comments"] += 1
-            elif result.reason == "cosmetic":
-                stats["cosmetic"] += 1
-            elif result.reason == "unsupported_modifier":
-                stats["unsupported_modifier"] += 1
-            elif result.reason == "empty":
-                stats["empty"] += 1
-            else:
-                stats["invalid"] += 1
+            match result.reason:
+                case "comment":
+                    stats["comments"] += 1
+                case "cosmetic":
+                    stats["cosmetic"] += 1
+                case "unsupported_modifier":
+                    stats["unsupported_modifier"] += 1
+                case "empty":
+                    stats["empty"] += 1
+                case _:
+                    stats["invalid"] += 1
         else:
             cleaned.append(result.line)  # type: ignore[arg-type]
             stats["kept"] += 1
