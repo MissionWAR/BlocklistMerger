@@ -17,14 +17,14 @@ Example:
 
 from typing import Final
 
-__version__: Final[str] = "1.4.0"
+__version__: Final[str] = "1.5.0"
 __author__: Final[str] = "MissionWAR"
 
 __all__ = [
     "__version__",
     "__author__",
     "downloader",
-    "cleaner", 
+    "cleaner",
     "compiler",
     "pipeline",
 ]

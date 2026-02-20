@@ -7,22 +7,22 @@ It's the first stage of the pipeline, running BEFORE the compiler.
 
 Critical Understanding - DNS vs Browser Blocking:
     AdGuard Home is a DNS-level blocker, NOT a browser extension. This means:
-    
+
     - DNS only sees domain names, not URLs, request types, or page content
     - Cosmetic rules (##) that hide page elements are USELESS at DNS level
     - Modifiers like $script, $image, $third-party are browser-only concepts
-    
+
     Example: ||ads.example.com^$script,third-party
     - In browser: Block ads.example.com ONLY when loading scripts from third-party context
     - In DNS: ??? DNS can't know if a request is for a script or from third-party
-    
+
     If we stripped the modifiers, we'd get ||ads.example.com^ which blocks EVERYTHING
     from that domain - a much more aggressive rule than intended! This could break sites.
 
 Design Decision - Discard, Don't Strip:
     Rules with unsupported modifiers are COMPLETELY DISCARDED, not stripped.
     This prevents false positives and unexpected site breakage.
-    
+
     A smaller, more accurate blocklist is better than a larger, overly-aggressive one.
 
 Key Operations:
@@ -34,7 +34,6 @@ Key Operations:
 
 import re
 from typing import Final, NamedTuple, TypedDict
-
 
 # =============================================================================
 # MODIFIER DEFINITIONS
@@ -62,13 +61,13 @@ UNSUPPORTED_MODIFIERS: Final[frozenset[str]] = frozenset({
     "webrtc",         # WebRTC connections
     "ping",           # Navigator.sendBeacon()
     "other",          # Other content types
-    
+
     # -------------------------------------------------------------------------
     # Shorthand content types
     # -------------------------------------------------------------------------
     "css",  # Alias for stylesheet
     "js",   # Alias for script
-    
+
     # -------------------------------------------------------------------------
     # Third-party/first-party (requires page context)
     # -------------------------------------------------------------------------
@@ -76,7 +75,7 @@ UNSUPPORTED_MODIFIERS: Final[frozenset[str]] = frozenset({
     "3p",           # Shorthand for third-party
     "first-party",  # Requests from same domain
     "1p",           # Shorthand for first-party
-    
+
     # -------------------------------------------------------------------------
     # Document modifiers (page-level blocking)
     # -------------------------------------------------------------------------
@@ -84,7 +83,7 @@ UNSUPPORTED_MODIFIERS: Final[frozenset[str]] = frozenset({
     "doc",       # Alias for document
     "popup",     # Block popups
     "all",       # Match all content types
-    
+
     # -------------------------------------------------------------------------
     # Network/redirect modifiers (require HTTP-level access)
     # -------------------------------------------------------------------------
@@ -93,7 +92,7 @@ UNSUPPORTED_MODIFIERS: Final[frozenset[str]] = frozenset({
     "redirect-rule", # Conditional redirect
     "empty",         # Return empty response
     "mp4",           # Return empty MP4
-    
+
     # -------------------------------------------------------------------------
     # Request modification (HTTP header manipulation)
     # -------------------------------------------------------------------------
@@ -105,7 +104,7 @@ UNSUPPORTED_MODIFIERS: Final[frozenset[str]] = frozenset({
     "replace",      # Replace response content
     "hls",          # HLS playlist modification
     "jsonprune",    # JSON response modification
-    
+
     # -------------------------------------------------------------------------
     # Exception modifiers (browser extension exceptions)
     # -------------------------------------------------------------------------
@@ -117,19 +116,19 @@ UNSUPPORTED_MODIFIERS: Final[frozenset[str]] = frozenset({
     "urlblock",      # Disable URL blocking
     "content",       # Disable content blocking
     "extension",     # Disable extension rules
-    
+
     # -------------------------------------------------------------------------
     # Domain restriction (page-level, not useful for DNS-wide blocking)
     # -------------------------------------------------------------------------
     "domain",  # Only apply on specific domains
-    
+
     # -------------------------------------------------------------------------
     # Matching modifiers (case sensitivity, strict party)
     # -------------------------------------------------------------------------
     "match-case",           # Case-sensitive matching
     "strict-first-party",   # Strict first-party check
     "strict-third-party",   # Strict third-party check
-    
+
     # -------------------------------------------------------------------------
     # Other browser-only features
     # -------------------------------------------------------------------------
@@ -173,12 +172,12 @@ MODIFIER_PATTERN: Final[re.Pattern[str]] = re.compile(r"\$([^$]+)$")
 class CleanResult(NamedTuple):
     """
     Result of cleaning a single line.
-    
+
     Attributes:
         line: Cleaned line, or None if discarded
         discarded: True if line was discarded
         reason: Reason for discard (for logging/stats), or None if kept
-        
+
     Example:
         >>> result = CleanResult("||example.com^", False, None)
         >>> result.discarded
@@ -192,7 +191,7 @@ class CleanResult(NamedTuple):
 class CleanStats(NamedTuple):
     """
     Statistics from cleaning operation.
-    
+
     Attributes:
         total_lines: Total lines processed
         kept_lines: Lines kept after cleaning
@@ -202,7 +201,7 @@ class CleanStats(NamedTuple):
         empty_removed: Empty lines removed
         invalid_removed: Invalid/malformed lines removed
         trimmed: Lines that had whitespace trimmed
-        
+
     Example:
         >>> stats = CleanStats(100, 80, 10, 5, 3, 2, 0, 15)
         >>> stats.kept_lines
@@ -237,13 +236,13 @@ class CleanStatsDict(TypedDict):
 def is_comment(line: str) -> bool:
     """
     Check if line is a comment (starts with # or !).
-    
+
     Args:
         line: The line to check
-        
+
     Returns:
         True if the line is a comment
-        
+
     Example:
         >>> is_comment("# This is a comment")
         True
@@ -258,16 +257,16 @@ def is_comment(line: str) -> bool:
 def is_cosmetic_rule(line: str) -> bool:
     """
     Check if line is a cosmetic/element-hiding rule.
-    
+
     These rules can't be processed by AdGuard Home (DNS-level blocker)
     and should be completely discarded.
-    
+
     Args:
         line: The line to check
-        
+
     Returns:
         True if the line is a cosmetic rule
-        
+
     Example:
         >>> is_cosmetic_rule("example.com##.ad-banner")
         True
@@ -280,16 +279,16 @@ def is_cosmetic_rule(line: str) -> bool:
 def strip_trailing_comment(line: str) -> str:
     """
     Remove trailing inline comments to reduce file size.
-    
+
     Only strips comments that are preceded by whitespace, to avoid
     accidentally stripping URL fragments or modifier values.
-    
+
     Args:
         line: The line to process
-        
+
     Returns:
         Line with trailing comment removed
-        
+
     Example:
         >>> strip_trailing_comment("||example.com^ # block ads")
         '||example.com^'
@@ -299,7 +298,7 @@ def strip_trailing_comment(line: str) -> str:
     # Don't process lines that might have # in modifiers
     if "$" in line and "#" in line.split("$")[-1]:
         return line
-    
+
     # Only strip if there's whitespace before the #
     match = TRAILING_COMMENT_PATTERN.search(line)
     if match:
@@ -310,15 +309,15 @@ def strip_trailing_comment(line: str) -> str:
 def extract_modifiers(rule: str) -> set[str]:
     """
     Extract modifier names from an ABP-style rule.
-    
+
     Handles modifiers with values (key=value) and negation (~modifier).
-    
+
     Args:
         rule: The ABP rule to parse
-        
+
     Returns:
         Set of modifier names (lowercase, without ~ prefix or =value suffix)
-        
+
     Example:
         >>> extract_modifiers("||example.com^$script,third-party")
         {'script', 'third-party'}
@@ -330,10 +329,10 @@ def extract_modifiers(rule: str) -> set[str]:
     match = MODIFIER_PATTERN.search(rule)
     if not match:
         return set()
-    
+
     modifier_string = match.group(1)
     modifiers: set[str] = set()
-    
+
     for part in modifier_string.split(","):
         # Handle modifiers with values: client=192.168.1.1, dnsrewrite=example.com
         modifier_name = part.split("=")[0].strip().lower()
@@ -342,23 +341,23 @@ def extract_modifiers(rule: str) -> set[str]:
             modifier_name = modifier_name[1:]
         if modifier_name:
             modifiers.add(modifier_name)
-    
+
     return modifiers
 
 
 def has_unsupported_modifiers(modifiers: set[str]) -> bool:
     """
     Check if any modifier is unsupported by AdGuard Home.
-    
+
     If ANY unsupported modifier is found, the rule should be DISCARDED
     (not stripped) to avoid false positives and breakage.
-    
+
     Args:
         modifiers: Set of modifier names to check
-        
+
     Returns:
         True if any modifier is unsupported
-        
+
     Example:
         >>> has_unsupported_modifiers({'script', 'important'})
         True  # 'script' is unsupported
@@ -371,18 +370,18 @@ def has_unsupported_modifiers(modifiers: set[str]) -> bool:
 def clean_line(line: str) -> tuple[CleanResult, bool]:
     """
     Clean a single rule line.
-    
+
     Performs all cleaning operations: strip whitespace, remove comments,
     discard cosmetic rules, and check for unsupported modifiers.
-    
+
     Args:
         line: The raw line to clean
-        
+
     Returns:
         Tuple of (CleanResult, was_trimmed):
         - CleanResult: The cleaning result with line/discarded/reason
         - was_trimmed: True if whitespace was removed from the line
-        
+
     Example:
         >>> result, trimmed = clean_line("  ||example.com^  ")
         >>> result.line
@@ -391,30 +390,30 @@ def clean_line(line: str) -> tuple[CleanResult, bool]:
         True
     """
     original = line
-    
+
     # Strip whitespace
     line = line.strip()
     was_trimmed = len(line) != len(original) and len(line) > 0
-    
+
     # Skip empty lines
     if not line:
         return CleanResult(None, True, "empty"), False
-    
+
     # Remove full-line comments
     if is_comment(line):
         return CleanResult(None, True, "comment"), False
-    
+
     # Discard cosmetic/element-hiding rules
     # Example: example.com##.ad-banner, example.com#$#div
     if is_cosmetic_rule(line):
         return CleanResult(None, True, "cosmetic"), False
-    
+
     # Strip trailing inline comments
     line_before_comment = line
     line = strip_trailing_comment(line)
     if len(line) != len(line_before_comment):
         was_trimmed = True
-    
+
     # For ABP-style rules, check modifiers
     # Use tuple form for single startswith call (faster than OR)
     if line.startswith(("||", "@@||")):
@@ -424,14 +423,14 @@ def clean_line(line: str) -> tuple[CleanResult, bool]:
             # This prevents false positives like blocking google.com when
             # the original rule was "$third-party" (third-party connections only)
             return CleanResult(None, True, "unsupported_modifier"), False
-    
+
     # Handle rules with just $ and modifiers (no pattern)
     # e.g., "$script,third-party" without a domain prefix
     if line.startswith("$") or ("|" not in line and "$" in line):
         modifiers = extract_modifiers(line)
         if modifiers and has_unsupported_modifiers(modifiers):
             return CleanResult(None, True, "unsupported_modifier"), False
-    
+
     # Line is valid, return cleaned version
     return CleanResult(line, False, None), was_trimmed
 
@@ -439,17 +438,17 @@ def clean_line(line: str) -> tuple[CleanResult, bool]:
 def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
     """
     Clean a list of lines.
-    
+
     Processes each line through the cleaning pipeline and collects statistics.
-    
+
     Args:
         lines: List of raw lines to clean
-        
+
     Returns:
         Tuple of (cleaned_lines, stats):
         - cleaned_lines: List of valid, cleaned lines
         - stats: CleanStats with counts of removed line types
-        
+
     Example:
         >>> lines = ["# comment", "||example.com^", "bad.com##.ad"]
         >>> cleaned, stats = clean_lines(lines)
@@ -469,14 +468,14 @@ def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
         "invalid": 0,
         "trimmed": 0,
     }
-    
+
     for line in lines:
         stats["total"] += 1
         result, was_trimmed = clean_line(line)
-        
+
         if was_trimmed:
             stats["trimmed"] += 1
-        
+
         if result.discarded:
             match result.reason:
                 case "comment":
@@ -492,7 +491,7 @@ def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
         else:
             cleaned.append(result.line)  # type: ignore[arg-type]
             stats["kept"] += 1
-    
+
     return cleaned, CleanStats(
         total_lines=stats["total"],
         kept_lines=stats["kept"],
@@ -508,35 +507,35 @@ def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
 def clean_file(input_path: str, output_path: str | None = None) -> CleanStats:
     """
     Clean a single file.
-    
+
     Reads the input file, cleans all lines, and writes to output.
-    
+
     Args:
         input_path: Path to input file
         output_path: Path to output file (defaults to in-place modification)
-        
+
     Returns:
         CleanStats with counts of removed line types
-        
+
     Example:
         >>> stats = clean_file("raw.txt", "cleaned.txt")
         >>> print(f"Kept {stats.kept_lines} of {stats.total_lines} lines")
     """
     from pathlib import Path
-    
+
     in_path = Path(input_path)
     out_path = Path(output_path) if output_path else in_path
-    
+
     with open(in_path, encoding="utf-8-sig", errors="replace") as f:
         lines = f.readlines()
-    
+
     cleaned, stats = clean_lines(lines)
-    
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         for line in cleaned:
             f.write(line + "\n")
-    
+
     return stats
 
 
@@ -546,16 +545,16 @@ def clean_file(input_path: str, output_path: str | None = None) -> CleanStats:
 
 if __name__ == "__main__":
     import sys
-    
+
     if len(sys.argv) < 2:
         print("Usage: python -m scripts.cleaner <input_file> [output_file]")
         sys.exit(1)
-    
+
     input_file = sys.argv[1]
     output_file = sys.argv[2] if len(sys.argv) > 2 else None
-    
+
     stats = clean_file(input_file, output_file)
-    
+
     print(f"Cleaned: {stats.total_lines} total, {stats.kept_lines} kept")
     print(f"  Removed: {stats.comments_removed} comments, "
           f"{stats.cosmetic_removed} cosmetic, "

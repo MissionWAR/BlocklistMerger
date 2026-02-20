@@ -1,6 +1,6 @@
 [project]
 name = "blocklist-merger"
-version = "1.4.0"
+version = "1.5.0"
 description = "AdGuard Home blocklist compiler with intelligent deduplication"
 requires-python = ">=3.14"
 license = "MIT"
