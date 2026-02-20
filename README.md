@@ -44,7 +44,11 @@ Each list is maintained by its original author. This project only merges and ded
 
 ```bash
 pip install .
+
+# Download blocklists
 python -m scripts.downloader --sources config/sources.txt --outdir lists/_raw --cache .cache
+
+# Merge and deduplicate
 python -m scripts.pipeline lists/_raw lists/merged.txt
 ```
 
