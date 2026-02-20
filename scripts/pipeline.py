@@ -22,10 +22,12 @@ Example:
 """
 
 import json
+import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, Iterator
 
 from scripts import __version__
 from scripts.cleaner import clean_line
@@ -59,6 +61,47 @@ class PipelineStats(TypedDict):
     formats_compressed: int
     abp_kept: int
     other_kept: int
+
+
+# =============================================================================
+# WORKER FUNCTIONS
+# =============================================================================
+
+def _clean_single_file(file_path: Path) -> tuple[list[str], dict[str, int]]:
+    """Clean a single file and return cleaned lines and partial stats."""
+    from scripts.cleaner import clean_line
+    
+    cleaned: list[str] = []
+    file_stats = {
+        "lines_raw": 0,
+        "comments_removed": 0,
+        "cosmetic_removed": 0,
+        "unsupported_removed": 0,
+        "empty_removed": 0,
+        "trimmed": 0,
+    }
+    
+    with open(file_path, encoding="utf-8-sig", errors="replace") as f:
+        for line in f:
+            file_stats["lines_raw"] += 1
+            result, was_trimmed = clean_line(line)
+            
+            if was_trimmed:
+                file_stats["trimmed"] += 1
+                
+            if result.discarded:
+                if result.reason == "comment":
+                    file_stats["comments_removed"] += 1
+                elif result.reason == "cosmetic":
+                    file_stats["cosmetic_removed"] += 1
+                elif result.reason == "unsupported_modifier":
+                    file_stats["unsupported_removed"] += 1
+                elif result.reason == "empty":
+                    file_stats["empty_removed"] += 1
+            else:
+                cleaned.append(result.line)  # type: ignore[arg-type]
+                
+    return cleaned, file_stats
 
 
 # =============================================================================
@@ -115,54 +158,38 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
     }
 
     # =========================================================================
-    # STAGE 1: Read and clean all files
+    # STAGE 1 & 2: Read, clean, compile, and deduplicate
     # =========================================================================
-    print("📖 Stage 1: Reading and cleaning files...")
-    stage1_start = time.time()
+    print("📖 Stage 1 & 2: Reading, cleaning, compiling, and deduplicating...")
+    pipeline_start = time.time()
 
-    all_cleaned: list[str] = []
     files = sorted(input_path.glob("*.txt"))
+    stats["files_processed"] = len(files)
 
-    # Process files (deterministic order for reproducibility)
-    for file in files:
-        stats["files_processed"] += 1
+    def _get_cleaned_lines() -> Iterator[str]:
+        # Use optimal number of workers (max cores)
+        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+            for cleaned, file_stats in executor.map(_clean_single_file, files):
+                # Transfer partial stats to the main stats dictionary
+                stats["lines_raw"] += file_stats["lines_raw"]
+                stats["comments_removed"] += file_stats["comments_removed"]
+                stats["cosmetic_removed"] += file_stats["cosmetic_removed"]
+                stats["unsupported_removed"] += file_stats["unsupported_removed"]
+                stats["empty_removed"] += file_stats["empty_removed"]
+                stats["trimmed"] += file_stats["trimmed"]
+                stats["lines_clean"] += len(cleaned)
 
-        # Read and clean each file
-        with open(file, encoding="utf-8-sig", errors="replace") as f:
-            for line in f:
-                stats["lines_raw"] += 1
+                # Stream lines to compiler
+                for line in cleaned:
+                    yield line
 
-                # Clean the line
-                result, was_trimmed = clean_line(line)
+    # Compile the streamed lines (evaluates the generator lazily)
+    compile_stats = compile_rules(_get_cleaned_lines(), output_file)
 
-                if was_trimmed:
-                    stats["trimmed"] += 1
-
-                if result.discarded:
-                    match result.reason:
-                        case "comment":
-                            stats["comments_removed"] += 1
-                        case "cosmetic":
-                            stats["cosmetic_removed"] += 1
-                        case "unsupported_modifier":
-                            stats["unsupported_removed"] += 1
-                        case "empty":
-                            stats["empty_removed"] += 1
-                else:
-                    all_cleaned.append(result.line)  # type: ignore[arg-type]
-
-    stats["lines_clean"] = len(all_cleaned)
-    stage1_time = time.time() - stage1_start
-    print(f"   Processed {stats['files_processed']} files, {stats['lines_raw']:,} lines")
-    print(f"   Kept {stats['lines_clean']:,} clean rules ({stage1_time:.1f}s)")
-
-    # =========================================================================
-    # STAGE 2: Compile and deduplicate
-    # =========================================================================
-    print("\n⚙️  Stage 2: Compiling and deduplicating...")
-    stage2_start = time.time()
-
-    compile_stats = compile_rules(all_cleaned, output_file)
+    pipeline_time = time.time() - pipeline_start
+    print(f"   Processed {stats['files_processed']} files, {stats['lines_raw']:,} raw lines")
+    print(f"   Kept {stats['lines_clean']:,} clean rules")
+    print(f"   Output: {compile_stats.total_output:,} rules ({pipeline_time:.1f}s)")
 
     # Transfer compilation stats
     stats["lines_output"] = compile_stats.total_output
@@ -176,9 +203,6 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
     # Format breakdown
     stats["abp_kept"] = compile_stats.abp_kept
     stats["other_kept"] = compile_stats.other_kept
-
-    stage2_time = time.time() - stage2_start
-    print(f"   Output: {stats['lines_output']:,} rules ({stage2_time:.1f}s)")
 
     return stats
 

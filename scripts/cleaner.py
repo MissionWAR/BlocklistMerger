@@ -164,6 +164,10 @@ TRAILING_COMMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+#\s+.*$")
 #: Matches: $modifier1,modifier2,... at end of rule
 MODIFIER_PATTERN: Final[re.Pattern[str]] = re.compile(r"\$([^$]+)$")
 
+#: Pattern to detect rules that specify modifiers without an explicit domain prefix
+#: e.g., "$script,third-party" or "some-text$script"
+MODIFIER_ONLY_RULE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[^|]*\$")
+
 
 # =============================================================================
 # DATA STRUCTURES
@@ -426,7 +430,7 @@ def clean_line(line: str) -> tuple[CleanResult, bool]:
 
     # Handle rules with just $ and modifiers (no pattern)
     # e.g., "$script,third-party" without a domain prefix
-    if line.startswith("$") or ("|" not in line and "$" in line):
+    if MODIFIER_ONLY_RULE_PATTERN.match(line):
         modifiers = extract_modifiers(line)
         if modifiers and has_unsupported_modifiers(modifiers):
             return CleanResult(None, True, "unsupported_modifier"), False

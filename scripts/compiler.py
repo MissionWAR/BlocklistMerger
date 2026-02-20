@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from sys import intern
-from typing import Final
+from typing import Final, Iterable
 
 import tldextract
 
@@ -487,124 +487,69 @@ def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset
 
 
 # =============================================================================
-# MAIN COMPILATION
+# HELPER FUNCTIONS FOR COMPILATION PHASES
 # =============================================================================
 
-def compile_rules(
-    lines: list[str],
-    output_file: str,
-) -> CompileStats:
-    """
-    Compile and deduplicate rules with format compression.
-
-    This is the main entry point for the compiler. It processes input lines through
-    multiple phases to produce a minimal, deduplicated output file.
-
-    Args:
-        lines: List of rule strings to compile
-        output_file: Path to write the compiled output
-
-    Returns:
-        CompileStats with metrics about the compilation process
-
-    Pipeline Phases:
-        1. **Parse & Compress**: Parse all rules, converting hosts/plain to ABP format
-        2. **Build Lookups**: Create efficient lookup structures for pruning
-        3. **Prune**: Remove redundant subdomain and whitelist-conflicted rules
-        4. **Output**: Write deduplicated rules atomically
-
-    Example:
-        >>> lines = ["||example.com^", "||sub.example.com^", "0.0.0.0 other.example.com"]
-        >>> stats = compile_rules(lines, "output.txt")
-        >>> print(f"Reduced {stats.total_input} to {stats.total_output} rules")
-        Reduced 3 to 1 rules
-    """
-    stats = CompileStats()
-
-    # =========================================================================
-    # PHASE 1: Parse and categorize all rules
-    # =========================================================================
-
-    # ABP blocking rules: domain -> (original_rule, modifiers, is_wildcard)
-    abp_rules: dict[str, RuleEntry] = {}
-    abp_wildcards: dict[str, WildcardEntry] = {}  # TLD wildcards: tld -> rule
-
-    # Whitelisted domains (from @@rules)
-    allow_domains: set[str] = set()
-
-    # Other rules (regex, partial matches, etc.) - use set for inline dedup
-    other_rules: set[str] = set()
-
+def _parse_and_compress_lines(
+    lines: Iterable[str],
+    stats: CompileStats,
+    abp_rules: dict[str, RuleEntry],
+    abp_wildcards: dict[str, WildcardEntry],
+    allow_domains: set[str],
+    other_rules: set[str]
+) -> None:
+    """Phase 1: Parse all rules, convert formats to ABP, and categorize them."""
     for line in lines:
         stats.total_input += 1
 
-        # Early exit for empty lines (walrus operator avoids assignment for empty)
         if not (line := line.strip()):
             continue
 
-        # -----------------------------------------------------------------
-        # ABP-style rules (highest priority)
-        # -----------------------------------------------------------------
-        # Use tuple form for single startswith call (faster than OR)
+        # ABP-style rules
         if line.startswith(("||", "@@||")):
             domain, modifiers, is_exception, is_wildcard = extract_abp_info(line)
 
             if not domain:
-                # Malformed ABP rule (e.g., ||^ or ||$modifier) - discard
                 stats.malformed_discarded += 1
                 continue
 
             if is_exception:
-                # Track whitelisted domains for conflict removal
                 if is_wildcard:
-                    # @@||*.example.com^ - covers all subdomains
                     allow_domains.add(f"*.{domain}")
                 else:
                     allow_domains.add(domain)
                 continue
 
-            # Blocking rule
             if is_wildcard:
-                # Check if this is a TLD wildcard like ||*.autos^
                 tld = get_tld(domain)
                 if tld and domain == tld:
-                    # This is ||*.tld^ - covers entire TLD
                     if tld not in abp_wildcards:
                         abp_wildcards[tld] = (line, modifiers)
                 else:
-                    # Regular subdomain wildcard like ||*.example.com^
                     key = f"*.{domain}"
                     if key not in abp_rules:
                         abp_rules[key] = (line, modifiers, True)
             else:
-                # Regular ABP rule
                 if domain not in abp_rules:
                     abp_rules[domain] = (line, modifiers, False)
                 else:
-                    # Duplicate - prefer one with $important
                     existing = abp_rules[domain]
                     if "important" in modifiers and "important" not in existing[1]:
                         abp_rules[domain] = (line, modifiers, False)
                     stats.duplicate_pruned += 1
             continue
 
-        # Other exception rules (non-ABP format like /regex/)
         if line.startswith("@@"):
-            # Can't extract domain from non-ABP exceptions, skip for now
             continue
 
-        # -----------------------------------------------------------------
-        # Hosts-style rules - COMPRESS TO ABP FORMAT
-        # -----------------------------------------------------------------
+        # Hosts-style rules
         ip, domains = extract_hosts_info(line)
         if ip and domains:
             for domain in domains:
-                # Skip local hostnames
                 if domain in LOCAL_HOSTNAMES:
                     stats.local_hostname_pruned += 1
                     continue
 
-                # Convert to ABP format: 0.0.0.0 example.com → ||example.com^
                 abp_rule = f"||{domain}^"
                 if domain not in abp_rules:
                     abp_rules[domain] = (abp_rule, EMPTY_FROZENSET, False)
@@ -613,13 +558,10 @@ def compile_rules(
                     stats.duplicate_pruned += 1
             continue
 
-        # -----------------------------------------------------------------
-        # Plain domain - COMPRESS TO ABP FORMAT
-        # -----------------------------------------------------------------
+        # Plain domain rules
         if PLAIN_DOMAIN_PATTERN.match(line):
             domain = normalize_domain(line)
             if domain and domain not in LOCAL_HOSTNAMES:
-                # Convert to ABP format: example.com → ||example.com^
                 abp_rule = f"||{domain}^"
                 if domain not in abp_rules:
                     abp_rules[domain] = (abp_rule, EMPTY_FROZENSET, False)
@@ -630,9 +572,7 @@ def compile_rules(
                 stats.local_hostname_pruned += 1
             continue
 
-        # -----------------------------------------------------------------
-        # Other (regex, etc.) - inline duplicate check with set
-        # -----------------------------------------------------------------
+        # Other rules (regex, inline duplicates)
         if line.startswith("/") or "|" in line or "*" in line:
             if line not in other_rules:
                 other_rules.add(line)
@@ -640,69 +580,47 @@ def compile_rules(
                 stats.duplicate_pruned += 1
             continue
 
-    # =========================================================================
-    # PHASE 2: Build coverage lookup sets
-    # =========================================================================
 
-    # All ABP blocking domains (for subdomain checks)
-    # Use set comprehension for efficiency
+def _build_coverage_lookups(
+    abp_rules: dict[str, RuleEntry],
+    abp_wildcards: dict[str, WildcardEntry]
+) -> tuple[set[str], set[str]]:
+    """Phase 2: Create efficient lookup structures for pruning."""
     abp_blocking_domains: set[str] = {
-        domain if not is_wc else domain[2:]  # Remove "*." prefix for wildcards
+        domain if not is_wc else domain[2:]
         for domain, (_, _, is_wc) in abp_rules.items()
     }
-
-    # TLD wildcards
     tld_wildcards: set[str] = set(abp_wildcards.keys())
+    return abp_blocking_domains, tld_wildcards
 
-    def is_covered_by_abp(domain: str) -> bool:
-        """Check if domain is covered by any ABP rule."""
-        # Direct match
-        if domain in abp_blocking_domains:
+
+def _is_whitelisted(domain: str, allow_domains: set[str]) -> bool:
+    """Check if domain is whitelisted by direct or wildcard matches."""
+    if domain in allow_domains:
+        return True
+    for parent in walk_parent_domains(domain):
+        if parent in allow_domains or f"*.{parent}" in allow_domains:
             return True
+    return False
 
-        # TLD wildcard check
-        tld = get_tld(domain)
-        if tld and tld in tld_wildcards:
-            return True
 
-        # Parent domain check
-        return any(parent in abp_blocking_domains for parent in walk_parent_domains(domain))
-
-    def is_whitelisted(domain: str) -> bool:
-        """
-        Check if domain is whitelisted.
-
-        A domain is whitelisted if:
-        1. It's directly in allow_domains (@@||domain^)
-        2. Any parent domain is whitelisted (@@||parent^ covers subdomains)
-        3. A wildcard whitelist covers it (@@||*.parent^)
-        """
-        if domain in allow_domains:
-            return True
-        # Check parent domains and wildcard whitelists
-        for parent in walk_parent_domains(domain):
-            # @@||parent^ whitelists parent AND all subdomains
-            if parent in allow_domains:
-                return True
-            # @@||*.parent^ whitelists all subdomains of parent
-            if f"*.{parent}" in allow_domains:
-                return True
-        return False
-
-    # =========================================================================
-    # PHASE 3: Prune ABP subdomain rules
-    # =========================================================================
-
+def _prune_redundant_rules(
+    abp_rules: dict[str, RuleEntry],
+    abp_wildcards: dict[str, WildcardEntry],
+    tld_wildcards: set[str],
+    allow_domains: set[str],
+    stats: CompileStats
+) -> dict[str, RuleEntry]:
+    """Phase 3: Remove redundant subdomain and whitelist-conflicted rules."""
     pruned_abp: dict[str, RuleEntry] = {}
 
     for domain, (rule, modifiers, is_wildcard) in abp_rules.items():
-        # Skip if whitelisted
         clean_domain = domain[2:] if domain.startswith("*.") else domain
-        if is_whitelisted(clean_domain):
+        
+        if _is_whitelisted(clean_domain, allow_domains):
             stats.whitelist_conflict_pruned += 1
             continue
 
-        # TLD wildcard coverage
         tld = get_tld(clean_domain)
         if tld and tld in tld_wildcards and clean_domain != tld:
             parent_mods = abp_wildcards[tld][1]
@@ -710,27 +628,20 @@ def compile_rules(
                 stats.tld_wildcard_pruned += 1
                 continue
 
-        # Check if any parent domain blocks this
         should_prune = False
-
-        # For wildcard rules (||*.example.com^), check if exact domain rule exists
-        # ||example.com^ covers ||*.example.com^ because it blocks domain AND all subdomains
         if is_wildcard and clean_domain in abp_rules:
             parent_mods = abp_rules[clean_domain][1]
             if should_prune_by_modifiers(modifiers, parent_mods):
                 should_prune = True
 
-        # Check parent domains (for both regular and wildcard rules)
         if not should_prune:
             for parent in walk_parent_domains(clean_domain):
-                # Check exact parent rule
                 if parent in abp_rules:
                     parent_mods = abp_rules[parent][1]
                     if should_prune_by_modifiers(modifiers, parent_mods):
                         should_prune = True
                         break
 
-                # Check wildcard parent rule (||*.parent^ covers ||sub.parent^)
                 wildcard_key = f"*.{parent}"
                 if wildcard_key in abp_rules:
                     parent_mods = abp_rules[wildcard_key][1]
@@ -743,23 +654,23 @@ def compile_rules(
         else:
             pruned_abp[domain] = (rule, modifiers, is_wildcard)
 
-    # NOTE: other_rules is already deduplicated (used set during parse)
-    # Whitelist/exception rules (@@) are intentionally NOT output.
-    # They were only used internally to remove conflicting blocking rules.
-    # The final output contains only blocking rules.
+    return pruned_abp
 
-    # =========================================================================
-    # OUTPUT (atomic write to prevent corruption on crash)
-    # =========================================================================
 
+def _write_output(
+    output_file: str,
+    stats: CompileStats,
+    abp_wildcards: dict[str, WildcardEntry],
+    pruned_abp: dict[str, RuleEntry],
+    allow_domains: set[str],
+    other_rules: set[str]
+) -> None:
+    """Phase 4: Write deduplicated rules to output atomically."""
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write to temp file first, then atomically rename
     temp_path = output_path.with_suffix(".tmp")
 
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
-        # TLD wildcards (check whitelist before writing)
         for tld, (rule, _mods) in abp_wildcards.items():
             if tld not in allow_domains and f"*.{tld}" not in allow_domains:
                 f.write(rule + "\n")
@@ -767,20 +678,80 @@ def compile_rules(
             else:
                 stats.whitelist_conflict_pruned += 1
 
-        # ABP rules (already whitelist-checked during pruning)
         for domain, (rule, _mods, _is_wc) in pruned_abp.items():
             f.write(rule + "\n")
             stats.abp_kept += 1
 
-        # Other rules (regex, partial matches, etc.) - already deduplicated
         for rule in other_rules:
             f.write(rule + "\n")
             stats.other_kept += 1
 
-    # Atomic rename (prevents partial file on crash)
     temp_path.replace(output_path)
-
     stats.total_output = stats.abp_kept + stats.other_kept
+
+
+# =============================================================================
+# MAIN COMPILATION
+# =============================================================================
+
+def compile_rules(
+    lines: Iterable[str],
+    output_file: str,
+) -> CompileStats:
+    """
+    Compile and deduplicate rules with format compression.
+
+    This is the main entry point for the compiler. It processes input lines through
+    multiple phases to produce a minimal, deduplicated output file. Streams input
+    lines sequentially via iteration (Iterable[str]) to significantly reduce peak
+    memory footprint during the parsing phase.
+
+    Args:
+        lines: Iterable of rule strings to compile (e.g., list, generator, or file object)
+        output_file: Path to write the compiled output
+
+    Returns:
+        CompileStats with metrics about the compilation process
+    """
+    stats = CompileStats()
+
+    # Data structures to accumulate parsed rules
+    abp_rules: dict[str, RuleEntry] = {}
+    abp_wildcards: dict[str, WildcardEntry] = {}
+    allow_domains: set[str] = set()
+    other_rules: set[str] = set()
+
+    # PHASE 1: Parse and categorize all rules
+    _parse_and_compress_lines(
+        lines=lines,
+        stats=stats,
+        abp_rules=abp_rules,
+        abp_wildcards=abp_wildcards,
+        allow_domains=allow_domains,
+        other_rules=other_rules
+    )
+
+    # PHASE 2: Build coverage lookup sets
+    abp_blocking_domains, tld_wildcards = _build_coverage_lookups(abp_rules, abp_wildcards)
+
+    # PHASE 3: Prune ABP subdomain rules
+    pruned_abp = _prune_redundant_rules(
+        abp_rules=abp_rules,
+        abp_wildcards=abp_wildcards,
+        tld_wildcards=tld_wildcards,
+        allow_domains=allow_domains,
+        stats=stats
+    )
+
+    # PHASE 4: Output to file
+    _write_output(
+        output_file=output_file,
+        stats=stats,
+        abp_wildcards=abp_wildcards,
+        pruned_abp=pruned_abp,
+        allow_domains=allow_domains,
+        other_rules=other_rules
+    )
 
     return stats
 
