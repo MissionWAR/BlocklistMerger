@@ -321,6 +321,8 @@ def modifier_scope_covers(
 
     parent_names = modifier_names(parent_modifiers)
     child_names = modifier_names(child_modifiers)
+    if (parent_names | child_names) - KNOWN_MODIFIERS:
+        return False
     if (parent_names | child_names) & NO_COVERAGE_MODIFIERS:
         return False
 
