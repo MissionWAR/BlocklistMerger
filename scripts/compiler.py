@@ -42,13 +42,20 @@ Whitelist Handling:
 """
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from sys import intern
-from typing import Final, Iterable
+from typing import Final
 
 import tldextract
+
+from scripts.rule_syntax import (
+    classify_rule_syntax,
+    extract_modifier_names,
+    split_pattern_and_modifiers,
+)
 
 # =============================================================================
 # TYPE ALIASES
@@ -241,7 +248,8 @@ def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]
         >>> extract_abp_info("@@||*.example.com^")
         ('example.com', frozenset(), True, True)
     """
-    match = ABP_DOMAIN_PATTERN.match(rule)
+    pattern, modifier_text = split_pattern_and_modifiers(rule)
+    match = ABP_DOMAIN_PATTERN.match(pattern)
     if not match:
         return None, EMPTY_FROZENSET, False, False
 
@@ -250,22 +258,8 @@ def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]
     is_wildcard = match.group(2) is not None
     domain = normalize_domain(match.group(3))
 
-    # Extract modifiers from $modifier1,modifier2,...
-    # Fast path: no $ means no modifiers (common case)
-    if "$" not in rule:
-        return domain, EMPTY_FROZENSET, is_exception, is_wildcard
-
-    modifiers: set[str] = set()
-    mod_part = rule.split("$", 1)[1]
-    for mod in mod_part.split(","):
-        mod_name = mod.split("=")[0].strip().lower()
-        # Handle negation prefix (e.g., ~third-party)
-        if mod_name.startswith("~"):
-            mod_name = mod_name[1:]
-        if mod_name:
-            modifiers.add(mod_name)
-
-    return domain, frozenset(modifiers) if modifiers else EMPTY_FROZENSET, is_exception, is_wildcard
+    modifiers = extract_modifier_names(modifier_text)
+    return domain, modifiers if modifiers else EMPTY_FROZENSET, is_exception, is_wildcard
 
 
 def extract_hosts_info(rule: str) -> tuple[str | None, list[str]]:
@@ -461,8 +455,8 @@ def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset
     if not child_mods and not parent_mods:
         return True
 
-    # $badfilter disables rules, it doesn't block anything
-    if "badfilter" in parent_mods:
+    # Special-behavior parents are not broad blocking coverage.
+    if parent_mods & SPECIAL_BEHAVIOR_MODIFIERS:
         return False
 
     # Child's $important overrides non-important parent
@@ -482,8 +476,9 @@ def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset
     elif "dnstype" in parent_mods:
         return False  # Child blocks ALL types, parent only blocks one type
 
-    # $client/$ctag restrict WHO is blocked. Unrestricted child is more general.
-    return not (parent_mods & CLIENT_RESTRICTION_MODIFIERS and not child_mods & CLIENT_RESTRICTION_MODIFIERS)
+    # $client/$ctag restrict WHO is blocked. Restricted parents cannot prove
+    # coverage for unrestricted children or differently restricted children.
+    return not parent_mods & CLIENT_RESTRICTION_MODIFIERS
 
 
 # =============================================================================
@@ -503,6 +498,11 @@ def _parse_and_compress_lines(
         stats.total_input += 1
 
         if not (line := line.strip()):
+            continue
+
+        syntax = classify_rule_syntax(line)
+        if syntax.has_url_path or syntax.is_invalid:
+            stats.malformed_discarded += 1
             continue
 
         # ABP-style rules
@@ -616,7 +616,7 @@ def _prune_redundant_rules(
 
     for domain, (rule, modifiers, is_wildcard) in abp_rules.items():
         clean_domain = domain[2:] if domain.startswith("*.") else domain
-        
+
         if _is_whitelisted(clean_domain, allow_domains):
             stats.whitelist_conflict_pruned += 1
             continue
@@ -678,7 +678,7 @@ def _write_output(
             else:
                 stats.whitelist_conflict_pruned += 1
 
-        for domain, (rule, _mods, _is_wc) in pruned_abp.items():
+        for _domain, (rule, _mods, _is_wc) in pruned_abp.items():
             f.write(rule + "\n")
             stats.abp_kept += 1
 
@@ -783,7 +783,10 @@ if __name__ == "__main__":
     print(f"  Output: {stats.total_output:,} rules")
     print(f"  Reduction: {(1 - stats.total_output / max(stats.total_input, 1)) * 100:.1f}%")
     print("\nBy type:")
-    print(f"  ABP rules:   {stats.abp_kept:,} (incl. {stats.formats_compressed:,} compressed from hosts/plain)")
+    print(
+        f"  ABP rules:   {stats.abp_kept:,} "
+        f"(incl. {stats.formats_compressed:,} compressed from hosts/plain)"
+    )
     print(f"  Other rules: {stats.other_kept:,}")
     print("\nPruned:")
     print(f"  ABP subdomains:     {stats.abp_subdomain_pruned:,}")

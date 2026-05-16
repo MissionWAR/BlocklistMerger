@@ -279,7 +279,12 @@ async def fetch_url(
                             changed=False,
                             error=f"HTTP {response.status}, using cached version"
                         )
-                    return FetchResult(url, success=False, changed=False, error=f"HTTP {response.status}")
+                    return FetchResult(
+                        url,
+                        success=False,
+                        changed=False,
+                        error=f"HTTP {response.status}",
+                    )
 
                 # Successful response - download content
                 content = await response.read()
@@ -314,7 +319,12 @@ async def fetch_url(
                     content = await src.read()
                 async with aiofiles.open(output_path, "wb") as dst:
                     await dst.write(content)
-                return FetchResult(url, success=True, changed=False, error="Timeout, using cached version")
+                return FetchResult(
+                    url,
+                    success=True,
+                    changed=False,
+                    error="Timeout, using cached version",
+                )
             return FetchResult(url, success=False, changed=False, error="Timeout")
 
         except Exception as e:
@@ -328,7 +338,12 @@ async def fetch_url(
                         content = await src.read()
                     async with aiofiles.open(output_path, "wb") as dst:
                         await dst.write(content)
-                    return FetchResult(url, success=True, changed=False, error=f"{e}, using cached version")
+                    return FetchResult(
+                        url,
+                        success=True,
+                        changed=False,
+                        error=f"{e}, using cached version",
+                    )
                 except Exception:
                     pass
             return FetchResult(url, success=False, changed=False, error=str(e))
@@ -391,7 +406,9 @@ async def fetch_all(
     final_results: list[FetchResult] = []
     for i, result in enumerate(results):
         if isinstance(result, Exception):
-            final_results.append(FetchResult(urls[i], success=False, changed=False, error=str(result)))
+            final_results.append(
+                FetchResult(urls[i], success=False, changed=False, error=str(result))
+            )
         else:
             final_results.append(result)
 
@@ -416,9 +433,24 @@ def main() -> int:
     parser.add_argument("--sources", required=True, help="Path to sources.txt file")
     parser.add_argument("--outdir", required=True, help="Output directory for fetched files")
     parser.add_argument("--cache", required=True, help="Cache directory for ETag state")
-    parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY, help="Max concurrent downloads")
-    parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Request timeout in seconds")
-    parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Number of retries per URL")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=DEFAULT_CONCURRENCY,
+        help="Max concurrent downloads",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help="Request timeout in seconds",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help="Number of retries per URL",
+    )
 
     args = parser.parse_args()
 

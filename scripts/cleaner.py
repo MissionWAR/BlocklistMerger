@@ -35,6 +35,12 @@ Key Operations:
 import re
 from typing import Final, NamedTuple, TypedDict
 
+from scripts.rule_syntax import (
+    classify_rule_syntax,
+    extract_modifier_names,
+    split_pattern_and_modifiers,
+)
+
 # =============================================================================
 # MODIFIER DEFINITIONS
 # =============================================================================
@@ -137,6 +143,14 @@ UNSUPPORTED_MODIFIERS: Final[frozenset[str]] = frozenset({
     "method",   # HTTP method restrictions
 })
 
+#: Cleaner-owned discard reason taxonomy.
+DISCARD_REASON_COMMENT: Final[str] = "comment"
+DISCARD_REASON_COSMETIC: Final[str] = "cosmetic"
+DISCARD_REASON_UNSUPPORTED_MODIFIER: Final[str] = "unsupported_modifier"
+DISCARD_REASON_EMPTY: Final[str] = "empty"
+DISCARD_REASON_URL_PATH: Final[str] = "url_path"
+DISCARD_REASON_INVALID: Final[str] = "invalid"
+
 
 # =============================================================================
 # REGEX PATTERNS
@@ -159,14 +173,6 @@ COMMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^\s*[#!]")
 #: Trailing inline comment: match " # comment" (space before #)
 #: Example: "||example.com^ # block ads" → "||example.com^"
 TRAILING_COMMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+#\s+.*$")
-
-#: Pattern to extract modifier section from ABP rule
-#: Matches: $modifier1,modifier2,... at end of rule
-MODIFIER_PATTERN: Final[re.Pattern[str]] = re.compile(r"\$([^$]+)$")
-
-#: Pattern to detect rules that specify modifiers without an explicit domain prefix
-#: e.g., "$script,third-party" or "some-text$script"
-MODIFIER_ONLY_RULE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[^|]*\$")
 
 
 # =============================================================================
@@ -203,6 +209,7 @@ class CleanStats(NamedTuple):
         cosmetic_removed: Cosmetic/element-hiding rules removed
         unsupported_modifier_removed: Rules with unsupported modifiers removed
         empty_removed: Empty lines removed
+        url_path_removed: DNS-incompatible URL-path rules removed
         invalid_removed: Invalid/malformed lines removed
         trimmed: Lines that had whitespace trimmed
 
@@ -217,6 +224,7 @@ class CleanStats(NamedTuple):
     cosmetic_removed: int
     unsupported_modifier_removed: int
     empty_removed: int
+    url_path_removed: int
     invalid_removed: int
     trimmed: int
 
@@ -229,6 +237,7 @@ class CleanStatsDict(TypedDict):
     cosmetic: int
     unsupported_modifier: int
     empty: int
+    url_path: int
     invalid: int
     trimmed: int
 
@@ -330,23 +339,8 @@ def extract_modifiers(rule: str) -> set[str]:
         >>> extract_modifiers("||example.com^")
         set()
     """
-    match = MODIFIER_PATTERN.search(rule)
-    if not match:
-        return set()
-
-    modifier_string = match.group(1)
-    modifiers: set[str] = set()
-
-    for part in modifier_string.split(","):
-        # Handle modifiers with values: client=192.168.1.1, dnsrewrite=example.com
-        modifier_name = part.split("=")[0].strip().lower()
-        # Handle negation: ~third-party
-        if modifier_name.startswith("~"):
-            modifier_name = modifier_name[1:]
-        if modifier_name:
-            modifiers.add(modifier_name)
-
-    return modifiers
+    _pattern, modifier_text = split_pattern_and_modifiers(rule)
+    return set(extract_modifier_names(modifier_text))
 
 
 def has_unsupported_modifiers(modifiers: set[str]) -> bool:
@@ -369,6 +363,16 @@ def has_unsupported_modifiers(modifiers: set[str]) -> bool:
         False  # Both are supported
     """
     return bool(modifiers & UNSUPPORTED_MODIFIERS)
+
+
+def is_url_path_rule(rule: str) -> bool:
+    """
+    Check whether a rule pattern contains DNS-incompatible URL path syntax.
+
+    Modifier text is split before this check, so slash-like supported modifier
+    values do not look like URL paths.
+    """
+    return classify_rule_syntax(rule).has_url_path
 
 
 def clean_line(line: str) -> tuple[CleanResult, bool]:
@@ -401,16 +405,16 @@ def clean_line(line: str) -> tuple[CleanResult, bool]:
 
     # Skip empty lines
     if not line:
-        return CleanResult(None, True, "empty"), False
+        return CleanResult(None, True, DISCARD_REASON_EMPTY), False
 
     # Remove full-line comments
     if is_comment(line):
-        return CleanResult(None, True, "comment"), False
+        return CleanResult(None, True, DISCARD_REASON_COMMENT), False
 
     # Discard cosmetic/element-hiding rules
     # Example: example.com##.ad-banner, example.com#$#div
     if is_cosmetic_rule(line):
-        return CleanResult(None, True, "cosmetic"), False
+        return CleanResult(None, True, DISCARD_REASON_COSMETIC), False
 
     # Strip trailing inline comments
     line_before_comment = line
@@ -418,22 +422,18 @@ def clean_line(line: str) -> tuple[CleanResult, bool]:
     if len(line) != len(line_before_comment):
         was_trimmed = True
 
-    # For ABP-style rules, check modifiers
-    # Use tuple form for single startswith call (faster than OR)
-    if line.startswith(("||", "@@||")):
-        modifiers = extract_modifiers(line)
-        if modifiers and has_unsupported_modifiers(modifiers):
-            # DISCARD entire rule (as per design decision)
-            # This prevents false positives like blocking google.com when
-            # the original rule was "$third-party" (third-party connections only)
-            return CleanResult(None, True, "unsupported_modifier"), False
+    syntax = classify_rule_syntax(line)
+    modifiers = set(syntax.modifier_names)
+    if modifiers and has_unsupported_modifiers(modifiers):
+        # DISCARD entire rule (as per design decision).
+        # This prevents browser-scoped rules from becoming broader DNS blocks.
+        return CleanResult(None, True, DISCARD_REASON_UNSUPPORTED_MODIFIER), False
 
-    # Handle rules with just $ and modifiers (no pattern)
-    # e.g., "$script,third-party" without a domain prefix
-    if MODIFIER_ONLY_RULE_PATTERN.match(line):
-        modifiers = extract_modifiers(line)
-        if modifiers and has_unsupported_modifiers(modifiers):
-            return CleanResult(None, True, "unsupported_modifier"), False
+    if syntax.has_url_path:
+        return CleanResult(None, True, DISCARD_REASON_URL_PATH), False
+
+    if syntax.is_invalid:
+        return CleanResult(None, True, DISCARD_REASON_INVALID), False
 
     # Line is valid, return cleaned version
     return CleanResult(line, False, None), was_trimmed
@@ -469,6 +469,7 @@ def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
         "cosmetic": 0,
         "unsupported_modifier": 0,
         "empty": 0,
+        "url_path": 0,
         "invalid": 0,
         "trimmed": 0,
     }
@@ -490,8 +491,13 @@ def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
                     stats["unsupported_modifier"] += 1
                 case "empty":
                     stats["empty"] += 1
-                case _:
+                case "url_path":
+                    stats["url_path"] += 1
+                case "invalid":
                     stats["invalid"] += 1
+                case _:
+                    msg = f"Unknown cleaner discard reason: {result.reason}"
+                    raise ValueError(msg)
         else:
             cleaned.append(result.line)  # type: ignore[arg-type]
             stats["kept"] += 1
@@ -503,6 +509,7 @@ def clean_lines(lines: list[str]) -> tuple[list[str], CleanStats]:
         cosmetic_removed=stats["cosmetic"],
         unsupported_modifier_removed=stats["unsupported_modifier"],
         empty_removed=stats["empty"],
+        url_path_removed=stats["url_path"],
         invalid_removed=stats["invalid"],
         trimmed=stats["trimmed"],
     )
@@ -563,5 +570,6 @@ if __name__ == "__main__":
     print(f"  Removed: {stats.comments_removed} comments, "
           f"{stats.cosmetic_removed} cosmetic, "
           f"{stats.unsupported_modifier_removed} unsupported modifiers, "
+          f"{stats.url_path_removed} URL paths, "
           f"{stats.empty_removed} empty, "
           f"{stats.invalid_removed} invalid")
