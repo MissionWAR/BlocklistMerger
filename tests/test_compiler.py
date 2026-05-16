@@ -891,15 +891,74 @@ class TestDuplicateHandling:
         assert len(rules) == 1
         assert stats.duplicate_pruned == 2
 
-    def test_duplicate_prefer_important(self):
-        """When duplicates exist, prefer $important."""
+    def test_duplicate_keeps_important_variant(self):
+        """Same-domain important and non-important rules are distinct variants."""
         lines = [
             "||example.com^",
             "||example.com^$important",
         ]
         rules, stats = self._compile(lines)
-        assert len(rules) == 1
+        assert "||example.com^" in rules
         assert "||example.com^$important" in rules
+        assert stats.duplicate_pruned == 0
+
+    def test_reordered_equivalent_modifiers_deduplicated(self):
+        """Equivalent modifier signatures dedupe even when modifier order differs."""
+        lines = [
+            "||example.com^$client=10.0.0.1,dnstype=a",
+            "||example.com^$dnstype=A,client=10.0.0.1",
+        ]
+        rules, stats = self._compile(lines)
+        assert len(rules) == 1
+        assert "||example.com^$client=10.0.0.1,dnstype=a" in rules
+        assert stats.duplicate_pruned == 1
+
+    @pytest.mark.parametrize(
+        ("first_modifier", "second_modifier"),
+        [
+            ("client=10.0.0.1", "client=192.168.1.5"),
+            ("ctag=pc", "ctag=mobile"),
+            ("dnstype=A", "dnstype=AAAA"),
+            ("dnsrewrite=1.2.3.4", "dnsrewrite=5.6.7.8"),
+            ("denyallow=allowed.example", "denyallow=other.example"),
+        ],
+    )
+    def test_same_domain_value_bearing_modifier_variants_are_kept(
+        self,
+        first_modifier,
+        second_modifier,
+    ):
+        """Different value-bearing modifier signatures must not collapse."""
+        first_rule = f"||example.com^${first_modifier}"
+        second_rule = f"||example.com^${second_modifier}"
+
+        rules, stats = self._compile([first_rule, second_rule])
+
+        assert first_rule in rules
+        assert second_rule in rules
+        assert stats.duplicate_pruned == 0
+
+    def test_badfilter_not_duplicate_of_plain_block(self):
+        """badfilter changes behavior and cannot duplicate a normal block."""
+        lines = [
+            "||example.com^",
+            "||example.com^$badfilter",
+        ]
+        rules, stats = self._compile(lines)
+        assert "||example.com^" in rules
+        assert "||example.com^$badfilter" in rules
+        assert stats.duplicate_pruned == 0
+
+    def test_unknown_modifier_variants_are_kept(self):
+        """Uncertain modifiers keep raw differences instead of name-only dedupe."""
+        lines = [
+            "||example.com^$future=value-one",
+            "||example.com^$future=value-two",
+        ]
+        rules, stats = self._compile(lines)
+        assert "||example.com^$future=value-one" in rules
+        assert "||example.com^$future=value-two" in rules
+        assert stats.duplicate_pruned == 0
 
     def test_cross_format_same_domain(self):
         """Same domain in multiple formats - ABP wins."""
