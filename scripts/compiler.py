@@ -92,6 +92,9 @@ class AbpRuleRecord(NamedTuple):
 
 RuleEntry = AbpRuleRecord
 WildcardEntry = AbpRuleRecord
+RuleDuplicateKey = tuple[str, bool, str, tuple[object, ...]]
+RuleStorage = dict[str, list[RuleEntry]]
+WildcardStorage = dict[str, list[WildcardEntry]]
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -278,6 +281,46 @@ def _parse_abp_rule(rule: str) -> AbpRuleRecord | None:
         is_exception=match.group(1) is not None,
         is_wildcard=match.group(2) is not None,
     )
+
+
+def _rule_effect(record: AbpRuleRecord) -> str:
+    """Return the high-level effect used for exact duplicate keys."""
+    return "exception" if record.is_exception else "block"
+
+
+def _duplicate_key(record: AbpRuleRecord) -> RuleDuplicateKey:
+    """Return the semantic key that proves exact ABP rule equivalence."""
+    return (
+        record.domain,
+        record.is_wildcard,
+        _rule_effect(record),
+        record.semantic_signature,
+    )
+
+
+def _rule_storage_key(record: AbpRuleRecord) -> str:
+    """Return the domain lookup key used by parent and wildcard pruning."""
+    if record.is_wildcard:
+        return f"*.{record.domain}"
+    return record.domain
+
+
+def _store_rule_variant(
+    storage: RuleStorage | WildcardStorage,
+    storage_key: str,
+    duplicate_index: set[RuleDuplicateKey],
+    record: RuleEntry,
+    stats: CompileStats,
+) -> bool:
+    """Store a semantic rule variant, returning False when it was a duplicate."""
+    duplicate_key = _duplicate_key(record)
+    if duplicate_key in duplicate_index:
+        stats.duplicate_pruned += 1
+        return False
+
+    duplicate_index.add(duplicate_key)
+    storage.setdefault(storage_key, []).append(record)
+    return True
 
 
 def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]:
@@ -537,10 +580,11 @@ def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset
 def _parse_and_compress_lines(
     lines: Iterable[str],
     stats: CompileStats,
-    abp_rules: dict[str, RuleEntry],
-    abp_wildcards: dict[str, WildcardEntry],
+    abp_rules: RuleStorage,
+    abp_wildcards: WildcardStorage,
     allow_domains: set[str],
-    other_rules: set[str]
+    other_rules: set[str],
+    duplicate_index: set[RuleDuplicateKey],
 ) -> None:
     """Phase 1: Parse all rules, convert formats to ABP, and categorize them."""
     for line in lines:
@@ -572,23 +616,23 @@ def _parse_and_compress_lines(
             if record.is_wildcard:
                 tld = get_tld(record.domain)
                 if tld and record.domain == tld:
-                    if tld not in abp_wildcards:
-                        abp_wildcards[tld] = record
+                    _store_rule_variant(abp_wildcards, tld, duplicate_index, record, stats)
                 else:
-                    key = f"*.{record.domain}"
-                    if key not in abp_rules:
-                        abp_rules[key] = record
+                    _store_rule_variant(
+                        abp_rules,
+                        _rule_storage_key(record),
+                        duplicate_index,
+                        record,
+                        stats,
+                    )
             else:
-                if record.domain not in abp_rules:
-                    abp_rules[record.domain] = record
-                else:
-                    existing = abp_rules[record.domain]
-                    if (
-                        "important" in record.modifier_names
-                        and "important" not in existing.modifier_names
-                    ):
-                        abp_rules[record.domain] = record
-                    stats.duplicate_pruned += 1
+                _store_rule_variant(
+                    abp_rules,
+                    _rule_storage_key(record),
+                    duplicate_index,
+                    record,
+                    stats,
+                )
             continue
 
         if line.startswith("@@"):
@@ -603,13 +647,15 @@ def _parse_and_compress_lines(
                     continue
 
                 abp_rule = f"||{domain}^"
-                if domain not in abp_rules:
-                    record = _parse_abp_rule(abp_rule)
-                    if record is not None:
-                        abp_rules[domain] = record
+                record = _parse_abp_rule(abp_rule)
+                if record is not None and _store_rule_variant(
+                    abp_rules,
+                    _rule_storage_key(record),
+                    duplicate_index,
+                    record,
+                    stats,
+                ):
                     stats.formats_compressed += 1
-                else:
-                    stats.duplicate_pruned += 1
             continue
 
         # Plain domain rules
@@ -617,13 +663,15 @@ def _parse_and_compress_lines(
             domain = normalize_domain(line)
             if domain and domain not in LOCAL_HOSTNAMES:
                 abp_rule = f"||{domain}^"
-                if domain not in abp_rules:
-                    record = _parse_abp_rule(abp_rule)
-                    if record is not None:
-                        abp_rules[domain] = record
+                record = _parse_abp_rule(abp_rule)
+                if record is not None and _store_rule_variant(
+                    abp_rules,
+                    _rule_storage_key(record),
+                    duplicate_index,
+                    record,
+                    stats,
+                ):
                     stats.formats_compressed += 1
-                else:
-                    stats.duplicate_pruned += 1
             else:
                 stats.local_hostname_pruned += 1
             continue
@@ -638,13 +686,14 @@ def _parse_and_compress_lines(
 
 
 def _build_coverage_lookups(
-    abp_rules: dict[str, RuleEntry],
-    abp_wildcards: dict[str, WildcardEntry]
+    abp_rules: RuleStorage,
+    abp_wildcards: WildcardStorage,
 ) -> tuple[set[str], set[str]]:
     """Phase 2: Create efficient lookup structures for pruning."""
     abp_blocking_domains: set[str] = {
         record.domain
-        for record in abp_rules.values()
+        for records in abp_rules.values()
+        for record in records
     }
     tld_wildcards: set[str] = set(abp_wildcards.keys())
     return abp_blocking_domains, tld_wildcards
@@ -660,55 +709,71 @@ def _is_whitelisted(domain: str, allow_domains: set[str]) -> bool:
     return False
 
 
+def _any_parent_record_covers(child: RuleEntry, parents: list[RuleEntry]) -> bool:
+    """Return True when any parent variant proves coverage for a child variant."""
+    return any(
+        should_prune_by_modifiers(child.modifier_names, parent.modifier_names)
+        for parent in parents
+    )
+
+
 def _prune_redundant_rules(
-    abp_rules: dict[str, RuleEntry],
-    abp_wildcards: dict[str, WildcardEntry],
+    abp_rules: RuleStorage,
+    abp_wildcards: WildcardStorage,
     tld_wildcards: set[str],
     allow_domains: set[str],
     stats: CompileStats
-) -> dict[str, RuleEntry]:
+) -> RuleStorage:
     """Phase 3: Remove redundant subdomain and whitelist-conflicted rules."""
-    pruned_abp: dict[str, RuleEntry] = {}
+    pruned_abp: RuleStorage = {}
 
-    for domain, record in abp_rules.items():
-        clean_domain = record.domain
+    for domain, records in abp_rules.items():
+        for record in records:
+            clean_domain = record.domain
 
-        if _is_whitelisted(clean_domain, allow_domains):
-            stats.whitelist_conflict_pruned += 1
-            continue
+            if _is_whitelisted(clean_domain, allow_domains):
+                stats.whitelist_conflict_pruned += 1
+                continue
 
-        tld = get_tld(clean_domain)
-        if tld and tld in tld_wildcards and clean_domain != tld:
-            parent_mods = abp_wildcards[tld].modifier_names
-            if should_prune_by_modifiers(record.modifier_names, parent_mods):
+            tld = get_tld(clean_domain)
+            if (
+                tld
+                and tld in tld_wildcards
+                and clean_domain != tld
+                and _any_parent_record_covers(record, abp_wildcards[tld])
+            ):
                 stats.tld_wildcard_pruned += 1
                 continue
 
-        should_prune = False
-        if record.is_wildcard and clean_domain in abp_rules:
-            parent_mods = abp_rules[clean_domain].modifier_names
-            if should_prune_by_modifiers(record.modifier_names, parent_mods):
+            should_prune = False
+            if (
+                record.is_wildcard
+                and clean_domain in abp_rules
+                and _any_parent_record_covers(record, abp_rules[clean_domain])
+            ):
                 should_prune = True
 
-        if not should_prune:
-            for parent in walk_parent_domains(clean_domain):
-                if parent in abp_rules:
-                    parent_mods = abp_rules[parent].modifier_names
-                    if should_prune_by_modifiers(record.modifier_names, parent_mods):
+            if not should_prune:
+                for parent in walk_parent_domains(clean_domain):
+                    if parent in abp_rules and _any_parent_record_covers(
+                        record,
+                        abp_rules[parent],
+                    ):
                         should_prune = True
                         break
 
-                wildcard_key = f"*.{parent}"
-                if wildcard_key in abp_rules:
-                    parent_mods = abp_rules[wildcard_key].modifier_names
-                    if should_prune_by_modifiers(record.modifier_names, parent_mods):
+                    wildcard_key = f"*.{parent}"
+                    if wildcard_key in abp_rules and _any_parent_record_covers(
+                        record,
+                        abp_rules[wildcard_key],
+                    ):
                         should_prune = True
                         break
 
-        if should_prune:
-            stats.abp_subdomain_pruned += 1
-        else:
-            pruned_abp[domain] = record
+            if should_prune:
+                stats.abp_subdomain_pruned += 1
+            else:
+                pruned_abp.setdefault(domain, []).append(record)
 
     return pruned_abp
 
@@ -716,8 +781,8 @@ def _prune_redundant_rules(
 def _write_output(
     output_file: str,
     stats: CompileStats,
-    abp_wildcards: dict[str, WildcardEntry],
-    pruned_abp: dict[str, RuleEntry],
+    abp_wildcards: WildcardStorage,
+    pruned_abp: RuleStorage,
     allow_domains: set[str],
     other_rules: set[str]
 ) -> None:
@@ -727,16 +792,18 @@ def _write_output(
     temp_path = output_path.with_suffix(".tmp")
 
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
-        for tld, record in abp_wildcards.items():
+        for tld, records in abp_wildcards.items():
             if tld not in allow_domains and f"*.{tld}" not in allow_domains:
+                for record in records:
+                    f.write(record.rule + "\n")
+                    stats.abp_kept += 1
+            else:
+                stats.whitelist_conflict_pruned += len(records)
+
+        for records in pruned_abp.values():
+            for record in records:
                 f.write(record.rule + "\n")
                 stats.abp_kept += 1
-            else:
-                stats.whitelist_conflict_pruned += 1
-
-        for record in pruned_abp.values():
-            f.write(record.rule + "\n")
-            stats.abp_kept += 1
 
         for rule in other_rules:
             f.write(rule + "\n")
@@ -772,8 +839,9 @@ def compile_rules(
     stats = CompileStats()
 
     # Data structures to accumulate parsed rules
-    abp_rules: dict[str, RuleEntry] = {}
-    abp_wildcards: dict[str, WildcardEntry] = {}
+    abp_rules: RuleStorage = {}
+    abp_wildcards: WildcardStorage = {}
+    duplicate_index: set[RuleDuplicateKey] = set()
     allow_domains: set[str] = set()
     other_rules: set[str] = set()
 
@@ -784,7 +852,8 @@ def compile_rules(
         abp_rules=abp_rules,
         abp_wildcards=abp_wildcards,
         allow_domains=allow_domains,
-        other_rules=other_rules
+        other_rules=other_rules,
+        duplicate_index=duplicate_index,
     )
 
     # PHASE 2: Build coverage lookup sets
