@@ -1,0 +1,14 @@
+||exact-covered.example.com^$client=10.0.0.1
+@@||exact-covered.example.com^$client=10.0.0.1
+||child.parent-covered.example.com^$dnstype=A
+@@||parent-covered.example.com^
+||sub.wild-covered.example.com^$ctag=pc
+@@||*.wild-covered.example.com^$ctag=pc
+||mismatch.example.com^$client=10.0.0.1
+@@||mismatch.example.com^$client=192.168.1.5
+||important.example.com^$important
+@@||important.example.com^
+||uncertain.example.com^
+@@||uncertain.example.com^$future=value
+@@||lonely-exception.example.com^
+0.0.0.0 kept-host.example.com

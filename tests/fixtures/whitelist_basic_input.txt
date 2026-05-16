@@ -1,0 +1,5 @@
+||example.com^
+||sub.example.com^
+0.0.0.0 other.test
+@@||example.com^
+

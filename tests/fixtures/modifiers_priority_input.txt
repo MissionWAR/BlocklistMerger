@@ -1,0 +1,5 @@
+||example.com^
+||sub.example.com^$important
+||dns.example.com^$dnsrewrite=1.2.3.4
+||client-only.net^$client=192.168.1.10
+||client-only-sub.client-only.net^$client=192.168.1.10
