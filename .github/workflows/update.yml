@@ -36,7 +36,13 @@ jobs:
           cache: pip
 
       - name: Install Dependencies
-        run: pip install -q .
+        run: pip install -q ".[dev]"
+
+      - name: Ruff
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest
 
       - name: Get Cache Key
         id: cache-key

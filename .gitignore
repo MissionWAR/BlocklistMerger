@@ -6,6 +6,8 @@
 tests/
 docs/
 run.py
+.planning/
+AGENTS.md
 
 
 # ============================================

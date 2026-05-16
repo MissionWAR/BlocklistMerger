@@ -25,12 +25,21 @@ import json
 import os
 import sys
 import time
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from typing import TypedDict, Iterator
+from typing import Final, TypedDict
 
 from scripts import __version__
-from scripts.cleaner import clean_line
+from scripts.cleaner import (
+    DISCARD_REASON_COMMENT,
+    DISCARD_REASON_COSMETIC,
+    DISCARD_REASON_EMPTY,
+    DISCARD_REASON_INVALID,
+    DISCARD_REASON_UNSUPPORTED_MODIFIER,
+    DISCARD_REASON_URL_PATH,
+    clean_line,
+)
 from scripts.compiler import compile_rules
 
 # =============================================================================
@@ -52,6 +61,8 @@ class PipelineStats(TypedDict):
     cosmetic_removed: int
     unsupported_removed: int
     empty_removed: int
+    url_path_removed: int
+    invalid_removed: int
     trimmed: int
     abp_subdomain_pruned: int
     tld_wildcard_pruned: int
@@ -63,44 +74,50 @@ class PipelineStats(TypedDict):
     other_kept: int
 
 
+CLEANER_REASON_STAT_KEYS: Final[dict[str, str]] = {
+    DISCARD_REASON_COMMENT: "comments_removed",
+    DISCARD_REASON_COSMETIC: "cosmetic_removed",
+    DISCARD_REASON_UNSUPPORTED_MODIFIER: "unsupported_removed",
+    DISCARD_REASON_EMPTY: "empty_removed",
+    DISCARD_REASON_URL_PATH: "url_path_removed",
+    DISCARD_REASON_INVALID: "invalid_removed",
+}
+
+
 # =============================================================================
 # WORKER FUNCTIONS
 # =============================================================================
 
 def _clean_single_file(file_path: Path) -> tuple[list[str], dict[str, int]]:
     """Clean a single file and return cleaned lines and partial stats."""
-    from scripts.cleaner import clean_line
-    
+
     cleaned: list[str] = []
-    file_stats = {
+    file_stats: dict[str, int] = {
         "lines_raw": 0,
         "comments_removed": 0,
         "cosmetic_removed": 0,
         "unsupported_removed": 0,
         "empty_removed": 0,
+        "url_path_removed": 0,
+        "invalid_removed": 0,
         "trimmed": 0,
     }
-    
+
     with open(file_path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
             file_stats["lines_raw"] += 1
             result, was_trimmed = clean_line(line)
-            
+
             if was_trimmed:
                 file_stats["trimmed"] += 1
-                
+
             if result.discarded:
-                if result.reason == "comment":
-                    file_stats["comments_removed"] += 1
-                elif result.reason == "cosmetic":
-                    file_stats["cosmetic_removed"] += 1
-                elif result.reason == "unsupported_modifier":
-                    file_stats["unsupported_removed"] += 1
-                elif result.reason == "empty":
-                    file_stats["empty_removed"] += 1
+                if result.reason not in CLEANER_REASON_STAT_KEYS:
+                    raise ValueError(f"Unknown cleaner discard reason: {result.reason!r}")
+                file_stats[CLEANER_REASON_STAT_KEYS[result.reason]] += 1
             else:
                 cleaned.append(result.line)  # type: ignore[arg-type]
-                
+
     return cleaned, file_stats
 
 
@@ -146,6 +163,8 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
         "cosmetic_removed": 0,
         "unsupported_removed": 0,
         "empty_removed": 0,
+        "url_path_removed": 0,
+        "invalid_removed": 0,
         "trimmed": 0,
         "abp_subdomain_pruned": 0,
         "tld_wildcard_pruned": 0,
@@ -176,12 +195,13 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
                 stats["cosmetic_removed"] += file_stats["cosmetic_removed"]
                 stats["unsupported_removed"] += file_stats["unsupported_removed"]
                 stats["empty_removed"] += file_stats["empty_removed"]
+                stats["url_path_removed"] += file_stats["url_path_removed"]
+                stats["invalid_removed"] += file_stats["invalid_removed"]
                 stats["trimmed"] += file_stats["trimmed"]
                 stats["lines_clean"] += len(cleaned)
 
                 # Stream lines to compiler
-                for line in cleaned:
-                    yield line
+                yield from cleaned
 
     # Compile the streamed lines (evaluates the generator lazily)
     compile_stats = compile_rules(_get_cleaned_lines(), output_file)
@@ -242,6 +262,8 @@ def print_summary(stats: PipelineStats) -> None:
     print(f"   Cosmetic rules:    {stats['cosmetic_removed']:>10,}")
     print(f"   Unsupported mods:  {stats['unsupported_removed']:>10,}")
     print(f"   Empty lines:       {stats['empty_removed']:>10,}")
+    print(f"   URL paths:         {stats['url_path_removed']:>10,}")
+    print(f"   Invalid rules:     {stats['invalid_removed']:>10,}")
     print(f"   Trimmed:           {stats['trimmed']:>10,}")
 
     print("\n🔧 Compilation pruned:")
@@ -252,7 +274,10 @@ def print_summary(stats: PipelineStats) -> None:
     print(f"   Local hostnames:   {stats['local_hostname_pruned']:>10,}")
 
     print("\n📦 Output breakdown:")
-    print(f"   ABP rules:   {stats['abp_kept']:>10,} (incl. {stats['formats_compressed']:,} compressed)")
+    print(
+        f"   ABP rules:   {stats['abp_kept']:>10,} "
+        f"(incl. {stats['formats_compressed']:,} compressed)"
+    )
     print(f"   Other rules: {stats['other_kept']:>10,}")
 
 
