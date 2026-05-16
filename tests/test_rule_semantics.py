@@ -186,13 +186,20 @@ def test_modifier_scope_covers_proven_broad_or_equal_scopes(
     [
         ("client=10.0.0.1", None),
         ("client=10.0.0.1", "client=192.168.1.5"),
+        ("ctag=pc", "ctag=mobile"),
+        ("dnstype=A", "dnstype=AAAA"),
         (None, "important"),
         ("important", None),
         ("dnsrewrite=1.2.3.4", "dnsrewrite=1.2.3.4"),
+        (None, "dnsrewrite=1.2.3.4"),
         ("denyallow=allowed.example", "denyallow=allowed.example"),
+        (None, "denyallow=allowed.example"),
         ("badfilter", None),
+        (None, "badfilter"),
         ("unknown=value", None),
         (None, "unknown=value"),
+        ("client='unterminated", None),
+        (None, "client='unterminated"),
     ],
 )
 def test_modifier_scope_does_not_cover_unproven_or_special_scopes(
