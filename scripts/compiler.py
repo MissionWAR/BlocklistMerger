@@ -47,13 +47,19 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from sys import intern
-from typing import Final
+from typing import Final, NamedTuple
 
 import tldextract
 
+from scripts.rule_semantics import (
+    ParsedModifier,
+    canonical_modifier_signature,
+    modifier_names,
+    modifier_scope_covers,
+    parse_modifier_text,
+)
 from scripts.rule_syntax import (
     classify_rule_syntax,
-    extract_modifier_names,
     split_pattern_and_modifiers,
 )
 
@@ -62,11 +68,35 @@ from scripts.rule_syntax import (
 # =============================================================================
 # These make complex type signatures more readable throughout the codebase.
 
-#: A parsed ABP rule entry: (original_rule, modifiers_frozenset, is_wildcard)
-RuleEntry = tuple[str, frozenset[str], bool]
+class AbpRuleRecord(NamedTuple):
+    """
+    Parsed semantic ABP rule record used by compiler internals.
 
-#: A TLD wildcard entry: (original_rule, modifiers_frozenset)
-WildcardEntry = tuple[str, frozenset[str]]
+    Attributes:
+        rule: Original rule text preserved for output.
+        domain: Normalized domain without an optional wildcard prefix.
+        modifiers: Structured modifier records preserving names, values, and uncertainty.
+        modifier_names: Legacy names-only view for compatibility and current coverage checks.
+        semantic_signature: Canonical modifier signature for exact equivalence checks.
+        is_exception: True for whitelist/exception rules.
+        is_wildcard: True for `||*.domain^` rules.
+    """
+
+    rule: str
+    domain: str
+    modifiers: tuple[ParsedModifier, ...]
+    modifier_names: frozenset[str]
+    semantic_signature: tuple[object, ...]
+    is_exception: bool
+    is_wildcard: bool
+
+
+RuleEntry = AbpRuleRecord
+WildcardEntry = AbpRuleRecord
+RuleDuplicateKey = tuple[str, bool, str, tuple[object, ...]]
+RuleStorage = dict[str, list[RuleEntry]]
+WildcardStorage = dict[str, list[WildcardEntry]]
+ExceptionRules = list[RuleEntry]
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -228,6 +258,73 @@ def normalize_domain(domain: str) -> str:
     return intern(domain.lower().strip().rstrip("."))
 
 
+def _parse_abp_rule(rule: str) -> AbpRuleRecord | None:
+    """
+    Parse an ABP domain rule into a structured compiler record.
+
+    The public `extract_abp_info()` helper intentionally exposes the legacy
+    names-only tuple. Compiler internals use this richer record so modifier
+    values remain available for semantic duplicate and coverage decisions.
+    """
+    pattern, modifier_text = split_pattern_and_modifiers(rule)
+    match = ABP_DOMAIN_PATTERN.match(pattern)
+    if not match:
+        return None
+
+    modifiers = parse_modifier_text(modifier_text)
+    names = modifier_names(modifiers)
+
+    return AbpRuleRecord(
+        rule=rule,
+        domain=normalize_domain(match.group(3)),
+        modifiers=modifiers,
+        modifier_names=names if names else EMPTY_FROZENSET,
+        semantic_signature=canonical_modifier_signature(modifiers),
+        is_exception=match.group(1) is not None,
+        is_wildcard=match.group(2) is not None,
+    )
+
+
+def _rule_effect(record: AbpRuleRecord) -> str:
+    """Return the high-level effect used for exact duplicate keys."""
+    return "exception" if record.is_exception else "block"
+
+
+def _duplicate_key(record: AbpRuleRecord) -> RuleDuplicateKey:
+    """Return the semantic key that proves exact ABP rule equivalence."""
+    return (
+        record.domain,
+        record.is_wildcard,
+        _rule_effect(record),
+        record.semantic_signature,
+    )
+
+
+def _rule_storage_key(record: AbpRuleRecord) -> str:
+    """Return the domain lookup key used by parent and wildcard pruning."""
+    if record.is_wildcard:
+        return f"*.{record.domain}"
+    return record.domain
+
+
+def _store_rule_variant(
+    storage: RuleStorage | WildcardStorage,
+    storage_key: str,
+    duplicate_index: set[RuleDuplicateKey],
+    record: RuleEntry,
+    stats: CompileStats,
+) -> bool:
+    """Store a semantic rule variant, returning False when it was a duplicate."""
+    duplicate_key = _duplicate_key(record)
+    if duplicate_key in duplicate_index:
+        stats.duplicate_pruned += 1
+        return False
+
+    duplicate_index.add(duplicate_key)
+    storage.setdefault(storage_key, []).append(record)
+    return True
+
+
 def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]:
     """
     Extract domain, modifiers, exception status, and wildcard status from ABP rule.
@@ -248,18 +345,15 @@ def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]
         >>> extract_abp_info("@@||*.example.com^")
         ('example.com', frozenset(), True, True)
     """
-    pattern, modifier_text = split_pattern_and_modifiers(rule)
-    match = ABP_DOMAIN_PATTERN.match(pattern)
-    if not match:
+    record = _parse_abp_rule(rule)
+    if record is None:
         return None, EMPTY_FROZENSET, False, False
-
-    # Groups: (1) @@ exception, (2) *. wildcard, (3) domain
-    is_exception = match.group(1) is not None
-    is_wildcard = match.group(2) is not None
-    domain = normalize_domain(match.group(3))
-
-    modifiers = extract_modifier_names(modifier_text)
-    return domain, modifiers if modifiers else EMPTY_FROZENSET, is_exception, is_wildcard
+    return (
+        record.domain,
+        record.modifier_names if record.modifier_names else EMPTY_FROZENSET,
+        record.is_exception,
+        record.is_wildcard,
+    )
 
 
 def extract_hosts_info(rule: str) -> tuple[str | None, list[str]]:
@@ -488,10 +582,11 @@ def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset
 def _parse_and_compress_lines(
     lines: Iterable[str],
     stats: CompileStats,
-    abp_rules: dict[str, RuleEntry],
-    abp_wildcards: dict[str, WildcardEntry],
-    allow_domains: set[str],
-    other_rules: set[str]
+    abp_rules: RuleStorage,
+    abp_wildcards: WildcardStorage,
+    exceptions: ExceptionRules,
+    other_rules: set[str],
+    duplicate_index: set[RuleDuplicateKey],
 ) -> None:
     """Phase 1: Parse all rules, convert formats to ABP, and categorize them."""
     for line in lines:
@@ -507,36 +602,36 @@ def _parse_and_compress_lines(
 
         # ABP-style rules
         if line.startswith(("||", "@@||")):
-            domain, modifiers, is_exception, is_wildcard = extract_abp_info(line)
+            record = _parse_abp_rule(line)
 
-            if not domain:
+            if record is None:
                 stats.malformed_discarded += 1
                 continue
 
-            if is_exception:
-                if is_wildcard:
-                    allow_domains.add(f"*.{domain}")
-                else:
-                    allow_domains.add(domain)
+            if record.is_exception:
+                exceptions.append(record)
                 continue
 
-            if is_wildcard:
-                tld = get_tld(domain)
-                if tld and domain == tld:
-                    if tld not in abp_wildcards:
-                        abp_wildcards[tld] = (line, modifiers)
+            if record.is_wildcard:
+                tld = get_tld(record.domain)
+                if tld and record.domain == tld:
+                    _store_rule_variant(abp_wildcards, tld, duplicate_index, record, stats)
                 else:
-                    key = f"*.{domain}"
-                    if key not in abp_rules:
-                        abp_rules[key] = (line, modifiers, True)
+                    _store_rule_variant(
+                        abp_rules,
+                        _rule_storage_key(record),
+                        duplicate_index,
+                        record,
+                        stats,
+                    )
             else:
-                if domain not in abp_rules:
-                    abp_rules[domain] = (line, modifiers, False)
-                else:
-                    existing = abp_rules[domain]
-                    if "important" in modifiers and "important" not in existing[1]:
-                        abp_rules[domain] = (line, modifiers, False)
-                    stats.duplicate_pruned += 1
+                _store_rule_variant(
+                    abp_rules,
+                    _rule_storage_key(record),
+                    duplicate_index,
+                    record,
+                    stats,
+                )
             continue
 
         if line.startswith("@@"):
@@ -551,11 +646,15 @@ def _parse_and_compress_lines(
                     continue
 
                 abp_rule = f"||{domain}^"
-                if domain not in abp_rules:
-                    abp_rules[domain] = (abp_rule, EMPTY_FROZENSET, False)
+                record = _parse_abp_rule(abp_rule)
+                if record is not None and _store_rule_variant(
+                    abp_rules,
+                    _rule_storage_key(record),
+                    duplicate_index,
+                    record,
+                    stats,
+                ):
                     stats.formats_compressed += 1
-                else:
-                    stats.duplicate_pruned += 1
             continue
 
         # Plain domain rules
@@ -563,11 +662,15 @@ def _parse_and_compress_lines(
             domain = normalize_domain(line)
             if domain and domain not in LOCAL_HOSTNAMES:
                 abp_rule = f"||{domain}^"
-                if domain not in abp_rules:
-                    abp_rules[domain] = (abp_rule, EMPTY_FROZENSET, False)
+                record = _parse_abp_rule(abp_rule)
+                if record is not None and _store_rule_variant(
+                    abp_rules,
+                    _rule_storage_key(record),
+                    duplicate_index,
+                    record,
+                    stats,
+                ):
                     stats.formats_compressed += 1
-                else:
-                    stats.duplicate_pruned += 1
             else:
                 stats.local_hostname_pruned += 1
             continue
@@ -582,77 +685,162 @@ def _parse_and_compress_lines(
 
 
 def _build_coverage_lookups(
-    abp_rules: dict[str, RuleEntry],
-    abp_wildcards: dict[str, WildcardEntry]
+    abp_rules: RuleStorage,
+    abp_wildcards: WildcardStorage,
 ) -> tuple[set[str], set[str]]:
     """Phase 2: Create efficient lookup structures for pruning."""
     abp_blocking_domains: set[str] = {
-        domain if not is_wc else domain[2:]
-        for domain, (_, _, is_wc) in abp_rules.items()
+        record.domain
+        for records in abp_rules.values()
+        for record in records
     }
     tld_wildcards: set[str] = set(abp_wildcards.keys())
     return abp_blocking_domains, tld_wildcards
 
 
-def _is_whitelisted(domain: str, allow_domains: set[str]) -> bool:
-    """Check if domain is whitelisted by direct or wildcard matches."""
-    if domain in allow_domains:
-        return True
-    for parent in walk_parent_domains(domain):
-        if parent in allow_domains or f"*.{parent}" in allow_domains:
-            return True
-    return False
+def _is_subdomain_of(domain: str, parent_domain: str) -> bool:
+    """Return True when domain is below parent_domain in the DNS hierarchy."""
+    return parent_domain in walk_parent_domains(domain)
+
+
+def _exception_domain_scope_covers(exception: RuleEntry, block: RuleEntry) -> bool:
+    """Return True when an exception's domain pattern covers a block pattern."""
+    if exception.is_wildcard:
+        if block.is_wildcard:
+            return block.domain == exception.domain or _is_subdomain_of(
+                block.domain,
+                exception.domain,
+            )
+        return _is_subdomain_of(block.domain, exception.domain)
+
+    if block.is_wildcard:
+        return block.domain == exception.domain or _is_subdomain_of(
+            block.domain,
+            exception.domain,
+        )
+
+    return block.domain == exception.domain or _is_subdomain_of(block.domain, exception.domain)
+
+
+def _important_priority_state(modifiers: tuple[ParsedModifier, ...]) -> tuple[bool, bool]:
+    """Return (has_positive_important, is_safe_to_compare) for priority handling."""
+    important_modifiers = [
+        modifier
+        for modifier in modifiers
+        if modifier.name == "important"
+    ]
+    if not important_modifiers:
+        return False, True
+    if len(important_modifiers) != 1:
+        return False, False
+
+    modifier = important_modifiers[0]
+    if modifier.negated or modifier.uncertain or modifier.raw_value is not None or modifier.values:
+        return False, False
+
+    return True, True
+
+
+def _without_priority_modifiers(
+    modifiers: tuple[ParsedModifier, ...],
+) -> tuple[ParsedModifier, ...]:
+    """Return modifiers without `$important` so exception priority can be handled separately."""
+    return tuple(modifier for modifier in modifiers if modifier.name != "important")
+
+
+def _exception_modifier_scope_covers(exception: RuleEntry, block: RuleEntry) -> bool:
+    """Return True when exception priority and modifiers cover the block rule."""
+    exception_important, exception_priority_safe = _important_priority_state(exception.modifiers)
+    block_important, block_priority_safe = _important_priority_state(block.modifiers)
+    if not exception_priority_safe or not block_priority_safe:
+        return False
+    if block_important and not exception_important:
+        return False
+
+    return modifier_scope_covers(
+        _without_priority_modifiers(exception.modifiers),
+        _without_priority_modifiers(block.modifiers),
+    )
+
+
+def _exception_covers_block(exception: RuleEntry, block: RuleEntry) -> bool:
+    """Return True when an exception fully covers a block rule."""
+    return (
+        _exception_domain_scope_covers(exception, block)
+        and _exception_modifier_scope_covers(exception, block)
+    )
+
+
+def _is_whitelisted(record: RuleEntry, exceptions: ExceptionRules) -> bool:
+    """Check whether any exception rule fully covers a block rule."""
+    return any(_exception_covers_block(exception, record) for exception in exceptions)
+
+
+def _any_parent_record_covers(child: RuleEntry, parents: list[RuleEntry]) -> bool:
+    """Return True when any parent variant proves coverage for a child variant."""
+    return any(
+        modifier_scope_covers(parent.modifiers, child.modifiers)
+        for parent in parents
+    )
 
 
 def _prune_redundant_rules(
-    abp_rules: dict[str, RuleEntry],
-    abp_wildcards: dict[str, WildcardEntry],
+    abp_rules: RuleStorage,
+    abp_wildcards: WildcardStorage,
     tld_wildcards: set[str],
-    allow_domains: set[str],
+    exceptions: ExceptionRules,
     stats: CompileStats
-) -> dict[str, RuleEntry]:
+) -> RuleStorage:
     """Phase 3: Remove redundant subdomain and whitelist-conflicted rules."""
-    pruned_abp: dict[str, RuleEntry] = {}
+    pruned_abp: RuleStorage = {}
 
-    for domain, (rule, modifiers, is_wildcard) in abp_rules.items():
-        clean_domain = domain[2:] if domain.startswith("*.") else domain
+    for domain, records in abp_rules.items():
+        for record in records:
+            clean_domain = record.domain
 
-        if _is_whitelisted(clean_domain, allow_domains):
-            stats.whitelist_conflict_pruned += 1
-            continue
+            if _is_whitelisted(record, exceptions):
+                stats.whitelist_conflict_pruned += 1
+                continue
 
-        tld = get_tld(clean_domain)
-        if tld and tld in tld_wildcards and clean_domain != tld:
-            parent_mods = abp_wildcards[tld][1]
-            if should_prune_by_modifiers(modifiers, parent_mods):
+            tld = get_tld(clean_domain)
+            if (
+                tld
+                and tld in tld_wildcards
+                and clean_domain != tld
+                and _any_parent_record_covers(record, abp_wildcards[tld])
+            ):
                 stats.tld_wildcard_pruned += 1
                 continue
 
-        should_prune = False
-        if is_wildcard and clean_domain in abp_rules:
-            parent_mods = abp_rules[clean_domain][1]
-            if should_prune_by_modifiers(modifiers, parent_mods):
+            should_prune = False
+            if (
+                record.is_wildcard
+                and clean_domain in abp_rules
+                and _any_parent_record_covers(record, abp_rules[clean_domain])
+            ):
                 should_prune = True
 
-        if not should_prune:
-            for parent in walk_parent_domains(clean_domain):
-                if parent in abp_rules:
-                    parent_mods = abp_rules[parent][1]
-                    if should_prune_by_modifiers(modifiers, parent_mods):
+            if not should_prune:
+                for parent in walk_parent_domains(clean_domain):
+                    if parent in abp_rules and _any_parent_record_covers(
+                        record,
+                        abp_rules[parent],
+                    ):
                         should_prune = True
                         break
 
-                wildcard_key = f"*.{parent}"
-                if wildcard_key in abp_rules:
-                    parent_mods = abp_rules[wildcard_key][1]
-                    if should_prune_by_modifiers(modifiers, parent_mods):
+                    wildcard_key = f"*.{parent}"
+                    if wildcard_key in abp_rules and _any_parent_record_covers(
+                        record,
+                        abp_rules[wildcard_key],
+                    ):
                         should_prune = True
                         break
 
-        if should_prune:
-            stats.abp_subdomain_pruned += 1
-        else:
-            pruned_abp[domain] = (rule, modifiers, is_wildcard)
+            if should_prune:
+                stats.abp_subdomain_pruned += 1
+            else:
+                pruned_abp.setdefault(domain, []).append(record)
 
     return pruned_abp
 
@@ -660,9 +848,9 @@ def _prune_redundant_rules(
 def _write_output(
     output_file: str,
     stats: CompileStats,
-    abp_wildcards: dict[str, WildcardEntry],
-    pruned_abp: dict[str, RuleEntry],
-    allow_domains: set[str],
+    abp_wildcards: WildcardStorage,
+    pruned_abp: RuleStorage,
+    exceptions: ExceptionRules,
     other_rules: set[str]
 ) -> None:
     """Phase 4: Write deduplicated rules to output atomically."""
@@ -671,16 +859,18 @@ def _write_output(
     temp_path = output_path.with_suffix(".tmp")
 
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
-        for tld, (rule, _mods) in abp_wildcards.items():
-            if tld not in allow_domains and f"*.{tld}" not in allow_domains:
-                f.write(rule + "\n")
+        for records in abp_wildcards.values():
+            for record in records:
+                if _is_whitelisted(record, exceptions):
+                    stats.whitelist_conflict_pruned += 1
+                    continue
+                f.write(record.rule + "\n")
                 stats.abp_kept += 1
-            else:
-                stats.whitelist_conflict_pruned += 1
 
-        for _domain, (rule, _mods, _is_wc) in pruned_abp.items():
-            f.write(rule + "\n")
-            stats.abp_kept += 1
+        for records in pruned_abp.values():
+            for record in records:
+                f.write(record.rule + "\n")
+                stats.abp_kept += 1
 
         for rule in other_rules:
             f.write(rule + "\n")
@@ -716,9 +906,10 @@ def compile_rules(
     stats = CompileStats()
 
     # Data structures to accumulate parsed rules
-    abp_rules: dict[str, RuleEntry] = {}
-    abp_wildcards: dict[str, WildcardEntry] = {}
-    allow_domains: set[str] = set()
+    abp_rules: RuleStorage = {}
+    abp_wildcards: WildcardStorage = {}
+    duplicate_index: set[RuleDuplicateKey] = set()
+    exceptions: ExceptionRules = []
     other_rules: set[str] = set()
 
     # PHASE 1: Parse and categorize all rules
@@ -727,8 +918,9 @@ def compile_rules(
         stats=stats,
         abp_rules=abp_rules,
         abp_wildcards=abp_wildcards,
-        allow_domains=allow_domains,
-        other_rules=other_rules
+        exceptions=exceptions,
+        other_rules=other_rules,
+        duplicate_index=duplicate_index,
     )
 
     # PHASE 2: Build coverage lookup sets
@@ -739,7 +931,7 @@ def compile_rules(
         abp_rules=abp_rules,
         abp_wildcards=abp_wildcards,
         tld_wildcards=tld_wildcards,
-        allow_domains=allow_domains,
+        exceptions=exceptions,
         stats=stats
     )
 
@@ -749,7 +941,7 @@ def compile_rules(
         stats=stats,
         abp_wildcards=abp_wildcards,
         pruned_abp=pruned_abp,
-        allow_domains=allow_domains,
+        exceptions=exceptions,
         other_rules=other_rules
     )
 

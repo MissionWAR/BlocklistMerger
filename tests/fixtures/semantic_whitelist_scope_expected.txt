@@ -1,0 +1,4 @@
+||mismatch.example.com^$client=10.0.0.1
+||important.example.com^$important
+||uncertain.example.com^
+||kept-host.example.com^
