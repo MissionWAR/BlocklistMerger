@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.rule_semantics import ModifierValue, parse_modifier_text
+from scripts.rule_semantics import (
+    ModifierValue,
+    ParsedModifier,
+    canonical_modifier_signature,
+    modifier_names,
+    modifier_scope_covers,
+    parse_modifier_text,
+)
 
 
 def test_parse_modifier_text_returns_empty_tuple_for_no_modifiers() -> None:
@@ -116,3 +123,102 @@ def test_unknown_or_malformed_chunks_are_uncertain_records(modifier_text: str) -
     assert len(modifiers) == 1
     assert modifiers[0].raw == modifier_text
     assert modifiers[0].uncertain is True
+
+
+def test_modifier_names_returns_names_from_structured_records() -> None:
+    modifiers = parse_modifier_text("client=10.0.0.1,dnstype=A,important")
+
+    assert modifier_names(modifiers) == frozenset({"client", "dnstype", "important"})
+
+
+def test_canonical_signature_matches_reordered_equivalent_modifiers() -> None:
+    first = parse_modifier_text("client=10.0.0.1,dnstype=A")
+    second = parse_modifier_text("dnstype=a,client=10.0.0.1")
+
+    assert canonical_modifier_signature(first) == canonical_modifier_signature(second)
+
+
+@pytest.mark.parametrize(
+    ("first_text", "second_text"),
+    [
+        ("client=10.0.0.1", "client=192.168.1.5"),
+        ("ctag=pc", "ctag=mobile"),
+        ("dnstype=A", "dnstype=AAAA"),
+        ("dnsrewrite=1.2.3.4", "dnsrewrite=5.6.7.8"),
+        ("denyallow=allowed.example", "denyallow=other.example"),
+    ],
+)
+def test_canonical_signature_preserves_behavior_changing_values(
+    first_text: str,
+    second_text: str,
+) -> None:
+    first = parse_modifier_text(first_text)
+    second = parse_modifier_text(second_text)
+
+    assert canonical_modifier_signature(first) != canonical_modifier_signature(second)
+
+
+@pytest.mark.parametrize(
+    ("parent_text", "child_text"),
+    [
+        (None, None),
+        (None, "client=10.0.0.1"),
+        (None, "ctag=pc"),
+        (None, "dnstype=A"),
+        ("client=10.0.0.1", "client=10.0.0.1"),
+        ("ctag=pc", "ctag=pc"),
+        ("dnstype=a", "dnstype=A"),
+        ("client=10.0.0.1", "client=10.0.0.1,dnstype=A"),
+    ],
+)
+def test_modifier_scope_covers_proven_broad_or_equal_scopes(
+    parent_text: str | None,
+    child_text: str | None,
+) -> None:
+    assert modifier_scope_covers(
+        parse_modifier_text(parent_text),
+        parse_modifier_text(child_text),
+    )
+
+
+@pytest.mark.parametrize(
+    ("parent_text", "child_text"),
+    [
+        ("client=10.0.0.1", None),
+        ("client=10.0.0.1", "client=192.168.1.5"),
+        (None, "important"),
+        ("important", None),
+        ("dnsrewrite=1.2.3.4", "dnsrewrite=1.2.3.4"),
+        ("denyallow=allowed.example", "denyallow=allowed.example"),
+        ("badfilter", None),
+        ("unknown=value", None),
+        (None, "unknown=value"),
+    ],
+)
+def test_modifier_scope_does_not_cover_unproven_or_special_scopes(
+    parent_text: str | None,
+    child_text: str | None,
+) -> None:
+    assert (
+        modifier_scope_covers(
+            parse_modifier_text(parent_text),
+            parse_modifier_text(child_text),
+        )
+        is False
+    )
+
+
+def test_modifier_scope_rejects_unknown_record_even_if_uncertainty_flag_is_wrong() -> None:
+    unknown = (
+        ParsedModifier(
+            name="future-modifier",
+            raw="future-modifier",
+            raw_value=None,
+            values=(),
+            negated=False,
+            uncertain=False,
+        ),
+    )
+
+    assert modifier_scope_covers(unknown, ()) is False
+    assert modifier_scope_covers((), unknown) is False
