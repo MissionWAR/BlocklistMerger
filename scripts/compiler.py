@@ -96,6 +96,7 @@ WildcardEntry = AbpRuleRecord
 RuleDuplicateKey = tuple[str, bool, str, tuple[object, ...]]
 RuleStorage = dict[str, list[RuleEntry]]
 WildcardStorage = dict[str, list[WildcardEntry]]
+ExceptionRules = list[RuleEntry]
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -583,7 +584,7 @@ def _parse_and_compress_lines(
     stats: CompileStats,
     abp_rules: RuleStorage,
     abp_wildcards: WildcardStorage,
-    allow_domains: set[str],
+    exceptions: ExceptionRules,
     other_rules: set[str],
     duplicate_index: set[RuleDuplicateKey],
 ) -> None:
@@ -608,10 +609,7 @@ def _parse_and_compress_lines(
                 continue
 
             if record.is_exception:
-                if record.is_wildcard:
-                    allow_domains.add(f"*.{record.domain}")
-                else:
-                    allow_domains.add(record.domain)
+                exceptions.append(record)
                 continue
 
             if record.is_wildcard:
@@ -700,14 +698,82 @@ def _build_coverage_lookups(
     return abp_blocking_domains, tld_wildcards
 
 
-def _is_whitelisted(domain: str, allow_domains: set[str]) -> bool:
-    """Check if domain is whitelisted by direct or wildcard matches."""
-    if domain in allow_domains:
-        return True
-    for parent in walk_parent_domains(domain):
-        if parent in allow_domains or f"*.{parent}" in allow_domains:
-            return True
-    return False
+def _is_subdomain_of(domain: str, parent_domain: str) -> bool:
+    """Return True when domain is below parent_domain in the DNS hierarchy."""
+    return parent_domain in walk_parent_domains(domain)
+
+
+def _exception_domain_scope_covers(exception: RuleEntry, block: RuleEntry) -> bool:
+    """Return True when an exception's domain pattern covers a block pattern."""
+    if exception.is_wildcard:
+        if block.is_wildcard:
+            return block.domain == exception.domain or _is_subdomain_of(
+                block.domain,
+                exception.domain,
+            )
+        return _is_subdomain_of(block.domain, exception.domain)
+
+    if block.is_wildcard:
+        return block.domain == exception.domain or _is_subdomain_of(
+            block.domain,
+            exception.domain,
+        )
+
+    return block.domain == exception.domain or _is_subdomain_of(block.domain, exception.domain)
+
+
+def _important_priority_state(modifiers: tuple[ParsedModifier, ...]) -> tuple[bool, bool]:
+    """Return (has_positive_important, is_safe_to_compare) for priority handling."""
+    important_modifiers = [
+        modifier
+        for modifier in modifiers
+        if modifier.name == "important"
+    ]
+    if not important_modifiers:
+        return False, True
+    if len(important_modifiers) != 1:
+        return False, False
+
+    modifier = important_modifiers[0]
+    if modifier.negated or modifier.uncertain or modifier.raw_value is not None or modifier.values:
+        return False, False
+
+    return True, True
+
+
+def _without_priority_modifiers(
+    modifiers: tuple[ParsedModifier, ...],
+) -> tuple[ParsedModifier, ...]:
+    """Return modifiers without `$important` so exception priority can be handled separately."""
+    return tuple(modifier for modifier in modifiers if modifier.name != "important")
+
+
+def _exception_modifier_scope_covers(exception: RuleEntry, block: RuleEntry) -> bool:
+    """Return True when exception priority and modifiers cover the block rule."""
+    exception_important, exception_priority_safe = _important_priority_state(exception.modifiers)
+    block_important, block_priority_safe = _important_priority_state(block.modifiers)
+    if not exception_priority_safe or not block_priority_safe:
+        return False
+    if block_important and not exception_important:
+        return False
+
+    return modifier_scope_covers(
+        _without_priority_modifiers(exception.modifiers),
+        _without_priority_modifiers(block.modifiers),
+    )
+
+
+def _exception_covers_block(exception: RuleEntry, block: RuleEntry) -> bool:
+    """Return True when an exception fully covers a block rule."""
+    return (
+        _exception_domain_scope_covers(exception, block)
+        and _exception_modifier_scope_covers(exception, block)
+    )
+
+
+def _is_whitelisted(record: RuleEntry, exceptions: ExceptionRules) -> bool:
+    """Check whether any exception rule fully covers a block rule."""
+    return any(_exception_covers_block(exception, record) for exception in exceptions)
 
 
 def _any_parent_record_covers(child: RuleEntry, parents: list[RuleEntry]) -> bool:
@@ -722,7 +788,7 @@ def _prune_redundant_rules(
     abp_rules: RuleStorage,
     abp_wildcards: WildcardStorage,
     tld_wildcards: set[str],
-    allow_domains: set[str],
+    exceptions: ExceptionRules,
     stats: CompileStats
 ) -> RuleStorage:
     """Phase 3: Remove redundant subdomain and whitelist-conflicted rules."""
@@ -732,7 +798,7 @@ def _prune_redundant_rules(
         for record in records:
             clean_domain = record.domain
 
-            if _is_whitelisted(clean_domain, allow_domains):
+            if _is_whitelisted(record, exceptions):
                 stats.whitelist_conflict_pruned += 1
                 continue
 
@@ -784,7 +850,7 @@ def _write_output(
     stats: CompileStats,
     abp_wildcards: WildcardStorage,
     pruned_abp: RuleStorage,
-    allow_domains: set[str],
+    exceptions: ExceptionRules,
     other_rules: set[str]
 ) -> None:
     """Phase 4: Write deduplicated rules to output atomically."""
@@ -793,13 +859,13 @@ def _write_output(
     temp_path = output_path.with_suffix(".tmp")
 
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
-        for tld, records in abp_wildcards.items():
-            if tld not in allow_domains and f"*.{tld}" not in allow_domains:
-                for record in records:
-                    f.write(record.rule + "\n")
-                    stats.abp_kept += 1
-            else:
-                stats.whitelist_conflict_pruned += len(records)
+        for records in abp_wildcards.values():
+            for record in records:
+                if _is_whitelisted(record, exceptions):
+                    stats.whitelist_conflict_pruned += 1
+                    continue
+                f.write(record.rule + "\n")
+                stats.abp_kept += 1
 
         for records in pruned_abp.values():
             for record in records:
@@ -843,7 +909,7 @@ def compile_rules(
     abp_rules: RuleStorage = {}
     abp_wildcards: WildcardStorage = {}
     duplicate_index: set[RuleDuplicateKey] = set()
-    allow_domains: set[str] = set()
+    exceptions: ExceptionRules = []
     other_rules: set[str] = set()
 
     # PHASE 1: Parse and categorize all rules
@@ -852,7 +918,7 @@ def compile_rules(
         stats=stats,
         abp_rules=abp_rules,
         abp_wildcards=abp_wildcards,
-        allow_domains=allow_domains,
+        exceptions=exceptions,
         other_rules=other_rules,
         duplicate_index=duplicate_index,
     )
@@ -865,7 +931,7 @@ def compile_rules(
         abp_rules=abp_rules,
         abp_wildcards=abp_wildcards,
         tld_wildcards=tld_wildcards,
-        allow_domains=allow_domains,
+        exceptions=exceptions,
         stats=stats
     )
 
@@ -875,7 +941,7 @@ def compile_rules(
         stats=stats,
         abp_wildcards=abp_wildcards,
         pruned_abp=pruned_abp,
-        allow_domains=allow_domains,
+        exceptions=exceptions,
         other_rules=other_rules
     )
 
