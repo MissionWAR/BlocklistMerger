@@ -47,13 +47,18 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from sys import intern
-from typing import Final
+from typing import Final, NamedTuple
 
 import tldextract
 
+from scripts.rule_semantics import (
+    ParsedModifier,
+    canonical_modifier_signature,
+    modifier_names,
+    parse_modifier_text,
+)
 from scripts.rule_syntax import (
     classify_rule_syntax,
-    extract_modifier_names,
     split_pattern_and_modifiers,
 )
 
@@ -62,11 +67,31 @@ from scripts.rule_syntax import (
 # =============================================================================
 # These make complex type signatures more readable throughout the codebase.
 
-#: A parsed ABP rule entry: (original_rule, modifiers_frozenset, is_wildcard)
-RuleEntry = tuple[str, frozenset[str], bool]
+class AbpRuleRecord(NamedTuple):
+    """
+    Parsed semantic ABP rule record used by compiler internals.
 
-#: A TLD wildcard entry: (original_rule, modifiers_frozenset)
-WildcardEntry = tuple[str, frozenset[str]]
+    Attributes:
+        rule: Original rule text preserved for output.
+        domain: Normalized domain without an optional wildcard prefix.
+        modifiers: Structured modifier records preserving names, values, and uncertainty.
+        modifier_names: Legacy names-only view for compatibility and current coverage checks.
+        semantic_signature: Canonical modifier signature for exact equivalence checks.
+        is_exception: True for whitelist/exception rules.
+        is_wildcard: True for `||*.domain^` rules.
+    """
+
+    rule: str
+    domain: str
+    modifiers: tuple[ParsedModifier, ...]
+    modifier_names: frozenset[str]
+    semantic_signature: tuple[object, ...]
+    is_exception: bool
+    is_wildcard: bool
+
+
+RuleEntry = AbpRuleRecord
+WildcardEntry = AbpRuleRecord
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -228,6 +253,33 @@ def normalize_domain(domain: str) -> str:
     return intern(domain.lower().strip().rstrip("."))
 
 
+def _parse_abp_rule(rule: str) -> AbpRuleRecord | None:
+    """
+    Parse an ABP domain rule into a structured compiler record.
+
+    The public `extract_abp_info()` helper intentionally exposes the legacy
+    names-only tuple. Compiler internals use this richer record so modifier
+    values remain available for semantic duplicate and coverage decisions.
+    """
+    pattern, modifier_text = split_pattern_and_modifiers(rule)
+    match = ABP_DOMAIN_PATTERN.match(pattern)
+    if not match:
+        return None
+
+    modifiers = parse_modifier_text(modifier_text)
+    names = modifier_names(modifiers)
+
+    return AbpRuleRecord(
+        rule=rule,
+        domain=normalize_domain(match.group(3)),
+        modifiers=modifiers,
+        modifier_names=names if names else EMPTY_FROZENSET,
+        semantic_signature=canonical_modifier_signature(modifiers),
+        is_exception=match.group(1) is not None,
+        is_wildcard=match.group(2) is not None,
+    )
+
+
 def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]:
     """
     Extract domain, modifiers, exception status, and wildcard status from ABP rule.
@@ -248,18 +300,15 @@ def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]
         >>> extract_abp_info("@@||*.example.com^")
         ('example.com', frozenset(), True, True)
     """
-    pattern, modifier_text = split_pattern_and_modifiers(rule)
-    match = ABP_DOMAIN_PATTERN.match(pattern)
-    if not match:
+    record = _parse_abp_rule(rule)
+    if record is None:
         return None, EMPTY_FROZENSET, False, False
-
-    # Groups: (1) @@ exception, (2) *. wildcard, (3) domain
-    is_exception = match.group(1) is not None
-    is_wildcard = match.group(2) is not None
-    domain = normalize_domain(match.group(3))
-
-    modifiers = extract_modifier_names(modifier_text)
-    return domain, modifiers if modifiers else EMPTY_FROZENSET, is_exception, is_wildcard
+    return (
+        record.domain,
+        record.modifier_names if record.modifier_names else EMPTY_FROZENSET,
+        record.is_exception,
+        record.is_wildcard,
+    )
 
 
 def extract_hosts_info(rule: str) -> tuple[str | None, list[str]]:
@@ -507,35 +556,38 @@ def _parse_and_compress_lines(
 
         # ABP-style rules
         if line.startswith(("||", "@@||")):
-            domain, modifiers, is_exception, is_wildcard = extract_abp_info(line)
+            record = _parse_abp_rule(line)
 
-            if not domain:
+            if record is None:
                 stats.malformed_discarded += 1
                 continue
 
-            if is_exception:
-                if is_wildcard:
-                    allow_domains.add(f"*.{domain}")
+            if record.is_exception:
+                if record.is_wildcard:
+                    allow_domains.add(f"*.{record.domain}")
                 else:
-                    allow_domains.add(domain)
+                    allow_domains.add(record.domain)
                 continue
 
-            if is_wildcard:
-                tld = get_tld(domain)
-                if tld and domain == tld:
+            if record.is_wildcard:
+                tld = get_tld(record.domain)
+                if tld and record.domain == tld:
                     if tld not in abp_wildcards:
-                        abp_wildcards[tld] = (line, modifiers)
+                        abp_wildcards[tld] = record
                 else:
-                    key = f"*.{domain}"
+                    key = f"*.{record.domain}"
                     if key not in abp_rules:
-                        abp_rules[key] = (line, modifiers, True)
+                        abp_rules[key] = record
             else:
-                if domain not in abp_rules:
-                    abp_rules[domain] = (line, modifiers, False)
+                if record.domain not in abp_rules:
+                    abp_rules[record.domain] = record
                 else:
-                    existing = abp_rules[domain]
-                    if "important" in modifiers and "important" not in existing[1]:
-                        abp_rules[domain] = (line, modifiers, False)
+                    existing = abp_rules[record.domain]
+                    if (
+                        "important" in record.modifier_names
+                        and "important" not in existing.modifier_names
+                    ):
+                        abp_rules[record.domain] = record
                     stats.duplicate_pruned += 1
             continue
 
@@ -552,7 +604,9 @@ def _parse_and_compress_lines(
 
                 abp_rule = f"||{domain}^"
                 if domain not in abp_rules:
-                    abp_rules[domain] = (abp_rule, EMPTY_FROZENSET, False)
+                    record = _parse_abp_rule(abp_rule)
+                    if record is not None:
+                        abp_rules[domain] = record
                     stats.formats_compressed += 1
                 else:
                     stats.duplicate_pruned += 1
@@ -564,7 +618,9 @@ def _parse_and_compress_lines(
             if domain and domain not in LOCAL_HOSTNAMES:
                 abp_rule = f"||{domain}^"
                 if domain not in abp_rules:
-                    abp_rules[domain] = (abp_rule, EMPTY_FROZENSET, False)
+                    record = _parse_abp_rule(abp_rule)
+                    if record is not None:
+                        abp_rules[domain] = record
                     stats.formats_compressed += 1
                 else:
                     stats.duplicate_pruned += 1
@@ -587,8 +643,8 @@ def _build_coverage_lookups(
 ) -> tuple[set[str], set[str]]:
     """Phase 2: Create efficient lookup structures for pruning."""
     abp_blocking_domains: set[str] = {
-        domain if not is_wc else domain[2:]
-        for domain, (_, _, is_wc) in abp_rules.items()
+        record.domain
+        for record in abp_rules.values()
     }
     tld_wildcards: set[str] = set(abp_wildcards.keys())
     return abp_blocking_domains, tld_wildcards
@@ -614,8 +670,8 @@ def _prune_redundant_rules(
     """Phase 3: Remove redundant subdomain and whitelist-conflicted rules."""
     pruned_abp: dict[str, RuleEntry] = {}
 
-    for domain, (rule, modifiers, is_wildcard) in abp_rules.items():
-        clean_domain = domain[2:] if domain.startswith("*.") else domain
+    for domain, record in abp_rules.items():
+        clean_domain = record.domain
 
         if _is_whitelisted(clean_domain, allow_domains):
             stats.whitelist_conflict_pruned += 1
@@ -623,36 +679,36 @@ def _prune_redundant_rules(
 
         tld = get_tld(clean_domain)
         if tld and tld in tld_wildcards and clean_domain != tld:
-            parent_mods = abp_wildcards[tld][1]
-            if should_prune_by_modifiers(modifiers, parent_mods):
+            parent_mods = abp_wildcards[tld].modifier_names
+            if should_prune_by_modifiers(record.modifier_names, parent_mods):
                 stats.tld_wildcard_pruned += 1
                 continue
 
         should_prune = False
-        if is_wildcard and clean_domain in abp_rules:
-            parent_mods = abp_rules[clean_domain][1]
-            if should_prune_by_modifiers(modifiers, parent_mods):
+        if record.is_wildcard and clean_domain in abp_rules:
+            parent_mods = abp_rules[clean_domain].modifier_names
+            if should_prune_by_modifiers(record.modifier_names, parent_mods):
                 should_prune = True
 
         if not should_prune:
             for parent in walk_parent_domains(clean_domain):
                 if parent in abp_rules:
-                    parent_mods = abp_rules[parent][1]
-                    if should_prune_by_modifiers(modifiers, parent_mods):
+                    parent_mods = abp_rules[parent].modifier_names
+                    if should_prune_by_modifiers(record.modifier_names, parent_mods):
                         should_prune = True
                         break
 
                 wildcard_key = f"*.{parent}"
                 if wildcard_key in abp_rules:
-                    parent_mods = abp_rules[wildcard_key][1]
-                    if should_prune_by_modifiers(modifiers, parent_mods):
+                    parent_mods = abp_rules[wildcard_key].modifier_names
+                    if should_prune_by_modifiers(record.modifier_names, parent_mods):
                         should_prune = True
                         break
 
         if should_prune:
             stats.abp_subdomain_pruned += 1
         else:
-            pruned_abp[domain] = (rule, modifiers, is_wildcard)
+            pruned_abp[domain] = record
 
     return pruned_abp
 
@@ -671,15 +727,15 @@ def _write_output(
     temp_path = output_path.with_suffix(".tmp")
 
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
-        for tld, (rule, _mods) in abp_wildcards.items():
+        for tld, record in abp_wildcards.items():
             if tld not in allow_domains and f"*.{tld}" not in allow_domains:
-                f.write(rule + "\n")
+                f.write(record.rule + "\n")
                 stats.abp_kept += 1
             else:
                 stats.whitelist_conflict_pruned += 1
 
-        for _domain, (rule, _mods, _is_wc) in pruned_abp.items():
-            f.write(rule + "\n")
+        for record in pruned_abp.values():
+            f.write(record.rule + "\n")
             stats.abp_kept += 1
 
         for rule in other_rules:
