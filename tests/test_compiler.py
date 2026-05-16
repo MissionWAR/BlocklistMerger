@@ -1185,6 +1185,106 @@ class TestWhitelistParentSubdomain:
         assert "||example.org^" in rules
 
 
+class TestSemanticWhitelistHandling:
+    """Tests for modifier-aware whitelist consumption."""
+
+    def _compile(self, lines):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(lines, output)
+            with open(output) as f:
+                return [line.strip() for line in f if line.strip()], stats
+
+    def test_exact_exception_removes_equal_scoped_block(self):
+        """An exact exception removes a block only when modifier scope matches."""
+        block_rule = "||example.com^$client=10.0.0.1,dnstype=a"
+        exception_rule = "@@||example.com^$dnstype=A,client=10.0.0.1"
+
+        rules, stats = self._compile([block_rule, exception_rule])
+
+        assert block_rule not in rules
+        assert stats.whitelist_conflict_pruned == 1
+        assert not any(rule.startswith("@@") for rule in rules)
+
+    def test_parent_exception_removes_scoped_child_block(self):
+        """A broad parent exception covers a scoped child block."""
+        block_rule = "||sub.example.com^$dnstype=A"
+
+        rules, stats = self._compile([block_rule, "@@||example.com^"])
+
+        assert block_rule not in rules
+        assert stats.whitelist_conflict_pruned == 1
+
+    def test_wildcard_exception_removes_equal_scoped_subdomain_block(self):
+        """Wildcard exceptions cover subdomains when modifier scope matches."""
+        block_rule = "||sub.example.com^$ctag=pc"
+        exception_rule = "@@||*.example.com^$ctag=pc"
+
+        rules, stats = self._compile([block_rule, exception_rule])
+
+        assert block_rule not in rules
+        assert stats.whitelist_conflict_pruned == 1
+
+    @pytest.mark.parametrize(
+        ("block_rule", "exception_rule"),
+        [
+            ("||example.com^", "@@||example.com^$client=10.0.0.1"),
+            (
+                "||example.com^$client=10.0.0.1",
+                "@@||example.com^$client=192.168.1.5",
+            ),
+            ("||example.com^$dnstype=A", "@@||example.com^$dnstype=AAAA"),
+        ],
+    )
+    def test_scoped_exception_mismatch_keeps_block(self, block_rule, exception_rule):
+        """Scoped exceptions cannot remove broader or differently scoped blocks."""
+        rules, stats = self._compile([block_rule, exception_rule])
+
+        assert block_rule in rules
+        assert exception_rule not in rules
+        assert stats.whitelist_conflict_pruned == 0
+
+    def test_non_important_exception_keeps_important_block(self):
+        """An ordinary exception cannot remove an important block rule."""
+        block_rule = "||example.com^$important"
+
+        rules, stats = self._compile([block_rule, "@@||example.com^"])
+
+        assert block_rule in rules
+        assert stats.whitelist_conflict_pruned == 0
+
+    def test_important_exception_removes_important_block_when_scope_matches(self):
+        """An important exception can remove an important block with matching scope."""
+        block_rule = "||example.com^$important,client=10.0.0.1"
+        exception_rule = "@@||example.com^$client=10.0.0.1,important"
+
+        rules, stats = self._compile([block_rule, exception_rule])
+
+        assert block_rule not in rules
+        assert stats.whitelist_conflict_pruned == 1
+
+    @pytest.mark.parametrize(
+        "exception_modifier",
+        [
+            "dnsrewrite=1.2.3.4",
+            "denyallow=allowed.example",
+            "badfilter",
+            "future=value",
+            "client='unterminated",
+        ],
+    )
+    def test_special_unknown_and_uncertain_exceptions_keep_block(self, exception_modifier):
+        """Exceptions with unproven behavior are consumed but cannot delete blocks."""
+        block_rule = "||example.com^"
+        exception_rule = f"@@||example.com^${exception_modifier}"
+
+        rules, stats = self._compile([block_rule, exception_rule])
+
+        assert block_rule in rules
+        assert exception_rule not in rules
+        assert stats.whitelist_conflict_pruned == 0
+
+
 class TestEmptyAndEdgeCases:
     """Tests for empty input and other edge cases."""
 
