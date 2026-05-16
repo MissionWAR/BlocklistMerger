@@ -55,6 +55,7 @@ from scripts.rule_semantics import (
     ParsedModifier,
     canonical_modifier_signature,
     modifier_names,
+    modifier_scope_covers,
     parse_modifier_text,
 )
 from scripts.rule_syntax import (
@@ -712,7 +713,7 @@ def _is_whitelisted(domain: str, allow_domains: set[str]) -> bool:
 def _any_parent_record_covers(child: RuleEntry, parents: list[RuleEntry]) -> bool:
     """Return True when any parent variant proves coverage for a child variant."""
     return any(
-        should_prune_by_modifiers(child.modifier_names, parent.modifier_names)
+        modifier_scope_covers(parent.modifiers, child.modifiers)
         for parent in parents
     )
 
