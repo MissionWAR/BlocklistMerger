@@ -560,6 +560,88 @@ class TestModifierHandling:
         assert "||example.com^" in rules
         assert "||sub.example.com^$client=10.0.0.1" not in rules
 
+    @pytest.mark.parametrize(
+        "modifier",
+        [
+            "client=10.0.0.1",
+            "ctag=pc",
+            "dnstype=a",
+        ],
+    )
+    def test_equal_value_scoped_parent_prunes_equal_child(self, modifier):
+        """Equal structured client, ctag, and dnstype scopes prove parent coverage."""
+        parent_rule = f"||example.com^${modifier}"
+        child_rule = f"||sub.example.com^${modifier}"
+
+        rules, stats = self._compile([parent_rule, child_rule])
+
+        assert parent_rule in rules
+        assert child_rule not in rules
+        assert stats.abp_subdomain_pruned == 1
+
+    @pytest.mark.parametrize(
+        ("parent_modifier", "child_modifier"),
+        [
+            ("client=10.0.0.1", "client=192.168.1.5"),
+            ("ctag=pc", "ctag=mobile"),
+            ("dnstype=A", "dnstype=AAAA"),
+        ],
+    )
+    def test_different_value_scoped_parent_keeps_child(
+        self,
+        parent_modifier,
+        child_modifier,
+    ):
+        """Different structured values cannot prove parent coverage."""
+        parent_rule = f"||example.com^${parent_modifier}"
+        child_rule = f"||sub.example.com^${child_modifier}"
+
+        rules, stats = self._compile([parent_rule, child_rule])
+
+        assert parent_rule in rules
+        assert child_rule in rules
+        assert stats.abp_subdomain_pruned == 0
+
+    @pytest.mark.parametrize(
+        "child_modifier",
+        [
+            "dnsrewrite=1.2.3.4",
+            "denyallow=allowed.example",
+            "badfilter",
+            "future=value",
+            "client='unterminated",
+        ],
+    )
+    def test_broad_parent_keeps_special_unknown_and_uncertain_children(self, child_modifier):
+        """Special, unknown, and uncertain child modifiers must not be parent-pruned."""
+        child_rule = f"||sub.example.com^${child_modifier}"
+
+        rules, stats = self._compile(["||example.com^", child_rule])
+
+        assert "||example.com^" in rules
+        assert child_rule in rules
+        assert stats.abp_subdomain_pruned == 0
+
+    @pytest.mark.parametrize(
+        "parent_modifier",
+        [
+            "dnsrewrite=1.2.3.4",
+            "denyallow=allowed.example",
+            "badfilter",
+            "future=value",
+            "client='unterminated",
+        ],
+    )
+    def test_special_unknown_and_uncertain_parents_keep_children(self, parent_modifier):
+        """Special, unknown, and uncertain parents cannot prove child coverage."""
+        parent_rule = f"||example.com^${parent_modifier}"
+
+        rules, stats = self._compile([parent_rule, "||sub.example.com^"])
+
+        assert parent_rule in rules
+        assert "||sub.example.com^" in rules
+        assert stats.abp_subdomain_pruned == 0
+
 
 class TestRealWorldScenarios:
     """Test with real-world-like domain scenarios."""
@@ -1192,6 +1274,100 @@ class TestTLDWildcardModifiers:
         rules, stats = self._compile(lines)
         assert "||*.autos^" in rules
         assert "||special.autos^$dnsrewrite=1.2.3.4" in rules
+
+    @pytest.mark.parametrize(
+        "modifier",
+        [
+            "client=10.0.0.1",
+            "ctag=pc",
+            "dnstype=a",
+        ],
+    )
+    def test_tld_wildcard_prunes_equal_value_scoped_child(self, modifier):
+        """TLD wildcard pruning uses the same structured modifier coverage."""
+        parent_rule = f"||*.autos^${modifier}"
+        child_rule = f"||spam.autos^${modifier}"
+
+        rules, stats = self._compile([parent_rule, child_rule])
+
+        assert parent_rule in rules
+        assert child_rule not in rules
+        assert stats.tld_wildcard_pruned == 1
+
+    @pytest.mark.parametrize(
+        "child_modifier",
+        [
+            "denyallow=allowed.example",
+            "badfilter",
+            "future=value",
+            "client='unterminated",
+        ],
+    )
+    def test_tld_wildcard_keeps_special_unknown_and_uncertain_children(
+        self,
+        child_modifier,
+    ):
+        """TLD wildcard pruning must keep child rules when modifier coverage is uncertain."""
+        child_rule = f"||spam.autos^${child_modifier}"
+
+        rules, stats = self._compile(["||*.autos^", child_rule])
+
+        assert "||*.autos^" in rules
+        assert child_rule in rules
+        assert stats.tld_wildcard_pruned == 0
+
+
+class TestWildcardParentSemanticPruning:
+    """Tests for structured modifier coverage under wildcard parent rules."""
+
+    def _compile(self, lines):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(lines, output)
+            with open(output) as f:
+                return [line.strip() for line in f if line.strip()], stats
+
+    @pytest.mark.parametrize(
+        "modifier",
+        [
+            "client=10.0.0.1",
+            "ctag=pc",
+            "dnstype=a",
+        ],
+    )
+    def test_wildcard_parent_prunes_equal_value_scoped_child(self, modifier):
+        """Wildcard parent pruning uses structured modifier coverage."""
+        parent_rule = f"||*.example.com^${modifier}"
+        child_rule = f"||sub.example.com^${modifier}"
+
+        rules, stats = self._compile([parent_rule, child_rule])
+
+        assert parent_rule in rules
+        assert child_rule not in rules
+        assert stats.abp_subdomain_pruned == 1
+
+    @pytest.mark.parametrize(
+        "child_modifier",
+        [
+            "dnsrewrite=1.2.3.4",
+            "denyallow=allowed.example",
+            "badfilter",
+            "future=value",
+            "client='unterminated",
+        ],
+    )
+    def test_wildcard_parent_keeps_special_unknown_and_uncertain_children(
+        self,
+        child_modifier,
+    ):
+        """Wildcard parent rules cannot prune when modifier coverage is not proven."""
+        child_rule = f"||sub.example.com^${child_modifier}"
+
+        rules, stats = self._compile(["||*.example.com^", child_rule])
+
+        assert "||*.example.com^" in rules
+        assert child_rule in rules
+        assert stats.abp_subdomain_pruned == 0
 
 
 class TestWildcardWhitelistHandling:
