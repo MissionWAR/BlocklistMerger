@@ -210,6 +210,7 @@ class TestProcessFiles:
             "whitelist_conflict_pruned": 0,
             "local_hostname_pruned": 0,
             "formats_compressed": 0,
+            "malformed_discarded": 0,
             "abp_kept": 1,
             "other_kept": 0,
         }
