@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "must_block": [
+    "doubleclick.net",
+    "googlesyndication.com"
+  ],
+  "must_allow": [
+    "github.com",
+    "adguard.com"
+  ]
+}
