@@ -160,7 +160,10 @@ def test_source_health_hard_fails_catastrophic_and_warns_bounded_fallback(
         source_health=_source_health(["fresh_fetch"] * 9 + ["fallback_cache"]),
     )
 
-    assert any(error["code"] == "source_health_catastrophic_failed_stale" for error in catastrophic.errors)
+    assert any(
+        error["code"] == "source_health_catastrophic_failed_stale"
+        for error in catastrophic.errors
+    )
     assert not bounded.errors
     assert any(warning["code"] == "source_health_degraded" for warning in bounded.warnings)
 
