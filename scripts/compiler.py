@@ -851,7 +851,7 @@ def _write_output(
     abp_wildcards: WildcardStorage,
     pruned_abp: RuleStorage,
     exceptions: ExceptionRules,
-    other_rules: set[str]
+    other_rules: set[str],
 ) -> None:
     """Phase 4: Write deduplicated rules to output atomically."""
     output_path = Path(output_file)
@@ -872,7 +872,7 @@ def _write_output(
                 f.write(record.rule + "\n")
                 stats.abp_kept += 1
 
-        for rule in other_rules:
+        for rule in sorted(other_rules):
             f.write(rule + "\n")
             stats.other_kept += 1
 
