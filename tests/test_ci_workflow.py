@@ -7,7 +7,6 @@ fetching, compiling, validating, or publishing when lint or pytest fail.
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "update.yml"
 
