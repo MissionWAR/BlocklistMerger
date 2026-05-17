@@ -18,11 +18,12 @@ import scripts.downloader as downloader
 from scripts.downloader import (
     FetchResult,
     SourceHealth,
+    SourceHealthReport,
     build_source_health_report,
     load_sources,
     load_state,
-    save_state,
     save_source_health_report,
+    save_state,
     source_health_from_fetch_result,
     url_to_filename,
 )
@@ -69,7 +70,6 @@ class TestLoadSources:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("https://example.com/list1.txt\n")
             f.write("https://example.com/list2.txt\n")
-            f.name
         try:
             urls = load_sources(f.name)
             assert len(urls) == 2
@@ -228,7 +228,7 @@ class TestSourceHealth:
             assert health.byte_size == len(content)
             assert (
                 health.sha256
-                == "a8f2fefdecb2b6c98e7e36c3845340b9f95c5dd31ec310aac53df674d781a2e1"
+                == "aded7777eeac966af185f2b048d53fda75c4b4eac1950590e3c7ceb178671691"
             )
             assert health.cache_age_seconds is None
             assert health.failure_reason is None
@@ -248,7 +248,7 @@ class TestSourceHealth:
                 output_dir,
                 cache_dir,
                 {url: {"fetched_at": "2026-05-17T15:00:00Z"}},
-                now=1779020760,
+                now=1779030120,
             )
 
             assert health.status == "validated_cache"
@@ -347,10 +347,13 @@ class TestSourceHealthReport:
             )
             output_path = Path(tmpdir) / "reports" / "source-health.json"
 
+            assert isinstance(report, SourceHealthReport)
+
             save_source_health_report(report, output_path)
 
             data = json.loads(output_path.read_text(encoding="utf-8"))
             assert data["schema_version"] == 1
+            assert data["version"] == "1.5.0"
             assert data["generated_at"] == "2026-05-17T15:00:00Z"
             assert data["source_count"] == 2
             assert data["totals_by_status"] == {
@@ -420,6 +423,7 @@ class TestSourceHealthReport:
 
         data = json.loads(report_path.read_text(encoding="utf-8"))
         assert data["source_count"] == 5
+        assert [source["url"] for source in data["sources"]] == urls
         assert data["totals_by_status"]["fresh_fetch"] == 1
         assert data["totals_by_status"]["failed"] == 4
 

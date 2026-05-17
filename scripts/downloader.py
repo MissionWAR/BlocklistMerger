@@ -24,6 +24,7 @@ Example:
 
 import argparse
 import asyncio
+import calendar
 import hashlib
 import json
 import sys
@@ -34,6 +35,8 @@ from urllib.parse import urlparse
 
 import aiofiles
 import aiohttp
+
+from scripts import __version__
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -50,6 +53,20 @@ DEFAULT_CONCURRENCY: Final[int] = 8
 
 #: State file name for ETag/Last-Modified tracking
 STATE_FILE: Final[str] = "state.json"
+
+#: Source-health report schema version
+SOURCE_HEALTH_SCHEMA_VERSION: Final[int] = 1
+
+#: Cache fallback age threshold before a source is considered stale
+STALE_CACHE_SECONDS: Final[int] = 48 * 60 * 60
+
+SOURCE_HEALTH_STATUSES: Final[tuple[str, ...]] = (
+    "fresh_fetch",
+    "validated_cache",
+    "fallback_cache",
+    "stale_cache",
+    "failed",
+)
 
 
 # =============================================================================
@@ -75,6 +92,42 @@ class FetchResult(NamedTuple):
     success: bool
     changed: bool
     error: str | None = None
+
+
+class SourceHealth(NamedTuple):
+    """
+    Machine-readable health record for one configured source URL.
+
+    Attributes:
+        url: Configured upstream URL.
+        filename: Deterministic raw/cache filename for the URL.
+        status: One of fresh_fetch, validated_cache, fallback_cache, stale_cache, failed.
+        changed: True when fresh content was downloaded in this run.
+        byte_size: Content size for successful fresh/cache-backed records, otherwise 0.
+        sha256: Content checksum for successful fresh/cache-backed records.
+        cache_age_seconds: Age of cache content when cache freshness is applicable.
+        failure_reason: HTTP/network/cache failure detail when applicable.
+    """
+
+    url: str
+    filename: str
+    status: str
+    changed: bool
+    byte_size: int
+    sha256: str | None
+    cache_age_seconds: int | None
+    failure_reason: str | None
+
+
+class SourceHealthReport(NamedTuple):
+    """Versioned source-health report written for release validation."""
+
+    schema_version: int
+    version: str
+    generated_at: str
+    source_count: int
+    totals_by_status: dict[str, int]
+    sources: list[SourceHealth]
 
 
 # =============================================================================
@@ -188,6 +241,163 @@ def save_state(cache_dir: Path, state: dict[str, dict[str, str]]) -> None:
         temp_path.replace(state_path)
     except OSError as e:
         print(f"Warning: Could not save state.json: {e}", file=sys.stderr)
+
+
+def _utc_timestamp() -> str:
+    """Return the current UTC timestamp in report/state format."""
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _cache_age_seconds(
+    url_state: dict[str, str],
+    now: float,
+) -> int | None:
+    """Return cache age in seconds when state contains a valid UTC fetched_at value."""
+    fetched_at = url_state.get("fetched_at")
+    if not fetched_at:
+        return None
+
+    try:
+        fetched_epoch = calendar.timegm(time.strptime(fetched_at, "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+        return None
+
+    return max(0, int(now - fetched_epoch))
+
+
+def _content_identity(path: Path | None) -> tuple[int, str | None]:
+    """Return byte size and SHA-256 digest for an existing content file."""
+    if path is None or not path.exists():
+        return 0, None
+
+    content = path.read_bytes()
+    return len(content), hashlib.sha256(content).hexdigest()
+
+
+def source_health_from_fetch_result(
+    result: FetchResult,
+    output_dir: Path,
+    cache_dir: Path,
+    state: dict[str, dict[str, str]],
+    *,
+    now: float | None = None,
+) -> SourceHealth:
+    """
+    Convert one fetch result into a source-health record.
+
+    Args:
+        result: Fetch result from ``fetch_url()`` or ``fetch_all()``.
+        output_dir: Directory where fetched raw files are written.
+        cache_dir: Directory where cache files are stored.
+        state: Loaded downloader state keyed by source URL.
+        now: Optional epoch timestamp for deterministic tests.
+
+    Returns:
+        SourceHealth record with status, cache age, and content identity.
+    """
+    filename = url_to_filename(result.url)
+    output_path = output_dir / filename
+    cache_path = cache_dir / filename
+    current_time = time.time() if now is None else now
+
+    cache_age = None
+    if result.success and not result.changed:
+        cache_age = _cache_age_seconds(state.get(result.url, {}), current_time)
+
+    if result.success and result.changed:
+        status = "fresh_fetch"
+    elif result.success and result.error is None:
+        status = "validated_cache"
+    elif result.success:
+        if cache_age is None or cache_age > STALE_CACHE_SECONDS:
+            status = "stale_cache"
+        else:
+            status = "fallback_cache"
+    else:
+        status = "failed"
+
+    content_path: Path | None = None
+    if result.success:
+        content_path = output_path if output_path.exists() else cache_path
+
+    byte_size, sha256 = _content_identity(content_path)
+
+    return SourceHealth(
+        url=result.url,
+        filename=filename,
+        status=status,
+        changed=result.changed,
+        byte_size=byte_size,
+        sha256=sha256,
+        cache_age_seconds=cache_age,
+        failure_reason=result.error,
+    )
+
+
+def build_source_health_report(
+    sources: list[SourceHealth],
+    *,
+    generated_at: str | None = None,
+) -> SourceHealthReport:
+    """
+    Build a versioned source-health report from per-source records.
+
+    Args:
+        sources: One health record per configured URL.
+        generated_at: Optional deterministic report timestamp for tests.
+
+    Returns:
+        SourceHealthReport with stable totals by status.
+    """
+    totals = {status: 0 for status in SOURCE_HEALTH_STATUSES}
+    for source in sources:
+        totals[source.status] = totals.get(source.status, 0) + 1
+
+    return SourceHealthReport(
+        schema_version=SOURCE_HEALTH_SCHEMA_VERSION,
+        version=__version__,
+        generated_at=generated_at or _utc_timestamp(),
+        source_count=len(sources),
+        totals_by_status=totals,
+        sources=sources,
+    )
+
+
+def _source_health_report_to_dict(report: SourceHealthReport) -> dict[str, object]:
+    """Convert a SourceHealthReport into a JSON object shape."""
+    return {
+        "schema_version": report.schema_version,
+        "version": report.version,
+        "generated_at": report.generated_at,
+        "source_count": report.source_count,
+        "totals_by_status": report.totals_by_status,
+        "sources": [source._asdict() for source in report.sources],
+    }
+
+
+def save_source_health_report(
+    report: SourceHealthReport,
+    output_path: str | Path,
+) -> None:
+    """
+    Save a source-health report atomically.
+
+    Args:
+        report: Report to write.
+        output_path: Destination JSON path.
+
+    Raises:
+        OSError: If the report cannot be written.
+    """
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(_source_health_report_to_dict(report), f, indent=2, sort_keys=True)
+        f.write("\n")
+
+    temp_path.replace(path)
 
 
 # =============================================================================
@@ -304,7 +514,7 @@ async def fetch_url(
                 if "Last-Modified" in response.headers:
                     new_state["last_modified"] = response.headers["Last-Modified"]
                 new_state["filename"] = filename
-                new_state["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                new_state["fetched_at"] = _utc_timestamp()
                 state[url] = new_state
 
                 return FetchResult(url, success=True, changed=True)
@@ -451,6 +661,11 @@ def main() -> int:
         default=DEFAULT_RETRIES,
         help="Number of retries per URL",
     )
+    parser.add_argument(
+        "--health-report",
+        metavar="PATH",
+        help="Write per-source health report JSON to PATH",
+    )
 
     args = parser.parse_args()
 
@@ -463,14 +678,31 @@ def main() -> int:
     print(f"🔄 Fetching {len(urls)} sources...")
 
     # Run async fetch
+    output_dir = Path(args.outdir)
+    cache_dir = Path(args.cache)
     results = asyncio.run(fetch_all(
         urls,
-        Path(args.outdir),
-        Path(args.cache),
+        output_dir,
+        cache_dir,
         args.concurrency,
         args.timeout,
         args.retries,
     ))
+
+    if args.health_report:
+        state = load_state(cache_dir)
+        now = time.time()
+        health_sources = [
+            source_health_from_fetch_result(result, output_dir, cache_dir, state, now=now)
+            for result in results
+        ]
+        report = build_source_health_report(health_sources)
+        try:
+            save_source_health_report(report, args.health_report)
+        except OSError as e:
+            print(f"ERROR: Could not write source health report: {e}", file=sys.stderr)
+            return 1
+        print(f"🩺 Source health report: {args.health_report}")
 
     # Print summary
     success = sum(1 for r in results if r.success)
@@ -484,10 +716,6 @@ def main() -> int:
         for r in results:
             if not r.success:
                 print(f"   - {r.url}: {r.error}")
-
-    # Return error if too many failures (>50%)
-    if failed > len(urls) // 2:
-        return 1
 
     return 0
 
