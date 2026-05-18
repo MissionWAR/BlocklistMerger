@@ -109,5 +109,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Parser Contract & CI Baseline | 4/4 | Complete   | 2026-05-16 |
 | 2. Semantic Deduplication & Whitelist Safety | 4/4 | Complete   | 2026-05-16 |
 | 3. Release Validation & Observability | 3/4 | In Progress|  |
-| 4. Runtime Scaling & Reproducibility | 2/4 | In Progress|  |
+| 4. Runtime Scaling & Reproducibility | 3/4 | In Progress|  |
 | 5. Lightweight Public Reuse Polish | 0/TBD | Not started | - |
