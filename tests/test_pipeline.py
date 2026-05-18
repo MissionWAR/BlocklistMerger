@@ -330,6 +330,41 @@ class TestProcessFiles:
         assert entered_spool_context
         assert not spool_root.exists()
 
+    def test_process_files_with_profile_returns_inspect_only_runtime_profile(
+        self,
+        make_input_dir,
+    ):
+        """Profiled processing should preserve stats and expose runtime-size metadata."""
+        input_dir, output_file = make_input_dir({
+            "b-list.txt": "||b.com^\n",
+            "a-list.txt": "||a.com^\n",
+        })
+
+        stats, runtime_profile = pipeline_module.process_files_with_profile(input_dir, output_file)
+
+        assert stats["lines_output"] == 2
+        assert runtime_profile["worker_count"] == os.cpu_count()
+        assert set(runtime_profile["stage_durations_seconds"]) == {
+            "clean_seconds",
+            "compile_seconds",
+        }
+        assert runtime_profile["byte_sizes"]["raw_input_bytes"] == sum(
+            path.stat().st_size for path in Path(input_dir).glob("*.txt")
+        )
+        assert runtime_profile["byte_sizes"]["output_bytes"] == Path(output_file).stat().st_size
+        assert runtime_profile["compiler_cardinalities"] == {
+            "abp_rule_keys": 2,
+            "abp_wildcard_keys": 0,
+            "exception_rule_keys": 0,
+            "duplicate_index_size": 2,
+            "other_rule_count": 0,
+        }
+        assert set(runtime_profile["memory"]) == {
+            "tracemalloc_current_bytes",
+            "tracemalloc_peak_bytes",
+            "resource_ru_maxrss",
+        }
+
     def test_print_summary_includes_new_cleaner_categories(self, capsys):
         """Pipeline summary should make URL-path and invalid drops visible."""
         stats = {
@@ -390,12 +425,35 @@ class TestSaveStatsJson:
             "other_kept": 100,
             "malformed_discarded": 7,
         }
-        save_stats_json(stats, json_path, total_time=5.5)
+        runtime_profile = {
+            "worker_count": 4,
+            "stage_durations_seconds": {
+                "clean_seconds": 1.25,
+                "compile_seconds": 2.5,
+            },
+            "byte_sizes": {
+                "raw_input_bytes": 2048,
+                "output_bytes": 1024,
+            },
+            "compiler_cardinalities": {
+                "abp_rule_keys": 100,
+                "abp_wildcard_keys": 2,
+                "exception_rule_keys": 3,
+                "duplicate_index_size": 120,
+                "other_rule_count": 4,
+            },
+            "memory": {
+                "tracemalloc_current_bytes": 10,
+                "tracemalloc_peak_bytes": 20,
+                "resource_ru_maxrss": None,
+            },
+        }
+        save_stats_json(stats, json_path, total_time=5.5, runtime_profile=runtime_profile)
 
         with open(json_path) as f:
             data = json.load(f)
 
-        assert data["schema_version"] == 1
+        assert data["schema_version"] == 2
         assert data["version"] == "1.5.0"
         assert data["timestamp"].endswith("Z")
         assert data["execution_time_seconds"] == 5.5
@@ -408,6 +466,7 @@ class TestSaveStatsJson:
         assert data["statistics"]["other_kept"] == 100
         assert data["statistics"]["formats_compressed"] == 100
         assert data["statistics"]["malformed_discarded"] == 7
+        assert data["runtime_profile"] == runtime_profile
         assert not os.path.exists(os.path.join(tmp_dir, "stats.tmp"))
 
 
