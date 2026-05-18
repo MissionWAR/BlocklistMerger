@@ -454,11 +454,11 @@ python_compatibility_audit:
         cache-dependency-path: |
           pyproject.toml
           constraints/*.txt
-    - run: python -m pip install -q --ignore-requires-python -c constraints/release-py314.txt ".[dev]"
+    - run: python -m pip install -e ".[dev]" --ignore-requires-python -c constraints/release-py314.txt
     - run: python -m ruff check .
     - run: python -m pytest
 ```
-The `--ignore-requires-python` line is an audit-only option because project metadata still requires Python 3.14. [VERIFIED: pyproject.toml] [CITED: https://pip.pypa.io/en/stable/cli/pip_install/] The planner may instead install dependencies separately and run tests with `PYTHONPATH=.` if it wants to avoid ignoring metadata. [ASSUMED]
+The `--ignore-requires-python` line is the chosen audit-only option because project metadata still requires Python 3.14; it belongs only in `python_compatibility_audit`, not in scheduled release publishing. [VERIFIED: pyproject.toml] [CITED: https://pip.pypa.io/en/stable/cli/pip_install/]
 
 ### Memory Probe Helper
 ```python
@@ -504,24 +504,21 @@ def _memory_profile() -> dict[str, int | None]:
 |---|-------|---------|---------------|
 | A1 | Package download counts were not checked because no new packages are recommended and local Python/pip is unavailable. | Package Legitimacy Audit | Low; planner should not add new packages, but a future package addition would require a fresh legitimacy gate. |
 | A2 | Completion-order worker consumption can break deterministic output if not re-ordered by source index. | Common Pitfalls | Medium; the planner must test deterministic ordering for any bounded cleaning design. |
-| A3 | Installing dependencies separately with `PYTHONPATH=.` is a viable alternative to `--ignore-requires-python` for the 3.13 audit. | Code Examples | Medium; planner must choose one audit method and make CI failure mode clear. |
+| A3 | Python 3.13 audit uses an editable install with `--ignore-requires-python`; the dependency-only `PYTHONPATH=.` alternative is not chosen for Phase 04. | Code Examples | Low; the audit job is explicitly named and release publishing still uses normal Python 3.14 install. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should `runtime_profile` bump `pipeline-stats` schema from 1 to 2?**
    What we know: Reports are versioned and validator currently hard-checks schema 1. [VERIFIED: scripts/pipeline.py] [VERIFIED: scripts/release_validator.py]
-   What's unclear: Whether adding an optional top-level field is considered schema-compatible by local policy. [ASSUMED]
-   Recommendation: Bump to 2 and update validator/tests unless planner explicitly treats optional additive fields as schema-1 compatible. [VERIFIED: .planning/phases/04-runtime-scaling-reproducibility/04-CONTEXT.md]
+   Resolution: Bump `reports/pipeline-stats.json` to `schema_version: 2` and update validator/tests. The new top-level `runtime_profile` is inspect-only and does not add runtime gates. [VERIFIED: .planning/phases/04-runtime-scaling-reproducibility/04-CONTEXT.md]
 
 2. **Which Python 3.13 audit install pattern should be used?**
    What we know: `pyproject.toml` declares `requires-python = ">=3.14"`, so normal package install under 3.13 is expected to fail. [VERIFIED: pyproject.toml]
-   What's unclear: Whether the team prefers `--ignore-requires-python` or dependency-only install with `PYTHONPATH=.` for audit signal. [ASSUMED]
-   Recommendation: Use a clearly named audit job and keep release publishing on normal 3.14 package install. [VERIFIED: .planning/phases/04-runtime-scaling-reproducibility/04-CONTEXT.md]
+   Resolution: Use the exact audit-only install command `python -m pip install -e ".[dev]" --ignore-requires-python -c constraints/release-py314.txt` in the separate `python_compatibility_audit` job for both Python 3.13 and 3.14. This bypasses `requires-python` only for the audit signal; scheduled release publishing keeps the normal Python 3.14 command `python -m pip install -q -c constraints/release-py314.txt ".[dev]"`. [VERIFIED: pyproject.toml] [CITED: https://pip.pypa.io/en/stable/cli/pip_install/]
 
 3. **What exact chunk size should the downloader and bounded copy helpers use?**
    What we know: Context delegates chunk-size choice to planner discretion. [VERIFIED: .planning/phases/04-runtime-scaling-reproducibility/04-CONTEXT.md]
-   What's unclear: Best value for current GitHub runner/network mix. [ASSUMED]
-   Recommendation: Start with a constant such as 1 MiB, test small chunks with fixtures, and expose no public knob in Phase 04. [ASSUMED]
+   Resolution: Start with a private constant such as `DOWNLOAD_CHUNK_SIZE: Final[int] = 1024 * 1024`, cover it through fixture-scale tests, and expose no public runtime knob in Phase 04. [VERIFIED: .planning/phases/04-runtime-scaling-reproducibility/04-CONTEXT.md]
 
 ## Environment Availability
 
