@@ -12,6 +12,8 @@ import tempfile
 
 import pytest
 
+import scripts.pipeline as pipeline_module
+from scripts.compiler import CompileStats
 from scripts.pipeline import print_summary, process_files, save_stats_json
 
 
@@ -165,6 +167,29 @@ class TestProcessFiles:
         assert stats["url_path_removed"] == 1
         assert stats["invalid_removed"] == 1
 
+    def test_compiler_malformed_discards_project_to_pipeline_stats(
+        self,
+        make_input_dir,
+        monkeypatch,
+    ):
+        """Compiler-owned malformed discard totals should surface in pipeline stats."""
+        input_dir, output_file = make_input_dir({
+            "list1.txt": "||keep.com^\n",
+        })
+
+        def fake_compile_rules(lines, output_file):
+            assert list(lines) == ["||keep.com^"]
+            with open(output_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write("||keep.com^\n")
+            return CompileStats(total_output=1, abp_kept=1, malformed_discarded=3)
+
+        monkeypatch.setattr(pipeline_module, "compile_rules", fake_compile_rules)
+
+        stats = process_files(input_dir, output_file)
+
+        assert stats["lines_output"] == 1
+        assert stats["malformed_discarded"] == 3
+
     def test_print_summary_includes_new_cleaner_categories(self, capsys):
         """Pipeline summary should make URL-path and invalid drops visible."""
         stats = {
@@ -185,6 +210,7 @@ class TestProcessFiles:
             "whitelist_conflict_pruned": 0,
             "local_hostname_pruned": 0,
             "formats_compressed": 0,
+            "malformed_discarded": 0,
             "abp_kept": 1,
             "other_kept": 0,
         }
@@ -222,19 +248,27 @@ class TestSaveStatsJson:
             "formats_compressed": 100,
             "abp_kept": 400,
             "other_kept": 100,
+            "malformed_discarded": 7,
         }
         save_stats_json(stats, json_path, total_time=5.5)
 
         with open(json_path) as f:
             data = json.load(f)
 
+        assert data["schema_version"] == 1
+        assert data["version"] == "1.5.0"
+        assert data["timestamp"].endswith("Z")
+        assert data["execution_time_seconds"] == 5.5
         assert data["statistics"]["files_processed"] == 10
         assert data["statistics"]["lines_output"] == 500
         assert data["statistics"]["url_path_removed"] == 0
         assert data["statistics"]["invalid_removed"] == 0
-        assert data["execution_time_seconds"] == 5.5
-        assert data["version"] == "1.5.0"
-        assert "timestamp" in data
+        assert data["statistics"]["duplicate_pruned"] == 50
+        assert data["statistics"]["abp_kept"] == 400
+        assert data["statistics"]["other_kept"] == 100
+        assert data["statistics"]["formats_compressed"] == 100
+        assert data["statistics"]["malformed_discarded"] == 7
+        assert not os.path.exists(os.path.join(tmp_dir, "stats.tmp"))
 
 
 if __name__ == "__main__":

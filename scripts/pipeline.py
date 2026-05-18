@@ -70,6 +70,7 @@ class PipelineStats(TypedDict):
     whitelist_conflict_pruned: int
     local_hostname_pruned: int
     formats_compressed: int
+    malformed_discarded: int
     abp_kept: int
     other_kept: int
 
@@ -172,6 +173,7 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
         "whitelist_conflict_pruned": 0,
         "local_hostname_pruned": 0,
         "formats_compressed": 0,
+        "malformed_discarded": 0,
         "abp_kept": 0,
         "other_kept": 0,
     }
@@ -219,6 +221,7 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
     stats["whitelist_conflict_pruned"] = compile_stats.whitelist_conflict_pruned
     stats["local_hostname_pruned"] = compile_stats.local_hostname_pruned
     stats["formats_compressed"] = compile_stats.formats_compressed
+    stats["malformed_discarded"] = compile_stats.malformed_discarded
 
     # Format breakdown
     stats["abp_kept"] = compile_stats.abp_kept
@@ -272,6 +275,7 @@ def print_summary(stats: PipelineStats) -> None:
     print(f"   Duplicates:        {stats['duplicate_pruned']:>10,}")
     print(f"   Whitelist conflict:{stats['whitelist_conflict_pruned']:>10,}")
     print(f"   Local hostnames:   {stats['local_hostname_pruned']:>10,}")
+    print(f"   Malformed rules:   {stats['malformed_discarded']:>10,}")
 
     print("\n📦 Output breakdown:")
     print(
@@ -291,6 +295,7 @@ def save_stats_json(stats: PipelineStats, output_path: str, total_time: float) -
         total_time: Total execution time in seconds
     """
     output = {
+        "schema_version": 1,
         "version": __version__,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "execution_time_seconds": round(total_time, 2),
@@ -299,8 +304,10 @@ def save_stats_json(stats: PipelineStats, output_path: str, total_time: float) -
 
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(output, f, indent=2)
+    temp_path = path.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(output, f, indent=2, sort_keys=True)
+    temp_path.replace(path)
 
 
 # =============================================================================
