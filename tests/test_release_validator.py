@@ -202,6 +202,31 @@ def test_canaries_hard_fail_missing_must_block_and_blocked_must_allow(tmp_path: 
     assert any(error["code"] == "canary_must_allow_blocked" for error in summary.errors)
 
 
+def test_canaries_match_wildcard_dns_scope(tmp_path: Path) -> None:
+    """Wildcard canaries should match subdomains and TLD children, not apex domains."""
+    summary = _validate(
+        tmp_path,
+        output_lines=["||*.example.com^", "||*.autos^"],
+        canaries=_canaries(
+            must_block=["sub.example.com", "spam.autos"],
+            must_allow=["example.com", "autos"],
+        ),
+        pipeline_stats=_pipeline_stats(2),
+    )
+
+    assert not summary.errors
+    assert summary.canaries == {
+        "must_block": [
+            {"domain": "sub.example.com", "blocked": True},
+            {"domain": "spam.autos", "blocked": True},
+        ],
+        "must_allow": [
+            {"domain": "example.com", "blocked": False},
+            {"domain": "autos", "blocked": False},
+        ],
+    }
+
+
 @pytest.mark.parametrize(
     "current_count, previous_count, expected_code",
     [

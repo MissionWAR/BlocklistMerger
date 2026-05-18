@@ -424,14 +424,14 @@ def _domain_is_blocked(
 ) -> bool:
     """Return True when emitted domain or parent coverage blocks a domain."""
     normalized = normalize_domain(domain)
-    if normalized in blocked_domains or normalized in wildcard_domains:
+    if normalized in blocked_domains:
         return True
 
     for parent in walk_parent_domains(normalized):
-        if parent in blocked_domains or parent in wildcard_domains:
+        if parent in blocked_domains:
             return True
 
-    return False
+    return any(normalized.endswith(f".{wildcard_domain}") for wildcard_domain in wildcard_domains)
 
 
 def validate_canaries(
