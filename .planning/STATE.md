@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 04 context gathered
-last_updated: "2026-05-18T12:08:59.329Z"
-last_activity: 2026-05-18 -- Phase 04 planning complete
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-05-18T18:23:17.936Z"
+last_activity: 2026-05-18
 progress:
   total_phases: 5
   completed_phases: 3
   total_plans: 16
-  completed_plans: 12
+  completed_plans: 13
   percent: 60
 ---
 
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-05-16)
 
 **Core value:** Produce one safe, compact, AdGuard Home-compatible blocklist that preserves maximum blocking coverage while removing only rules that are truly redundant.
-**Current focus:** Phase 4 — runtime scaling & reproducibility
+**Current focus:** Phase 04 — runtime-scaling-reproducibility
 
 ## Current Position
 
-Phase: 4
-Plan: Not started
+Phase: 04 (runtime-scaling-reproducibility) — EXECUTING
+Plan: 2 of 4
 Status: Ready to execute
-Last activity: 2026-05-18 -- Phase 04 planning complete
+Last activity: 2026-05-18
 
-Progress: [█████████░] 92%
+Progress: [████████░░] 81%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [█████████░] 92%
 | Phase 02 P04 | 13 min | 2 tasks | 11 files |
 | Phase 03 P01 | 8 min | 2 tasks | 3 files |
 | Phase 03 P03 | 19 min | 2 tasks | 4 files |
+| Phase 04 P01 | 21 min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -79,6 +80,8 @@ Recent decisions affecting current work:
 - [Phase 03]: Plan 03-01 removes downloader aggregate failed-count release gating after fetch/report completion. — Source-health policy now belongs to scripts.release_validator per D-01.
 - [Phase 03]: Plan 03-03 keeps release validation in scripts.release_validator using existing parser/domain helpers and stdlib only. — This preserves downloader, pipeline, and compiler boundaries while adding testable release policy without new dependencies.
 - [Phase 03]: Plan 03-03 treats missing previous release output as a warning and skips delta gates for bootstrap-safe validation. — Previous release comparison is best-effort per D-19, so absent artifacts should not block first-run or recovery releases.
+- [Phase 04]: Plan 04-01 keeps FetchResult and source-health contracts stable while replacing downloader byte movement with cache-primary bounded streaming. — Preserves Phase 03 release validation compatibility while reducing large-response memory risk.
+- [Phase 04]: Plan 04-01 keeps source size and content type policy-neutral during streaming work. — RUN-01 records byte identity metrics without adding hard source-size or content-type gates.
 
 ### Pending Todos
 
@@ -100,6 +103,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-05-18T11:24:43.455Z
-Stopped at: Phase 04 context gathered
-Resume file: .planning/phases/04-runtime-scaling-reproducibility/04-CONTEXT.md
+Last session: 2026-05-18T18:23:17.917Z
+Stopped at: Completed 04-01-PLAN.md
+Resume file: None
