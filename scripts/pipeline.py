@@ -26,9 +26,10 @@ import os
 import sys
 import time
 from collections.abc import Iterator
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Final, TypedDict
+from tempfile import TemporaryDirectory
+from typing import Final, NamedTuple, TypedDict
 
 from scripts import __version__
 from scripts.cleaner import (
@@ -75,6 +76,18 @@ class PipelineStats(TypedDict):
     other_kept: int
 
 
+class CleanWorkerResult(NamedTuple):
+    """
+    Bounded metadata returned from a cleaning worker.
+
+    The cleaned rule payload stays in the spool file so process results do not
+    serialize a full cleaned list back to the parent process.
+    """
+    source_index: int
+    spool_path: Path
+    stats: dict[str, int]
+
+
 CLEANER_REASON_STAT_KEYS: Final[dict[str, str]] = {
     DISCARD_REASON_COMMENT: "comments_removed",
     DISCARD_REASON_COSMETIC: "cosmetic_removed",
@@ -89,12 +102,11 @@ CLEANER_REASON_STAT_KEYS: Final[dict[str, str]] = {
 # WORKER FUNCTIONS
 # =============================================================================
 
-def _clean_single_file(file_path: Path) -> tuple[list[str], dict[str, int]]:
-    """Clean a single file and return cleaned lines and partial stats."""
-
-    cleaned: list[str] = []
-    file_stats: dict[str, int] = {
+def _new_clean_file_stats() -> dict[str, int]:
+    """Return a fresh cleaner stats dictionary for one source file."""
+    return {
         "lines_raw": 0,
+        "lines_clean": 0,
         "comments_removed": 0,
         "cosmetic_removed": 0,
         "unsupported_removed": 0,
@@ -104,22 +116,79 @@ def _clean_single_file(file_path: Path) -> tuple[list[str], dict[str, int]]:
         "trimmed": 0,
     }
 
-    with open(file_path, encoding="utf-8-sig", errors="replace") as f:
+
+def _clean_single_file_to_spool(
+    source_index: int,
+    file_path: Path,
+    spool_dir: Path,
+) -> CleanWorkerResult:
+    """Clean a single file into a bounded spool and return only metadata."""
+    file_stats = _new_clean_file_stats()
+    spool_path = spool_dir / f"{source_index:08d}.txt"
+
+    try:
+        with (
+            open(file_path, encoding="utf-8-sig", errors="replace") as src,
+            open(spool_path, "w", encoding="utf-8", newline="\n") as dst,
+        ):
+            for line in src:
+                file_stats["lines_raw"] += 1
+                result, was_trimmed = clean_line(line)
+
+                if was_trimmed:
+                    file_stats["trimmed"] += 1
+
+                if result.discarded:
+                    if result.reason not in CLEANER_REASON_STAT_KEYS:
+                        raise ValueError(f"Unknown cleaner discard reason: {result.reason!r}")
+                    file_stats[CLEANER_REASON_STAT_KEYS[result.reason]] += 1
+                else:
+                    if result.line is None:
+                        raise ValueError("Cleaner returned no line for a kept rule")
+                    dst.write(result.line + "\n")
+                    file_stats["lines_clean"] += 1
+    except Exception:
+        spool_path.unlink(missing_ok=True)
+        raise
+
+    return CleanWorkerResult(source_index, spool_path, file_stats)
+
+
+def _clean_files_to_spools(files: list[Path], spool_dir: Path) -> dict[int, CleanWorkerResult]:
+    """Run cleaner workers and return their spool metadata keyed by source index."""
+    results: dict[int, CleanWorkerResult] = {}
+
+    # Use optimal number of workers (max cores) while keeping parent results bounded.
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        futures = [
+            executor.submit(_clean_single_file_to_spool, source_index, file_path, spool_dir)
+            for source_index, file_path in enumerate(files)
+        ]
+        for future in as_completed(futures):
+            result = future.result()
+            results[result.source_index] = result
+
+    return results
+
+
+def _merge_file_stats(stats: PipelineStats, file_stats: dict[str, int]) -> None:
+    """Transfer one worker's file stats into aggregate pipeline stats."""
+    stats["lines_raw"] += file_stats["lines_raw"]
+    stats["comments_removed"] += file_stats["comments_removed"]
+    stats["cosmetic_removed"] += file_stats["cosmetic_removed"]
+    stats["unsupported_removed"] += file_stats["unsupported_removed"]
+    stats["empty_removed"] += file_stats["empty_removed"]
+    stats["url_path_removed"] += file_stats["url_path_removed"]
+    stats["invalid_removed"] += file_stats["invalid_removed"]
+    stats["trimmed"] += file_stats["trimmed"]
+    stats["lines_clean"] += file_stats["lines_clean"]
+
+
+def _iter_spool_lines(spool_path: Path) -> Iterator[str]:
+    """Yield cleaned lines from a worker spool without loading the whole file."""
+    with open(spool_path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            file_stats["lines_raw"] += 1
-            result, was_trimmed = clean_line(line)
-
-            if was_trimmed:
-                file_stats["trimmed"] += 1
-
-            if result.discarded:
-                if result.reason not in CLEANER_REASON_STAT_KEYS:
-                    raise ValueError(f"Unknown cleaner discard reason: {result.reason!r}")
-                file_stats[CLEANER_REASON_STAT_KEYS[result.reason]] += 1
-            else:
-                cleaned.append(result.line)  # type: ignore[arg-type]
-
-    return cleaned, file_stats
+            yield line.rstrip("\n")
 
 
 # =============================================================================
@@ -188,22 +257,17 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
     stats["files_processed"] = len(files)
 
     def _get_cleaned_lines() -> Iterator[str]:
-        # Use optimal number of workers (max cores)
-        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-            for cleaned, file_stats in executor.map(_clean_single_file, files):
-                # Transfer partial stats to the main stats dictionary
-                stats["lines_raw"] += file_stats["lines_raw"]
-                stats["comments_removed"] += file_stats["comments_removed"]
-                stats["cosmetic_removed"] += file_stats["cosmetic_removed"]
-                stats["unsupported_removed"] += file_stats["unsupported_removed"]
-                stats["empty_removed"] += file_stats["empty_removed"]
-                stats["url_path_removed"] += file_stats["url_path_removed"]
-                stats["invalid_removed"] += file_stats["invalid_removed"]
-                stats["trimmed"] += file_stats["trimmed"]
-                stats["lines_clean"] += len(cleaned)
-
-                # Stream lines to compiler
-                yield from cleaned
+        with TemporaryDirectory(prefix="blocklist-merger-clean-") as spool_dir_name:
+            spool_dir = Path(spool_dir_name)
+            results = _clean_files_to_spools(files, spool_dir)
+            try:
+                for source_index in range(len(files)):
+                    result = results[source_index]
+                    _merge_file_stats(stats, result.stats)
+                    yield from _iter_spool_lines(result.spool_path)
+            finally:
+                for result in results.values():
+                    result.spool_path.unlink(missing_ok=True)
 
     # Compile the streamed lines (evaluates the generator lazily)
     compile_stats = compile_rules(_get_cleaned_lines(), output_file)
