@@ -8,7 +8,9 @@ clean -> compile pipeline produces correct output.
 """
 import json
 import os
+import shutil
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -189,6 +191,144 @@ class TestProcessFiles:
 
         assert stats["lines_output"] == 1
         assert stats["malformed_discarded"] == 3
+
+    def test_clean_worker_spools_lines_without_returning_list_payload(self, tmp_path: Path):
+        """Worker results should return bounded spool metadata, not cleaned line lists."""
+        input_file = tmp_path / "input.txt"
+        input_file.write_text(
+            "! comment\n||keep.com^\n||other.com^\n",
+            encoding="utf-8",
+        )
+        spool_dir = tmp_path / "spools"
+        spool_dir.mkdir()
+
+        result = pipeline_module._clean_single_file_to_spool(2, input_file, spool_dir)
+
+        assert result.source_index == 2
+        assert not any(isinstance(value, list) for value in result)
+        assert result.spool_path.exists()
+        assert result.spool_path.read_text(encoding="utf-8").splitlines() == [
+            "||keep.com^",
+            "||other.com^",
+        ]
+        assert result.stats["lines_raw"] == 3
+        assert result.stats["lines_clean"] == 2
+        assert result.stats["comments_removed"] == 1
+
+    def test_spooled_worker_results_feed_compiler_in_sorted_file_order(
+        self,
+        make_input_dir,
+        monkeypatch,
+    ):
+        """Compiler input should follow sorted filenames, not worker completion order."""
+        input_dir, output_file = make_input_dir({
+            "b-list.txt": "||b.com^\n",
+            "a-list.txt": "||a.com^\n",
+            "c-list.txt": "||c.com^\n",
+        })
+        submitted_futures = []
+        compiled_lines: list[str] = []
+
+        class FakeFuture:
+            def __init__(self, result):
+                self._result = result
+
+            def result(self):
+                return self._result
+
+        class CompletionOrderExecutor:
+            def __init__(self, max_workers=None):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def submit(self, fn, *args):
+                future = FakeFuture(fn(*args))
+                submitted_futures.append(future)
+                return future
+
+            def map(self, fn, files):
+                return list(reversed([fn(file_path) for file_path in files]))
+
+        def fake_as_completed(futures):
+            assert list(futures) == submitted_futures
+            return reversed(submitted_futures)
+
+        def fake_compile_rules(lines, output_file):
+            compiled_lines.extend(lines)
+            with open(output_file, "w", encoding="utf-8", newline="\n") as f:
+                for line in compiled_lines:
+                    f.write(line + "\n")
+            return CompileStats(total_output=len(compiled_lines), abp_kept=len(compiled_lines))
+
+        monkeypatch.setattr(pipeline_module, "ProcessPoolExecutor", CompletionOrderExecutor)
+        monkeypatch.setattr(pipeline_module, "as_completed", fake_as_completed, raising=False)
+        monkeypatch.setattr(pipeline_module, "compile_rules", fake_compile_rules)
+
+        stats = process_files(input_dir, output_file)
+
+        assert compiled_lines == ["||a.com^", "||b.com^", "||c.com^"]
+        assert stats["lines_clean"] == 3
+        assert stats["lines_output"] == 3
+
+    @pytest.mark.parametrize("compile_fails", [False, True], ids=["success", "compile-failure"])
+    def test_clean_spool_directory_is_removed_after_compile(
+        self,
+        make_input_dir,
+        monkeypatch,
+        tmp_path: Path,
+        compile_fails: bool,
+    ):
+        """Temporary cleaned spools should be cleaned up on success and compile failure."""
+        input_dir, output_file = make_input_dir({
+            "one.txt": "||one.com^\n",
+            "two.txt": "||two.com^\n",
+        })
+        spool_root = tmp_path / "recorded-spools"
+        entered_spool_context = False
+
+        class RecordingTemporaryDirectory:
+            def __init__(self, prefix):
+                self.prefix = prefix
+                self.name = str(spool_root)
+
+            def __enter__(self):
+                nonlocal entered_spool_context
+                entered_spool_context = True
+                if spool_root.exists():
+                    shutil.rmtree(spool_root)
+                spool_root.mkdir()
+                return self.name
+
+            def __exit__(self, exc_type, exc, traceback):
+                shutil.rmtree(spool_root, ignore_errors=True)
+                return False
+
+        def fake_compile_rules(lines, output_file):
+            consumed = list(lines)
+            assert consumed == ["||one.com^", "||two.com^"]
+            if compile_fails:
+                raise RuntimeError("forced compile failure")
+            with open(output_file, "w", encoding="utf-8", newline="\n") as f:
+                for line in consumed:
+                    f.write(line + "\n")
+            return CompileStats(total_output=len(consumed), abp_kept=len(consumed))
+
+        monkeypatch.setattr(pipeline_module, "TemporaryDirectory", RecordingTemporaryDirectory)
+        monkeypatch.setattr(pipeline_module, "compile_rules", fake_compile_rules)
+
+        if compile_fails:
+            with pytest.raises(RuntimeError, match="forced compile failure"):
+                process_files(input_dir, output_file)
+        else:
+            process_files(input_dir, output_file)
+
+        assert entered_spool_context
+        assert not spool_root.exists()
 
     def test_print_summary_includes_new_cleaner_categories(self, capsys):
         """Pipeline summary should make URL-path and invalid drops visible."""
