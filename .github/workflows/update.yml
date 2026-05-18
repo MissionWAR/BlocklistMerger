@@ -10,18 +10,18 @@ env:
   RAW_DIR: lists/_raw
   OUTPUT: lists/merged.txt
 
-permissions:
-  contents: write
-  actions: write
+permissions: {}
 
 concurrency:
   group: blocklist-update
   cancel-in-progress: true
 
 jobs:
-  build:
+  build_validate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -58,6 +58,9 @@ jobs:
           key: blocklists-${{ steps.cache-key.outputs.date }}
           restore-keys: blocklists-
 
+      - name: Prepare Report Directories
+        run: mkdir -p reports previous
+
       - name: Fetch Sources
         id: fetch
         run: |
@@ -67,7 +70,8 @@ jobs:
             --outdir "$RAW_DIR" \
             --cache .cache \
             --concurrency 10 \
-            --timeout 25
+            --timeout 25 \
+            --health-report reports/source-health.json
           echo "time=$(($(date +%s) - START))s" >> $GITHUB_OUTPUT
           echo "count=$(find "$RAW_DIR" -name '*.txt' | wc -l)" >> $GITHUB_OUTPUT
 
@@ -75,7 +79,8 @@ jobs:
         id: compile
         run: |
           START=$(date +%s)
-          python -m scripts.pipeline "$RAW_DIR" "$OUTPUT"
+          python -m scripts.pipeline "$RAW_DIR" "$OUTPUT" \
+            --json-stats reports/pipeline-stats.json
           echo "time=$(($(date +%s) - START))s" >> $GITHUB_OUTPUT
 
       - name: Calculate Stats
@@ -86,39 +91,47 @@ jobs:
           echo "rules=$RULES" >> $GITHUB_OUTPUT
           echo "size=$SIZE" >> $GITHUB_OUTPUT
 
-      - name: Validate Output
+      - name: Download Previous Release Output
         run: |
-          RULES=${{ steps.stats.outputs.rules }}
-          MIN=1000000
-          if [ "$RULES" -lt "$MIN" ]; then
-            echo "::error::Only $RULES rules (expected >$MIN)"
-            exit 1
-          fi
-          echo "Validation passed: $RULES rules"
+          curl -fL \
+            "https://github.com/${{ github.repository }}/releases/latest/download/merged.txt" \
+            -o previous/merged.txt || true
 
-      - name: Publish Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
+      - name: Validate Release Candidate
+        run: |
+          python -m scripts.release_validator \
+            --source-health reports/source-health.json \
+            --pipeline-stats reports/pipeline-stats.json \
+            --output "$OUTPUT" \
+            --canaries config/release_canaries.json \
+            --previous-output previous/merged.txt \
+            --summary-json reports/validation-summary.json \
+            --summary-md reports/validation-summary.md
+
+      - name: Append Validation Summary
+        if: always()
+        run: |
+          if [ -f reports/validation-summary.md ]; then
+            cat reports/validation-summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Release Validation"
+              echo ""
+              echo "Validation summary was not generated. Check workflow logs and diagnostics."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload Release Diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
-          tag_name: latest
-          name: Merged Blocklist
-          body: |
-            ## Merged Blocklist
-            
-            | Stat | Value |
-            |------|-------|
-            | Rules | ${{ steps.stats.outputs.rules }} |
-            | Size | ${{ steps.stats.outputs.size }} |
-            | Sources | ${{ steps.fetch.outputs.count }} |
-            
-            ### Usage
-            Add to AdGuard Home → Filters → DNS Blocklists:
-            ```
-            https://github.com/${{ github.repository }}/releases/download/latest/merged.txt
-            ```
-          files: |
-            ${{ env.OUTPUT }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: release-candidate
+          path: |
+            lists/merged.txt
+            reports/*.json
+            reports/*.md
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Save Cache
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae  # v5.0.5
@@ -129,6 +142,62 @@ jobs:
             ~/.cache/tldextract
           key: blocklists-${{ steps.cache-key.outputs.date }}
 
+  publish:
+    needs: build_validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Release Candidate
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0  # v5.0.0
+        with:
+          name: release-candidate
+          path: release-candidate
+
+      - name: Stage Release File
+        id: release-stats
+        run: |
+          mkdir -p "$(dirname "$OUTPUT")"
+          cp release-candidate/lists/merged.txt "$OUTPUT"
+          RULES=$(wc -l < "$OUTPUT")
+          SIZE=$(du -h "$OUTPUT" | cut -f1)
+          echo "rules=$RULES" >> $GITHUB_OUTPUT
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3.0.0
+        with:
+          tag_name: latest
+          name: Merged Blocklist
+          body: |
+            ## Merged Blocklist
+
+            | Stat | Value |
+            |------|-------|
+            | Rules | ${{ steps.release-stats.outputs.rules }} |
+            | Size | ${{ steps.release-stats.outputs.size }} |
+
+            ### Usage
+            Add to AdGuard Home -> Filters -> DNS Blocklists:
+            ```
+            https://github.com/${{ github.repository }}/releases/download/latest/merged.txt
+            ```
+          files: |
+            ${{ env.OUTPUT }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  cache_cleanup:
+    needs: build_validate
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+
+    steps:
       - name: Cleanup Old Caches
         if: success()
         env:
@@ -144,19 +213,3 @@ jobs:
               echo "Deleting cache: $key"
               gh cache delete "$key" --repo ${{ github.repository }} || true
           done
-
-      - name: Summary
-        if: always()
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          ## Build Summary
-          
-          | Metric | Value |
-          |--------|-------|
-          | Rules | ${{ steps.stats.outputs.rules || 'N/A' }} |
-          | Size | ${{ steps.stats.outputs.size || 'N/A' }} |
-          | Sources | ${{ steps.fetch.outputs.count || 'N/A' }} |
-          | Fetch Time | ${{ steps.fetch.outputs.time || '?' }} |
-          | Compile Time | ${{ steps.compile.outputs.time || '?' }} |
-          | Cache | ${{ steps.cache-restore.outputs.cache-matched-key || 'New' }} |
-          EOF

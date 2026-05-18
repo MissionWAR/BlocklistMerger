@@ -327,6 +327,22 @@ class TestCompilation:
         assert "/example.*/" in rules
         assert stats.other_kept == 1
 
+    def test_other_rules_written_deterministically(self):
+        """Other-rule output should not depend on set iteration or input order."""
+        lines = [
+            "/zeta.*/",
+            "/alpha.*/",
+            "/middle.*/",
+        ]
+
+        rules1, stats1 = self._compile(lines)
+        rules2, stats2 = self._compile(list(reversed(lines)))
+
+        assert rules1 == sorted(lines)
+        assert rules2 == sorted(lines)
+        assert stats1.other_kept == 3
+        assert stats2.other_kept == 3
+
     def test_supported_slash_modifier_preserved_direct_input(self):
         """Supported slash-like modifier values should not look like URL paths."""
         rule = "||example.org^$client=192.168.0.0/24"
