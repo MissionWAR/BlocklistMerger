@@ -34,7 +34,7 @@ Requirements for the current improvement milestone. Each maps to roadmap phases.
 ### Runtime & Reproducibility
 
 - [x] **RUN-01**: Downloader writes large responses through bounded streaming and atomic replacement instead of full-response buffering.
-- [ ] **RUN-02**: Cleaner and pipeline processing avoid unnecessary full-list materialization where practical.
+- [x] **RUN-02**: Cleaner and pipeline processing avoid unnecessary full-list materialization where practical.
 - [ ] **RUN-03**: Compiler removes unused allocations and records runtime-size metrics for large runs.
 - [ ] **RUN-04**: Release dependencies are reproducible through a lockfile or constraints file.
 - [ ] **RUN-05**: Maintainer can audit Python 3.13/3.14 compatibility through CI before changing `requires-python`.
@@ -92,7 +92,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REL-05 | Phase 3 | Pending |
 | REL-06 | Phase 3 | Complete |
 | RUN-01 | Phase 4 | Complete |
-| RUN-02 | Phase 4 | Pending |
+| RUN-02 | Phase 4 | Complete |
 | RUN-03 | Phase 4 | Pending |
 | RUN-04 | Phase 4 | Pending |
 | RUN-05 | Phase 4 | Pending |
