@@ -29,6 +29,7 @@ import hashlib
 import json
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Final, NamedTuple
 from urllib.parse import urlparse
@@ -50,6 +51,9 @@ DEFAULT_RETRIES: Final[int] = 3
 
 #: Default number of simultaneous HTTP connections
 DEFAULT_CONCURRENCY: Final[int] = 8
+
+#: Bounded chunk size for response streaming and cache/raw file copies
+DOWNLOAD_CHUNK_SIZE: Final[int] = 1024 * 1024
 
 #: State file name for ETag/Last-Modified tracking
 STATE_FILE: Final[str] = "state.json"
@@ -265,13 +269,68 @@ def _cache_age_seconds(
     return max(0, int(now - fetched_epoch))
 
 
+def _temp_path_for(path: Path) -> Path:
+    """Return the sibling temp path used for atomic downloader promotion."""
+    return path.with_suffix(".tmp")
+
+
+def _cleanup_temp_file(path: Path) -> None:
+    """Remove an abandoned temp file if it exists."""
+    with suppress(FileNotFoundError):
+        path.unlink()
+
+
+async def _copy_file_bounded(source_path: Path, destination_path: Path) -> None:
+    """Copy one file to another through a bounded sibling temp file."""
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = _temp_path_for(destination_path)
+    try:
+        async with (
+            aiofiles.open(source_path, "rb") as src,
+            aiofiles.open(temp_path, "wb") as dst,
+        ):
+            while chunk := await src.read(DOWNLOAD_CHUNK_SIZE):
+                await dst.write(chunk)
+        temp_path.replace(destination_path)
+    except Exception:
+        _cleanup_temp_file(temp_path)
+        raise
+
+
+async def _stream_response_to_file(
+    response: aiohttp.ClientResponse,
+    destination_path: Path,
+) -> None:
+    """Stream an HTTP response body to a file through a bounded sibling temp file."""
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = _temp_path_for(destination_path)
+    try:
+        async with aiofiles.open(temp_path, "wb") as dst:
+            async for chunk in response.content.iter_chunked(DOWNLOAD_CHUNK_SIZE):
+                await dst.write(chunk)
+        temp_path.replace(destination_path)
+    except Exception:
+        _cleanup_temp_file(temp_path)
+        raise
+
+
 def _content_identity(path: Path | None) -> tuple[int, str | None]:
     """Return byte size and SHA-256 digest for an existing content file."""
     if path is None or not path.exists():
         return 0, None
 
-    content = path.read_bytes()
-    return len(content), hashlib.sha256(content).hexdigest()
+    byte_size = 0
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(DOWNLOAD_CHUNK_SIZE):
+            byte_size += len(chunk)
+            digest.update(chunk)
+    return byte_size, digest.hexdigest()
+
+
+async def _copy_cache_to_output(cache_path: Path, output_path: Path) -> None:
+    """Promote cached content into the raw output path through the bounded copy helper."""
+    await _copy_file_bounded(cache_path, output_path)
 
 
 def source_health_from_fetch_result(
@@ -461,11 +520,7 @@ async def fetch_url(
                 # 304 Not Modified - use cached version
                 if response.status == 304:
                     if cache_path.exists():
-                        # Copy from cache to output
-                        async with aiofiles.open(cache_path, "rb") as src:
-                            content = await src.read()
-                        async with aiofiles.open(output_path, "wb") as dst:
-                            await dst.write(content)
+                        await _copy_cache_to_output(cache_path, output_path)
                         return FetchResult(url, success=True, changed=False)
                     # Cache file missing, need to re-download
                     headers = {}  # Reset conditional headers
@@ -479,10 +534,7 @@ async def fetch_url(
 
                     # Use cached/local file as fallback
                     if cache_path.exists():
-                        async with aiofiles.open(cache_path, "rb") as src:
-                            content = await src.read()
-                        async with aiofiles.open(output_path, "wb") as dst:
-                            await dst.write(content)
+                        await _copy_cache_to_output(cache_path, output_path)
                         return FetchResult(
                             url,
                             success=True,
@@ -496,16 +548,9 @@ async def fetch_url(
                         error=f"HTTP {response.status}",
                     )
 
-                # Successful response - download content
-                content = await response.read()
-
-                # Save to output
-                async with aiofiles.open(output_path, "wb") as f:
-                    await f.write(content)
-
-                # Update cache
-                async with aiofiles.open(cache_path, "wb") as f:
-                    await f.write(content)
+                # Successful response - stream into cache first, then promote to raw output.
+                await _stream_response_to_file(response, cache_path)
+                await _copy_cache_to_output(cache_path, output_path)
 
                 # Update state with new ETag/Last-Modified
                 new_state: dict[str, str] = {}
@@ -525,10 +570,7 @@ async def fetch_url(
                 continue
             # Fallback to cache
             if cache_path.exists():
-                async with aiofiles.open(cache_path, "rb") as src:
-                    content = await src.read()
-                async with aiofiles.open(output_path, "wb") as dst:
-                    await dst.write(content)
+                await _copy_cache_to_output(cache_path, output_path)
                 return FetchResult(
                     url,
                     success=True,
@@ -544,10 +586,7 @@ async def fetch_url(
             # Fallback to cache
             if cache_path.exists():
                 try:
-                    async with aiofiles.open(cache_path, "rb") as src:
-                        content = await src.read()
-                    async with aiofiles.open(output_path, "wb") as dst:
-                        await dst.write(content)
+                    await _copy_cache_to_output(cache_path, output_path)
                     return FetchResult(
                         url,
                         success=True,
