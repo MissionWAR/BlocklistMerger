@@ -125,6 +125,21 @@ def test_workflow_uses_job_level_least_privilege_permissions() -> None:
     assert "contents: write" not in cache_cleanup
 
 
+def test_build_validate_timeout_allows_live_compile_headroom() -> None:
+    """Release builds need enough time for live fetch, compile, and validation."""
+    text = _workflow_text()
+    build_validate = _job_section(text, "build_validate")
+    audit = _job_section(text, "python_compatibility_audit")
+    publish = _job_section(text, "publish")
+    cache_cleanup = _job_section(text, "cache_cleanup")
+
+    assert "\n    timeout-minutes: 30\n" in build_validate
+    assert "\n    timeout-minutes: 15\n" not in build_validate
+    assert "\n    timeout-minutes: 15\n" in audit
+    assert "\n    timeout-minutes: 10\n" in publish
+    assert "\n    timeout-minutes: 5\n" in cache_cleanup
+
+
 def test_release_constraints_file_pins_py314_resolution() -> None:
     """The scheduled-release dependency set should be reviewable as exact pip pins."""
     text = _constraints_text()
