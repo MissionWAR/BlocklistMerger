@@ -32,6 +32,14 @@ https://github.com/MissionWAR/BlocklistMerger/releases/download/latest/merged.tx
 
 ---
 
+## Scope and Non-Goals
+
+This repository publishes one AdGuard Home-compatible `merged.txt` release asset from the
+URLs in `config/sources.txt`. Broader configuration-platform ideas are deferred; see
+[`docs/SCOPE.md`](docs/SCOPE.md).
+
+---
+
 ## 📋 Sources
 
 Upstream blocklist URLs are listed in [`config/sources.txt`](config/sources.txt).
