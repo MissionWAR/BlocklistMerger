@@ -25,12 +25,10 @@ import json
 import os
 import sys
 import time
-import tracemalloc
 from collections.abc import Iterator
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from typing import Final, NamedTuple, TypedDict
+from typing import Final, TypedDict
 
 from scripts import __version__
 from scripts.cleaner import (
@@ -42,13 +40,7 @@ from scripts.cleaner import (
     DISCARD_REASON_URL_PATH,
     clean_line,
 )
-from scripts.compiler import CompileStats, compile_rules
-
-# =============================================================================
-# CONFIGURATION CONSTANTS
-# =============================================================================
-
-PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 2
+from scripts.compiler import compile_rules
 
 # =============================================================================
 # DATA STRUCTURES
@@ -83,67 +75,6 @@ class PipelineStats(TypedDict):
     other_kept: int
 
 
-class StageDurations(TypedDict):
-    """Coarse runtime durations for the pipeline stages."""
-
-    clean_seconds: float
-    compile_seconds: float
-
-
-class ByteSizes(TypedDict):
-    """Runtime byte-size observations for pipeline inputs and output."""
-
-    raw_input_bytes: int
-    output_bytes: int
-
-
-class CompilerCardinalities(TypedDict):
-    """Inspect-only sizes of compiler structures after parsing."""
-
-    abp_rule_keys: int
-    abp_wildcard_keys: int
-    exception_rule_keys: int
-    duplicate_index_size: int
-    other_rule_count: int
-
-
-class MemoryProfile(TypedDict):
-    """Best-effort memory observations for the current process."""
-
-    tracemalloc_current_bytes: int | None
-    tracemalloc_peak_bytes: int | None
-    resource_ru_maxrss: int | None
-
-
-class RuntimeProfile(TypedDict):
-    """Inspect-only runtime profile stored in the pipeline stats report."""
-
-    worker_count: int | None
-    stage_durations_seconds: StageDurations
-    byte_sizes: ByteSizes
-    compiler_cardinalities: CompilerCardinalities
-    memory: MemoryProfile
-
-
-class CleanWorkerResult(NamedTuple):
-    """
-    Bounded metadata returned from a cleaning worker.
-
-    The cleaned rule payload stays in the spool file so process results do not
-    serialize a full cleaned list back to the parent process.
-    """
-    source_index: int
-    spool_path: Path
-    stats: dict[str, int]
-
-
-class PipelineRunResult(NamedTuple):
-    """Pipeline stats paired with inspect-only runtime profile data."""
-
-    stats: PipelineStats
-    runtime_profile: RuntimeProfile
-
-
 CLEANER_REASON_STAT_KEYS: Final[dict[str, str]] = {
     DISCARD_REASON_COMMENT: "comments_removed",
     DISCARD_REASON_COSMETIC: "cosmetic_removed",
@@ -158,11 +89,12 @@ CLEANER_REASON_STAT_KEYS: Final[dict[str, str]] = {
 # WORKER FUNCTIONS
 # =============================================================================
 
-def _new_clean_file_stats() -> dict[str, int]:
-    """Return a fresh cleaner stats dictionary for one source file."""
-    return {
+def _clean_single_file(file_path: Path) -> tuple[list[str], dict[str, int]]:
+    """Clean a single file and return cleaned lines and partial stats."""
+
+    cleaned: list[str] = []
+    file_stats: dict[str, int] = {
         "lines_raw": 0,
-        "lines_clean": 0,
         "comments_removed": 0,
         "cosmetic_removed": 0,
         "unsupported_removed": 0,
@@ -172,181 +104,22 @@ def _new_clean_file_stats() -> dict[str, int]:
         "trimmed": 0,
     }
 
-
-def _cleaner_worker_count() -> int | None:
-    """Return the worker count used for process-pool cleaning."""
-    return os.cpu_count()
-
-
-def _clean_single_file_to_spool(
-    source_index: int,
-    file_path: Path,
-    spool_dir: Path,
-) -> CleanWorkerResult:
-    """Clean a single file into a bounded spool and return only metadata."""
-    file_stats = _new_clean_file_stats()
-    spool_path = spool_dir / f"{source_index:08d}.txt"
-
-    try:
-        with (
-            open(file_path, encoding="utf-8-sig", errors="replace") as src,
-            open(spool_path, "w", encoding="utf-8", newline="\n") as dst,
-        ):
-            for line in src:
-                file_stats["lines_raw"] += 1
-                result, was_trimmed = clean_line(line)
-
-                if was_trimmed:
-                    file_stats["trimmed"] += 1
-
-                if result.discarded:
-                    if result.reason not in CLEANER_REASON_STAT_KEYS:
-                        raise ValueError(f"Unknown cleaner discard reason: {result.reason!r}")
-                    file_stats[CLEANER_REASON_STAT_KEYS[result.reason]] += 1
-                else:
-                    if result.line is None:
-                        raise ValueError("Cleaner returned no line for a kept rule")
-                    dst.write(result.line + "\n")
-                    file_stats["lines_clean"] += 1
-    except Exception:
-        spool_path.unlink(missing_ok=True)
-        raise
-
-    return CleanWorkerResult(source_index, spool_path, file_stats)
-
-
-def _clean_files_to_spools(files: list[Path], spool_dir: Path) -> dict[int, CleanWorkerResult]:
-    """Run cleaner workers and return their spool metadata keyed by source index."""
-    results: dict[int, CleanWorkerResult] = {}
-    worker_count = _cleaner_worker_count()
-
-    # Use optimal number of workers (max cores) while keeping parent results bounded.
-    with ProcessPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
-            executor.submit(_clean_single_file_to_spool, source_index, file_path, spool_dir)
-            for source_index, file_path in enumerate(files)
-        ]
-        for future in as_completed(futures):
-            result = future.result()
-            results[result.source_index] = result
-
-    return results
-
-
-def _merge_file_stats(stats: PipelineStats, file_stats: dict[str, int]) -> None:
-    """Transfer one worker's file stats into aggregate pipeline stats."""
-    stats["lines_raw"] += file_stats["lines_raw"]
-    stats["comments_removed"] += file_stats["comments_removed"]
-    stats["cosmetic_removed"] += file_stats["cosmetic_removed"]
-    stats["unsupported_removed"] += file_stats["unsupported_removed"]
-    stats["empty_removed"] += file_stats["empty_removed"]
-    stats["url_path_removed"] += file_stats["url_path_removed"]
-    stats["invalid_removed"] += file_stats["invalid_removed"]
-    stats["trimmed"] += file_stats["trimmed"]
-    stats["lines_clean"] += file_stats["lines_clean"]
-
-
-def _iter_spool_lines(spool_path: Path) -> Iterator[str]:
-    """Yield cleaned lines from a worker spool without loading the whole file."""
-    with open(spool_path, encoding="utf-8", errors="replace") as f:
+    with open(file_path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
-            yield line.rstrip("\n")
+            file_stats["lines_raw"] += 1
+            result, was_trimmed = clean_line(line)
 
+            if was_trimmed:
+                file_stats["trimmed"] += 1
 
-def _new_pipeline_stats() -> PipelineStats:
-    """Return a fresh aggregate pipeline stats dictionary."""
-    return {
-        "files_processed": 0,
-        "lines_raw": 0,
-        "lines_clean": 0,
-        "lines_output": 0,
-        "comments_removed": 0,
-        "cosmetic_removed": 0,
-        "unsupported_removed": 0,
-        "empty_removed": 0,
-        "url_path_removed": 0,
-        "invalid_removed": 0,
-        "trimmed": 0,
-        "abp_subdomain_pruned": 0,
-        "tld_wildcard_pruned": 0,
-        "duplicate_pruned": 0,
-        "whitelist_conflict_pruned": 0,
-        "local_hostname_pruned": 0,
-        "formats_compressed": 0,
-        "malformed_discarded": 0,
-        "abp_kept": 0,
-        "other_kept": 0,
-    }
+            if result.discarded:
+                if result.reason not in CLEANER_REASON_STAT_KEYS:
+                    raise ValueError(f"Unknown cleaner discard reason: {result.reason!r}")
+                file_stats[CLEANER_REASON_STAT_KEYS[result.reason]] += 1
+            else:
+                cleaned.append(result.line)  # type: ignore[arg-type]
 
-
-def _compiler_cardinalities(compile_stats: CompileStats) -> CompilerCardinalities:
-    """Return compiler cardinalities from a CompileStats instance."""
-    return {
-        "abp_rule_keys": compile_stats.abp_rule_keys,
-        "abp_wildcard_keys": compile_stats.abp_wildcard_keys,
-        "exception_rule_keys": compile_stats.exception_rule_keys,
-        "duplicate_index_size": compile_stats.duplicate_index_size,
-        "other_rule_count": compile_stats.other_rule_count,
-    }
-
-
-def _empty_compiler_cardinalities() -> CompilerCardinalities:
-    """Return zeroed compiler cardinalities for compatibility callers."""
-    return {
-        "abp_rule_keys": 0,
-        "abp_wildcard_keys": 0,
-        "exception_rule_keys": 0,
-        "duplicate_index_size": 0,
-        "other_rule_count": 0,
-    }
-
-
-def _memory_profile() -> MemoryProfile:
-    """Return best-effort memory observations with graceful unsupported values."""
-    tracemalloc_current_bytes: int | None = None
-    tracemalloc_peak_bytes: int | None = None
-    if tracemalloc.is_tracing():
-        current, peak = tracemalloc.get_traced_memory()
-        tracemalloc_current_bytes = current
-        tracemalloc_peak_bytes = peak
-
-    resource_ru_maxrss: int | None = None
-    try:
-        import resource
-    except ImportError:
-        pass
-    else:
-        try:
-            resource_ru_maxrss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        except (AttributeError, OSError, ValueError):
-            resource_ru_maxrss = None
-
-    return {
-        "tracemalloc_current_bytes": tracemalloc_current_bytes,
-        "tracemalloc_peak_bytes": tracemalloc_peak_bytes,
-        "resource_ru_maxrss": resource_ru_maxrss,
-    }
-
-
-def _empty_runtime_profile() -> RuntimeProfile:
-    """Return a runtime profile shape for callers that do not collect one."""
-    return {
-        "worker_count": None,
-        "stage_durations_seconds": {
-            "clean_seconds": 0.0,
-            "compile_seconds": 0.0,
-        },
-        "byte_sizes": {
-            "raw_input_bytes": 0,
-            "output_bytes": 0,
-        },
-        "compiler_cardinalities": _empty_compiler_cardinalities(),
-        "memory": {
-            "tracemalloc_current_bytes": None,
-            "tracemalloc_peak_bytes": None,
-            "resource_ru_maxrss": None,
-        },
-    }
+    return cleaned, file_stats
 
 
 # =============================================================================
@@ -377,22 +150,33 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
         >>> stats = process_files("lists/_raw", "lists/merged.txt")
         >>> print(f"Reduced {stats['lines_raw']:,} to {stats['lines_output']:,}")
     """
-    return process_files_with_profile(input_dir, output_file).stats
-
-
-def process_files_with_profile(input_dir: str, output_file: str) -> PipelineRunResult:
-    """
-    Run the full pipeline and return stats plus inspect-only runtime profile data.
-
-    This keeps `process_files()` compatible for existing callers while the CLI can
-    attach runtime-size observations to the versioned JSON report.
-    """
     input_path = Path(input_dir)
 
     if not input_path.is_dir():
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
-    stats = _new_pipeline_stats()
+    stats: PipelineStats = {
+        "files_processed": 0,
+        "lines_raw": 0,
+        "lines_clean": 0,
+        "lines_output": 0,
+        "comments_removed": 0,
+        "cosmetic_removed": 0,
+        "unsupported_removed": 0,
+        "empty_removed": 0,
+        "url_path_removed": 0,
+        "invalid_removed": 0,
+        "trimmed": 0,
+        "abp_subdomain_pruned": 0,
+        "tld_wildcard_pruned": 0,
+        "duplicate_pruned": 0,
+        "whitelist_conflict_pruned": 0,
+        "local_hostname_pruned": 0,
+        "formats_compressed": 0,
+        "malformed_discarded": 0,
+        "abp_kept": 0,
+        "other_kept": 0,
+    }
 
     # =========================================================================
     # STAGE 1 & 2: Read, clean, compile, and deduplicate
@@ -402,37 +186,27 @@ def process_files_with_profile(input_dir: str, output_file: str) -> PipelineRunR
 
     files = sorted(input_path.glob("*.txt"))
     stats["files_processed"] = len(files)
-    raw_input_bytes = sum(file_path.stat().st_size for file_path in files)
 
-    stop_tracemalloc = not tracemalloc.is_tracing()
-    if stop_tracemalloc:
-        tracemalloc.start()
+    def _get_cleaned_lines() -> Iterator[str]:
+        # Use optimal number of workers (max cores)
+        with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+            for cleaned, file_stats in executor.map(_clean_single_file, files):
+                # Transfer partial stats to the main stats dictionary
+                stats["lines_raw"] += file_stats["lines_raw"]
+                stats["comments_removed"] += file_stats["comments_removed"]
+                stats["cosmetic_removed"] += file_stats["cosmetic_removed"]
+                stats["unsupported_removed"] += file_stats["unsupported_removed"]
+                stats["empty_removed"] += file_stats["empty_removed"]
+                stats["url_path_removed"] += file_stats["url_path_removed"]
+                stats["invalid_removed"] += file_stats["invalid_removed"]
+                stats["trimmed"] += file_stats["trimmed"]
+                stats["lines_clean"] += len(cleaned)
 
-    try:
-        with TemporaryDirectory(prefix="blocklist-merger-clean-") as spool_dir_name:
-            spool_dir = Path(spool_dir_name)
-            clean_start = time.time()
-            results = _clean_files_to_spools(files, spool_dir)
-            clean_seconds = time.time() - clean_start
+                # Stream lines to compiler
+                yield from cleaned
 
-            def _get_cleaned_lines() -> Iterator[str]:
-                try:
-                    for source_index in range(len(files)):
-                        result = results[source_index]
-                        _merge_file_stats(stats, result.stats)
-                        yield from _iter_spool_lines(result.spool_path)
-                finally:
-                    for result in results.values():
-                        result.spool_path.unlink(missing_ok=True)
-
-            compile_start = time.time()
-            compile_stats = compile_rules(_get_cleaned_lines(), output_file)
-            compile_seconds = time.time() - compile_start
-
-        memory = _memory_profile()
-    finally:
-        if stop_tracemalloc:
-            tracemalloc.stop()
+    # Compile the streamed lines (evaluates the generator lazily)
+    compile_stats = compile_rules(_get_cleaned_lines(), output_file)
 
     pipeline_time = time.time() - pipeline_start
     print(f"   Processed {stats['files_processed']} files, {stats['lines_raw']:,} raw lines")
@@ -453,21 +227,7 @@ def process_files_with_profile(input_dir: str, output_file: str) -> PipelineRunR
     stats["abp_kept"] = compile_stats.abp_kept
     stats["other_kept"] = compile_stats.other_kept
 
-    runtime_profile: RuntimeProfile = {
-        "worker_count": _cleaner_worker_count(),
-        "stage_durations_seconds": {
-            "clean_seconds": round(clean_seconds, 6),
-            "compile_seconds": round(compile_seconds, 6),
-        },
-        "byte_sizes": {
-            "raw_input_bytes": raw_input_bytes,
-            "output_bytes": Path(output_file).stat().st_size if Path(output_file).exists() else 0,
-        },
-        "compiler_cardinalities": _compiler_cardinalities(compile_stats),
-        "memory": memory,
-    }
-
-    return PipelineRunResult(stats, runtime_profile)
+    return stats
 
 
 def print_summary(stats: PipelineStats) -> None:
@@ -525,12 +285,7 @@ def print_summary(stats: PipelineStats) -> None:
     print(f"   Other rules: {stats['other_kept']:>10,}")
 
 
-def save_stats_json(
-    stats: PipelineStats,
-    output_path: str,
-    total_time: float,
-    runtime_profile: RuntimeProfile | None = None,
-) -> None:
+def save_stats_json(stats: PipelineStats, output_path: str, total_time: float) -> None:
     """
     Save pipeline statistics to a JSON file.
 
@@ -538,15 +293,13 @@ def save_stats_json(
         stats: Pipeline statistics dictionary
         output_path: Path to write JSON file
         total_time: Total execution time in seconds
-        runtime_profile: Optional runtime-size observations for this run
     """
     output = {
-        "schema_version": PIPELINE_STATS_SCHEMA_VERSION,
+        "schema_version": 1,
         "version": __version__,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "execution_time_seconds": round(total_time, 2),
         "statistics": dict(stats),
-        "runtime_profile": runtime_profile or _empty_runtime_profile(),
     }
 
     path = Path(output_path)
@@ -591,8 +344,7 @@ def main() -> int:
         print("-" * 60)
 
         start_time = time.time()
-        result = process_files_with_profile(input_dir, output_file)
-        stats = result.stats
+        stats = process_files(input_dir, output_file)
         total_time = time.time() - start_time
 
         print_summary(stats)
@@ -600,12 +352,7 @@ def main() -> int:
 
         # Save JSON stats if requested
         if json_stats_path:
-            save_stats_json(
-                stats,
-                json_stats_path,
-                total_time,
-                runtime_profile=result.runtime_profile,
-            )
+            save_stats_json(stats, json_stats_path, total_time)
             print(f"📊 Stats saved to: {json_stats_path}")
 
         print("✅ Pipeline completed successfully!")
