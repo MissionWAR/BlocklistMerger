@@ -34,9 +34,12 @@ jobs:
         with:
           python-version: "3.14"
           cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints/release-py314.txt
 
       - name: Install Dependencies
-        run: pip install -q ".[dev]"
+        run: python -m pip install -q -c constraints/release-py314.txt ".[dev]"
 
       - name: Ruff
         run: python -m ruff check .
@@ -82,6 +85,38 @@ jobs:
           python -m scripts.pipeline "$RAW_DIR" "$OUTPUT" \
             --json-stats reports/pipeline-stats.json
           echo "time=$(($(date +%s) - START))s" >> $GITHUB_OUTPUT
+
+      - name: Append Runtime Profile Summary
+        run: |
+          SUMMARY_PATH="$GITHUB_STEP_SUMMARY" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          stats_path = Path("reports/pipeline-stats.json")
+          if not stats_path.exists():
+              raise SystemExit("Missing reports/pipeline-stats.json")
+
+          data = json.loads(stats_path.read_text(encoding="utf-8"))
+          profile = data.get("runtime_profile", {})
+          sizes = profile.get("byte_sizes", {})
+          memory = profile.get("memory", {})
+          lines = [
+              "## Runtime Profile",
+              "",
+              "| Metric | Value |",
+              "| ------ | ----- |",
+              f"| Worker count | {profile.get('worker_count', 'unknown')} |",
+              f"| Raw input bytes | {sizes.get('raw_input_bytes', 'unknown')} |",
+              f"| Output bytes | {sizes.get('output_bytes', 'unknown')} |",
+              f"| Peak memory (ru_maxrss) | {memory.get('resource_ru_maxrss', 'unknown')} |",
+              "",
+          ]
+
+          with open(os.environ["SUMMARY_PATH"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines))
+              summary.write("\n")
+          PY
 
       - name: Calculate Stats
         id: stats
@@ -141,6 +176,40 @@ jobs:
             .cache
             ~/.cache/tldextract
           key: blocklists-${{ steps.cache-key.outputs.date }}
+
+  python_compatibility_audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          fetch-depth: 1
+
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints/release-py314.txt
+
+      - name: Install Audit Dependencies
+        run: python -m pip install -e ".[dev]" --ignore-requires-python -c constraints/release-py314.txt
+
+      - name: Ruff
+        run: python -m ruff check .
+
+      - name: Test
+        run: python -m pytest
 
   publish:
     needs: build_validate
