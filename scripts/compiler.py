@@ -209,11 +209,6 @@ class CompileStats:
         local_hostname_pruned: Local hostnames (localhost, etc.) skipped
         formats_compressed: Hosts/plain domains converted to ABP format
         malformed_discarded: Malformed rules (e.g., ||^) discarded
-        abp_rule_keys: Number of ABP domain keys tracked before pruning
-        abp_wildcard_keys: Number of TLD wildcard keys tracked before pruning
-        exception_rule_keys: Number of exception domain keys tracked before pruning
-        duplicate_index_size: Number of semantic duplicate keys tracked before pruning
-        other_rule_count: Number of non-ABP rules tracked before output
 
     Example:
         >>> stats = CompileStats()
@@ -237,13 +232,6 @@ class CompileStats:
     local_hostname_pruned: int = 0
     formats_compressed: int = 0
     malformed_discarded: int = 0
-
-    # Inspect-only compiler cardinalities
-    abp_rule_keys: int = 0
-    abp_wildcard_keys: int = 0
-    exception_rule_keys: int = 0
-    duplicate_index_size: int = 0
-    other_rule_count: int = 0
 
 
 # =============================================================================
@@ -696,25 +684,18 @@ def _parse_and_compress_lines(
             continue
 
 
-def _build_coverage_lookups(abp_wildcards: WildcardStorage) -> set[str]:
-    """Phase 2: Create efficient lookup structures for pruning."""
-    return set(abp_wildcards.keys())
-
-
-def _record_compiler_cardinalities(
-    stats: CompileStats,
+def _build_coverage_lookups(
     abp_rules: RuleStorage,
     abp_wildcards: WildcardStorage,
-    exceptions: ExceptionRules,
-    duplicate_index: set[RuleDuplicateKey],
-    other_rules: set[str],
-) -> None:
-    """Record inspect-only compiler structure sizes after parsing."""
-    stats.abp_rule_keys = len(abp_rules)
-    stats.abp_wildcard_keys = len(abp_wildcards)
-    stats.exception_rule_keys = len({_rule_storage_key(record) for record in exceptions})
-    stats.duplicate_index_size = len(duplicate_index)
-    stats.other_rule_count = len(other_rules)
+) -> tuple[set[str], set[str]]:
+    """Phase 2: Create efficient lookup structures for pruning."""
+    abp_blocking_domains: set[str] = {
+        record.domain
+        for records in abp_rules.values()
+        for record in records
+    }
+    tld_wildcards: set[str] = set(abp_wildcards.keys())
+    return abp_blocking_domains, tld_wildcards
 
 
 def _is_subdomain_of(domain: str, parent_domain: str) -> bool:
@@ -942,17 +923,8 @@ def compile_rules(
         duplicate_index=duplicate_index,
     )
 
-    _record_compiler_cardinalities(
-        stats=stats,
-        abp_rules=abp_rules,
-        abp_wildcards=abp_wildcards,
-        exceptions=exceptions,
-        duplicate_index=duplicate_index,
-        other_rules=other_rules,
-    )
-
-    # PHASE 2: Build coverage lookup set
-    tld_wildcards = _build_coverage_lookups(abp_wildcards)
+    # PHASE 2: Build coverage lookup sets
+    abp_blocking_domains, tld_wildcards = _build_coverage_lookups(abp_rules, abp_wildcards)
 
     # PHASE 3: Prune ABP subdomain rules
     pruned_abp = _prune_redundant_rules(

@@ -56,7 +56,7 @@ def _source_health(statuses: list[str]) -> dict[str, object]:
 
 def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": 1,
         "version": "1.5.0",
         "timestamp": "2026-05-17T15:01:00Z",
         "execution_time_seconds": 1.25,
@@ -81,29 +81,6 @@ def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
             "malformed_discarded": 0,
             "abp_kept": lines_output,
             "other_kept": 0,
-        },
-        "runtime_profile": {
-            "worker_count": 4,
-            "stage_durations_seconds": {
-                "clean_seconds": 0.5,
-                "compile_seconds": 0.75,
-            },
-            "byte_sizes": {
-                "raw_input_bytes": 1024,
-                "output_bytes": 512,
-            },
-            "compiler_cardinalities": {
-                "abp_rule_keys": lines_output,
-                "abp_wildcard_keys": 0,
-                "exception_rule_keys": 0,
-                "duplicate_index_size": lines_output,
-                "other_rule_count": 0,
-            },
-            "memory": {
-                "tracemalloc_current_bytes": 64,
-                "tracemalloc_peak_bytes": 128,
-                "resource_ru_maxrss": 256,
-            },
         },
     }
 
@@ -324,36 +301,6 @@ def test_summaries_are_written_with_schema_thresholds_and_triage_text(tmp_path: 
     assert "Errors" in markdown
     assert "Warnings" in markdown
     assert "Thresholds" in markdown
-
-
-def test_runtime_profile_is_inspect_only_for_release_validation(tmp_path: Path) -> None:
-    pipeline_stats = _pipeline_stats(2)
-    runtime_profile = pipeline_stats["runtime_profile"]
-    assert isinstance(runtime_profile, dict)
-    runtime_profile["stage_durations_seconds"] = {
-        "clean_seconds": 999_999.0,
-        "compile_seconds": 999_999.0,
-    }
-    runtime_profile["memory"] = {
-        "tracemalloc_current_bytes": 999_999_999,
-        "tracemalloc_peak_bytes": 999_999_999,
-        "resource_ru_maxrss": 999_999_999,
-    }
-
-    summary = _validate(
-        tmp_path,
-        output_lines=["||ads.example.com^", "||tracker.example.com^"],
-        pipeline_stats=pipeline_stats,
-    )
-
-    runtime_findings = [
-        finding
-        for finding in [*summary.errors, *summary.warnings]
-        if "runtime" in str(finding.get("code", ""))
-        or "memory" in str(finding.get("code", ""))
-        or "cardinality" in str(finding.get("code", ""))
-    ]
-    assert runtime_findings == []
 
 
 def test_cli_returns_nonzero_for_errors_and_writes_summaries(

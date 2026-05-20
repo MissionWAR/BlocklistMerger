@@ -350,44 +350,6 @@ class TestCompilation:
         assert rule in rules
         assert stats.malformed_discarded == 0
 
-    def test_allocation_cleanup_regression_preserves_semantics_and_cardinalities(self):
-        """Mixed compile protects pruning behavior while exposing inspect-only sizes."""
-        lines = [
-            "||example.com^",
-            "||ads.example.com^",
-            "||*.autos^",
-            "||spam.autos^",
-            "||allowed.org^",
-            "@@||allowed.org^",
-            "||semantic-dup.net^$client=10.0.0.1,dnstype=a",
-            "||semantic-dup.net^$dnstype=A,client=10.0.0.1",
-            "/zeta.*/",
-            "/alpha.*/",
-        ]
-
-        rules, stats = self._compile(lines)
-
-        assert rules == [
-            "||*.autos^",
-            "||example.com^",
-            "||semantic-dup.net^$client=10.0.0.1,dnstype=a",
-            "/alpha.*/",
-            "/zeta.*/",
-        ]
-        assert stats.abp_subdomain_pruned == 1
-        assert stats.tld_wildcard_pruned == 1
-        assert stats.whitelist_conflict_pruned == 1
-        assert stats.duplicate_pruned == 1
-        assert stats.malformed_discarded == 0
-        assert stats.abp_kept == 3
-        assert stats.other_kept == 2
-        assert stats.total_output == 5
-        assert stats.abp_rule_keys == 5
-        assert stats.abp_wildcard_keys == 1
-        assert stats.exception_rule_keys == 1
-        assert stats.duplicate_index_size == 6
-        assert stats.other_rule_count == 2
-
 
 class TestEdgeCases:
     """Edge cases that could cause issues."""
