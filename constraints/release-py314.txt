@@ -1,0 +1,26 @@
+# Generated from a verified CPython 3.14.5 environment with:
+# python -m pip list --format=freeze --exclude blocklist-merger --exclude pip
+aiofiles==25.1.0
+aiohappyeyeballs==2.6.1
+aiohttp==3.13.5
+aiosignal==1.4.0
+attrs==26.1.0
+certifi==2026.4.22
+charset-normalizer==3.4.7
+colorama==0.4.6
+filelock==3.29.0
+frozenlist==1.8.0
+idna==3.15
+iniconfig==2.3.0
+multidict==6.7.1
+packaging==26.2
+pluggy==1.6.0
+propcache==0.5.2
+Pygments==2.20.0
+pytest==9.0.3
+requests==2.34.2
+requests-file==3.0.1
+ruff==0.15.13
+tldextract==5.3.1
+urllib3==2.7.0
+yarl==1.23.0

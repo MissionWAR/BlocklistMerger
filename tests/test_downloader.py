@@ -6,6 +6,7 @@ Tests for the downloader module's helper functions.
 Tests pure functions (url_to_filename, load_sources, load_state, save_state)
 without making real HTTP requests.
 """
+import asyncio
 import json
 import os
 import sys
@@ -426,6 +427,302 @@ class TestSourceHealthReport:
         assert [source["url"] for source in data["sources"]] == urls
         assert data["totals_by_status"]["fresh_fetch"] == 1
         assert data["totals_by_status"]["failed"] == 4
+
+
+class _FakeResponseContent:
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        error_after_chunks: int | None = None,
+    ) -> None:
+        self._chunks = chunks
+        self._error_after_chunks = error_after_chunks
+        self.iter_chunked_sizes: list[int] = []
+
+    async def iter_chunked(self, chunk_size: int):
+        self.iter_chunked_sizes.append(chunk_size)
+        for index, chunk in enumerate(self._chunks):
+            if self._error_after_chunks is not None and index >= self._error_after_chunks:
+                raise OSError("stream interrupted")
+            yield chunk
+        if self._error_after_chunks == len(self._chunks):
+            raise OSError("stream interrupted")
+
+
+class _FakeResponse:
+    def __init__(
+        self,
+        status: int,
+        *,
+        chunks: list[bytes] | None = None,
+        read_bytes: bytes = b"",
+        headers: dict[str, str] | None = None,
+        fail_on_read: bool = False,
+        stream_error_after_chunks: int | None = None,
+    ) -> None:
+        self.status = status
+        self.headers = headers or {}
+        self.content = _FakeResponseContent(
+            chunks if chunks is not None else [read_bytes],
+            error_after_chunks=stream_error_after_chunks,
+        )
+        self._read_bytes = read_bytes
+        self._fail_on_read = fail_on_read
+        self.read_called = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    async def read(self) -> bytes:
+        self.read_called = True
+        if self._fail_on_read:
+            raise AssertionError("D-01 success path must not call response.read()")
+        return self._read_bytes
+
+
+class _FakeSession:
+    def __init__(self, outcomes: list[_FakeResponse | BaseException]) -> None:
+        self._outcomes = list(outcomes)
+        self.requests: list[dict[str, object]] = []
+
+    def get(self, url, *, headers, timeout, allow_redirects):
+        self.requests.append(
+            {
+                "url": url,
+                "headers": headers,
+                "timeout": timeout,
+                "allow_redirects": allow_redirects,
+            }
+        )
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+class TestFetchUrlStreamingAtomicity:
+    """Pin RUN-01 downloader streaming and atomic promotion behavior."""
+
+    def test_d01_success_streams_chunks_without_response_read(self, tmp_path):
+        url = "https://example.com/streamed.txt"
+        output_dir = tmp_path / "raw"
+        cache_dir = tmp_path / "cache"
+        output_dir.mkdir()
+        cache_dir.mkdir()
+        response = _FakeResponse(
+            200,
+            chunks=[b"||one.example^\n", b"||two.example^\n"],
+            fail_on_read=True,
+            headers={"ETag": '"streamed"', "Last-Modified": "Mon, 18 May 2026 00:00:00 GMT"},
+        )
+        state: dict[str, dict[str, str]] = {}
+
+        result = asyncio.run(
+            downloader.fetch_url(
+                _FakeSession([response]),
+                url,
+                output_dir,
+                cache_dir,
+                state,
+                timeout=5,
+                retries=1,
+            )
+        )
+
+        filename = url_to_filename(url)
+        expected = b"||one.example^\n||two.example^\n"
+        assert result == FetchResult(url, success=True, changed=True)
+        assert response.read_called is False
+        assert response.content.iter_chunked_sizes
+        assert (cache_dir / filename).read_bytes() == expected
+        assert (output_dir / filename).read_bytes() == expected
+        assert state[url]["etag"] == '"streamed"'
+
+    def test_d02_partial_stream_failure_keeps_old_files_and_state(self, tmp_path):
+        url = "https://example.com/partial.txt"
+        output_dir = tmp_path / "raw"
+        cache_dir = tmp_path / "cache"
+        output_dir.mkdir()
+        cache_dir.mkdir()
+        filename = url_to_filename(url)
+        old_cache = b"||old-cache.example^\n"
+        old_raw = b"||old-raw.example^\n"
+        (cache_dir / filename).write_bytes(old_cache)
+        (output_dir / filename).write_bytes(old_raw)
+        response = _FakeResponse(
+            200,
+            chunks=[b"||new-one.example^\n", b"||new-two.example^\n"],
+            read_bytes=b"||unbounded-read-would-corrupt.example^\n",
+            stream_error_after_chunks=1,
+            headers={"ETag": '"new"'},
+        )
+        state = {
+            url: {
+                "etag": '"old"',
+                "filename": filename,
+                "fetched_at": "2026-05-17T00:00:00Z",
+            }
+        }
+
+        result = asyncio.run(
+            downloader.fetch_url(
+                _FakeSession([response]),
+                url,
+                output_dir,
+                cache_dir,
+                state,
+                timeout=5,
+                retries=1,
+            )
+        )
+
+        assert result.success is True
+        assert result.changed is False
+        assert result.error and "using cached version" in result.error
+        assert (cache_dir / filename).read_bytes() == old_cache
+        assert (output_dir / filename).read_bytes() == old_cache
+        assert state == {
+            url: {
+                "etag": '"old"',
+                "filename": filename,
+                "fetched_at": "2026-05-17T00:00:00Z",
+            }
+        }
+        assert list(cache_dir.glob("*.tmp")) == []
+        assert list(output_dir.glob("*.tmp")) == []
+
+    def test_d02_state_updates_only_after_cache_and_raw_replacement(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        url = "https://example.com/state-order.txt"
+        output_dir = tmp_path / "raw"
+        cache_dir = tmp_path / "cache"
+        output_dir.mkdir()
+        cache_dir.mkdir()
+        filename = url_to_filename(url)
+        expected = b"||state-order.example^\n"
+        response = _FakeResponse(
+            200,
+            chunks=[expected],
+            read_bytes=expected,
+            headers={"ETag": '"ordered"'},
+        )
+        observed = {"checked": False}
+
+        def checked_timestamp() -> str:
+            observed["checked"] = True
+            assert (cache_dir / filename).read_bytes() == expected
+            assert (output_dir / filename).read_bytes() == expected
+            return "2026-05-18T00:00:00Z"
+
+        monkeypatch.setattr(downloader, "_utc_timestamp", checked_timestamp)
+        state: dict[str, dict[str, str]] = {}
+
+        result = asyncio.run(
+            downloader.fetch_url(
+                _FakeSession([response]),
+                url,
+                output_dir,
+                cache_dir,
+                state,
+                timeout=5,
+                retries=1,
+            )
+        )
+
+        assert result.success is True
+        assert observed["checked"] is True
+        assert state[url]["fetched_at"] == "2026-05-18T00:00:00Z"
+
+    @pytest.mark.parametrize(
+        ("case_name", "outcome", "expected_error"),
+        [
+            ("d03_304_validated_cache", _FakeResponse(304), None),
+            ("d03_http_error_fallback_cache", _FakeResponse(503), "HTTP 503"),
+            ("d03_timeout_fallback_cache", TimeoutError("timed out"), "Timeout"),
+            ("d03_exception_fallback_cache", RuntimeError("boom"), "boom"),
+        ],
+    )
+    def test_d03_cache_fallbacks_use_shared_bounded_copy_helper(
+        self,
+        monkeypatch,
+        tmp_path,
+        case_name,
+        outcome,
+        expected_error,
+    ):
+        url = f"https://example.com/{case_name}.txt"
+        output_dir = tmp_path / "raw"
+        cache_dir = tmp_path / "cache"
+        output_dir.mkdir()
+        cache_dir.mkdir()
+        filename = url_to_filename(url)
+        cached = b"||cached.example^\n"
+        (cache_dir / filename).write_bytes(cached)
+        calls: list[tuple[Path, Path]] = []
+
+        async def spy_copy(source_path: Path, destination_path: Path) -> None:
+            calls.append((source_path, destination_path))
+            destination_path.write_bytes(source_path.read_bytes())
+
+        monkeypatch.setattr(downloader, "_copy_file_bounded", spy_copy)
+
+        result = asyncio.run(
+            downloader.fetch_url(
+                _FakeSession([outcome]),
+                url,
+                output_dir,
+                cache_dir,
+                state={url: {"etag": '"cached"', "fetched_at": "2026-05-17T00:00:00Z"}},
+                timeout=5,
+                retries=1,
+            )
+        )
+
+        assert result.success is True
+        assert result.changed is False
+        assert calls == [(cache_dir / filename, output_dir / filename)]
+        assert (output_dir / filename).read_bytes() == cached
+        if expected_error is None:
+            assert result.error is None
+        else:
+            assert result.error and expected_error in result.error
+
+    def test_d04_d05_no_source_size_or_content_type_gate_on_success(self, tmp_path):
+        url = "https://example.com/odd-content-type.txt"
+        output_dir = tmp_path / "raw"
+        cache_dir = tmp_path / "cache"
+        output_dir.mkdir()
+        cache_dir.mkdir()
+        body = b"||accepted-without-hard-gate.example^\n"
+        response = _FakeResponse(
+            200,
+            chunks=[body],
+            read_bytes=body,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+
+        result = asyncio.run(
+            downloader.fetch_url(
+                _FakeSession([response]),
+                url,
+                output_dir,
+                cache_dir,
+                state={},
+                timeout=5,
+                retries=1,
+            )
+        )
+
+        assert result.success is True
+        assert result.changed is True
+        assert (output_dir / url_to_filename(url)).read_bytes() == body
 
 
 if __name__ == "__main__":
