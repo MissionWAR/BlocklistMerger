@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 1: Parser Contract & CI Baseline** - Cleaner/compiler syntax behavior is pinned and tests/lint guard scheduled publishing. (completed 2026-05-16)
 - [x] **Phase 2: Semantic Deduplication & Whitelist Safety** - Rules are pruned only when structured semantics prove behavior is preserved. (completed 2026-05-16)
 - [ ] **Phase 3: Release Validation & Observability** - Scheduled releases fail closed using source health, pipeline stats, deltas, syntax checks, canaries, determinism, and scoped permissions.
-- [ ] **Phase 4: Runtime Scaling & Reproducibility** - Large runs use bounded data flow and reproducible release dependencies after semantics and release safety are pinned.
+- [x] **Phase 4: Runtime Scaling & Reproducibility** - Large runs use bounded data flow and reproducible release dependencies after semantics and release safety are pinned. (completed 2026-05-20)
 - [ ] **Phase 5: Lightweight Public Reuse Polish** - Public users can fork and operate the main workflow safely while v2 configuration-platform ideas remain deferred.
 
 ## Phase Details
@@ -109,5 +109,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5
 | 1. Parser Contract & CI Baseline | 4/4 | Complete   | 2026-05-16 |
 | 2. Semantic Deduplication & Whitelist Safety | 4/4 | Complete   | 2026-05-16 |
 | 3. Release Validation & Observability | 3/4 | In Progress|  |
-| 4. Runtime Scaling & Reproducibility | 3/4 | In Progress|  |
+| 4. Runtime Scaling & Reproducibility | 4/4 | Complete   | 2026-05-20 |
 | 5. Lightweight Public Reuse Polish | 0/TBD | Not started | - |

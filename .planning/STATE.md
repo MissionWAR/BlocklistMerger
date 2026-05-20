@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 04-03-PLAN.md
-last_updated: "2026-05-18T19:10:29.400Z"
-last_activity: 2026-05-18
+status: verifying
+stopped_at: Completed 04-04-PLAN.md
+last_updated: "2026-05-20T10:50:39.392Z"
+last_activity: 2026-05-20
 progress:
   total_phases: 5
-  completed_phases: 3
+  completed_phases: 4
   total_plans: 16
-  completed_plans: 15
-  percent: 94
+  completed_plans: 16
+  percent: 80
 ---
 
 # Project State
@@ -27,10 +27,10 @@ See: .planning/PROJECT.md (updated 2026-05-16)
 
 Phase: 04 (runtime-scaling-reproducibility) — EXECUTING
 Plan: 4 of 4
-Status: Ready to execute
-Last activity: 2026-05-18
+Status: Phase complete — ready for verification
+Last activity: 2026-05-20
 
-Progress: [█████████░] 94%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ Progress: [█████████░] 94%
 | Phase 04 P01 | 21 min | 2 tasks | 3 files |
 | Phase 04 P02 | 6 min | 2 tasks | 3 files |
 | Phase 04 P03 | 12 min | 2 tasks | 7 files |
+| Phase 04 P04 | 16 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -88,6 +89,9 @@ Recent decisions affecting current work:
 - [Phase 04]: Plan 04-02 keeps ProcessPoolExecutor cleaning while replacing worker cleaned-list returns with per-source spool metadata. — This preserves process-level parallelism while removing full cleaned list payload serialization across the process boundary.
 - [Phase 04]: Plan 04-03 removed only the unused compiler coverage allocation and kept dictionary/set compiler storage unchanged. — RUN-03 reduces memory waste without introducing a deeper storage redesign.
 - [Phase 04]: Plan 04-03 exposes runtime-size observations through pipeline-stats schema 2 as inspect-only runtime_profile data. — Runtime baselines can be audited without adding release gates before enough history exists.
+- [Phase 04]: Plan 04 kept pyproject.toml as the dependency declaration and used constraints/release-py314.txt as the scheduled-release resolution artifact. — This preserves the human dependency contract while pinning scheduled release resolution through pip constraints.
+- [Phase 04]: Plan 04 keeps Python 3.13/3.14 compatibility evidence in a separate read-only audit job without lowering requires-python. — Phase 04 records compatibility evidence before any later explicit support-range decision.
+- [Phase 04]: Plan 04 pins setuptools package discovery to scripts after adding the top-level constraints directory. — This keeps release installs working without changing dependencies, requires-python, or runtime behavior.
 
 ### Pending Todos
 
@@ -109,6 +113,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-05-18T19:10:29.383Z
-Stopped at: Completed 04-03-PLAN.md
+Last session: 2026-05-20T10:50:17.709Z
+Stopped at: Completed 04-04-PLAN.md
 Resume file: None
