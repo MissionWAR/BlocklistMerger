@@ -192,6 +192,14 @@ def test_python_requirement_and_ruff_target_remain_py314() -> None:
     assert 'target-version = "py314"' in text
 
 
+def test_package_discovery_stays_limited_to_scripts_package() -> None:
+    """Top-level constraints and runtime data directories must not enter package builds."""
+    text = _pyproject_text()
+
+    assert "[tool.setuptools]" in text
+    assert 'packages = ["scripts"]' in text
+
+
 def test_runtime_profile_summary_mirrors_only_compact_fields() -> None:
     """Step summary should show a small runtime excerpt, not full diagnostic detail."""
     text = _workflow_text()
