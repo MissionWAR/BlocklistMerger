@@ -163,6 +163,17 @@ def _validate(tmp_path: Path, **kwargs) -> release_validator.ValidationSummary:
     )
 
 
+def _codes(findings: list[release_validator.Finding]) -> set[object]:
+    return {finding["code"] for finding in findings}
+
+
+def _finding_by_code(
+    findings: list[release_validator.Finding],
+    code: str,
+) -> release_validator.Finding:
+    return next(finding for finding in findings if finding["code"] == code)
+
+
 def test_repo_canary_config_is_versioned() -> None:
     canaries = _read_json(Path("config/release_canaries.json"))
 
@@ -292,6 +303,140 @@ def test_previous_release_moderate_delta_and_missing_previous_warn_without_failu
     assert any(warning["code"] == "previous_output_unavailable" for warning in missing.warnings)
 
 
+def test_matching_pipeline_output_count_is_recorded_without_count_findings(
+    tmp_path: Path,
+) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "", "||tracker.example.com^"],
+        pipeline_stats=_pipeline_stats(2),
+    )
+
+    finding_codes = _codes([*summary.errors, *summary.warnings])
+    assert not any(str(code).startswith("pipeline_output_count_") for code in finding_codes)
+    assert "pipeline_statistics_invalid" not in finding_codes
+    assert summary.counts["current_output_rules"] == 2
+    assert summary.counts["pipeline_reported_output_rules"] == 2
+
+
+def test_pipeline_output_count_mismatch_hard_fails_with_diagnostics(tmp_path: Path) -> None:
+    paths = _write_release_inputs(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||tracker.example.com^"],
+        pipeline_stats=_pipeline_stats(5),
+    )
+
+    summary = release_validator.validate_release(
+        source_health_path=paths["source_health"],
+        pipeline_stats_path=paths["pipeline_stats"],
+        output_path=paths["output"],
+        canaries_path=paths["canaries"],
+        previous_output_path=paths["previous_output"],
+        summary_json_path=paths["summary_json"],
+        summary_md_path=paths["summary_md"],
+        thresholds=release_validator.ReleaseThresholds(minimum_output_rules=1),
+    )
+
+    error = _finding_by_code(summary.errors, "pipeline_output_count_mismatch")
+    assert summary.status == "failed"
+    assert summary.counts["current_output_rules"] == 2
+    assert summary.counts["pipeline_reported_output_rules"] == 5
+    assert error["details"] == {
+        "pipeline_reported_output_rules": 5,
+        "scanned_output_rules": 2,
+        "absolute_delta": 3,
+        "pipeline_stats_path": str(paths["pipeline_stats"]),
+        "schema_version": 2,
+        "field": "statistics.lines_output",
+    }
+
+    data = _read_json(paths["summary_json"])
+    markdown = paths["summary_md"].read_text(encoding="utf-8")
+    assert data["counts"]["current_output_rules"] == 2
+    assert data["counts"]["pipeline_reported_output_rules"] == 5
+    assert "pipeline_output_count_mismatch" in markdown
+    assert "statistics.lines_output" in markdown
+    assert "absolute_delta" in markdown
+
+
+@pytest.mark.parametrize(
+    "statistics",
+    [
+        None,
+        [],
+    ],
+    ids=["missing-statistics", "list-statistics"],
+)
+def test_pipeline_statistics_object_is_required(
+    tmp_path: Path,
+    statistics: object,
+) -> None:
+    pipeline_stats = _pipeline_stats(2)
+    if statistics is None:
+        del pipeline_stats["statistics"]
+    else:
+        pipeline_stats["statistics"] = statistics
+
+    summary = _validate(tmp_path, pipeline_stats=pipeline_stats)
+
+    error = _finding_by_code(summary.errors, "pipeline_statistics_invalid")
+    assert error["details"]["field"] == "statistics"
+    assert "pipeline_reported_output_rules" not in summary.counts
+
+
+def test_pipeline_output_count_is_required_without_defaulting_to_zero(tmp_path: Path) -> None:
+    pipeline_stats = _pipeline_stats(2)
+    statistics = pipeline_stats["statistics"]
+    assert isinstance(statistics, dict)
+    del statistics["lines_output"]
+
+    summary = _validate(tmp_path, pipeline_stats=pipeline_stats)
+
+    error = _finding_by_code(summary.errors, "pipeline_output_count_missing")
+    assert error["details"]["field"] == "statistics.lines_output"
+    assert "pipeline_reported_output_rules" not in summary.counts
+
+
+@pytest.mark.parametrize(
+    "lines_output",
+    [
+        True,
+        "2",
+        2.0,
+        -1,
+    ],
+    ids=["bool", "string", "float", "negative"],
+)
+def test_pipeline_output_count_must_be_non_negative_integer(
+    tmp_path: Path,
+    lines_output: object,
+) -> None:
+    pipeline_stats = _pipeline_stats(2)
+    statistics = pipeline_stats["statistics"]
+    assert isinstance(statistics, dict)
+    statistics["lines_output"] = lines_output
+
+    summary = _validate(tmp_path, pipeline_stats=pipeline_stats)
+
+    error = _finding_by_code(summary.errors, "pipeline_output_count_invalid")
+    assert error["details"]["field"] == "statistics.lines_output"
+    assert error["details"]["value"] == lines_output
+    assert "pipeline_reported_output_rules" not in summary.counts
+
+
+def test_legacy_pipeline_stats_schema_is_hard_error_without_count_comparison(
+    tmp_path: Path,
+) -> None:
+    pipeline_stats = _pipeline_stats(5)
+    pipeline_stats["schema_version"] = 1
+
+    summary = _validate(tmp_path, pipeline_stats=pipeline_stats)
+
+    assert "pipeline_stats_schema_version" in _codes(summary.errors)
+    assert "pipeline_output_count_mismatch" not in _codes(summary.errors)
+    assert "pipeline_reported_output_rules" not in summary.counts
+
+
 def test_summaries_are_written_with_schema_thresholds_and_triage_text(tmp_path: Path) -> None:
     paths = _write_release_inputs(
         tmp_path,
@@ -392,3 +537,44 @@ def test_cli_returns_nonzero_for_errors_and_writes_summaries(
     assert release_validator.main() == 1
     assert paths["summary_json"].exists()
     assert paths["summary_md"].exists()
+
+
+def test_cli_writes_summaries_for_unusable_pipeline_statistics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline_stats = _pipeline_stats(2)
+    del pipeline_stats["statistics"]
+    paths = _write_release_inputs(tmp_path, pipeline_stats=pipeline_stats)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "scripts.release_validator",
+            "--source-health",
+            str(paths["source_health"]),
+            "--pipeline-stats",
+            str(paths["pipeline_stats"]),
+            "--output",
+            str(paths["output"]),
+            "--canaries",
+            str(paths["canaries"]),
+            "--previous-output",
+            str(paths["previous_output"]),
+            "--summary-json",
+            str(paths["summary_json"]),
+            "--summary-md",
+            str(paths["summary_md"]),
+            "--minimum-output-rules",
+            "1",
+        ],
+    )
+
+    assert release_validator.main() == 1
+    data = _read_json(paths["summary_json"])
+    markdown = paths["summary_md"].read_text(encoding="utf-8")
+    assert data["counts"]["current_output_rules"] == 2
+    assert "pipeline_reported_output_rules" not in data["counts"]
+    assert data["errors"][0]["code"] == "pipeline_statistics_invalid"
+    assert "pipeline_statistics_invalid" in markdown
+    assert "statistics" in markdown
