@@ -459,6 +459,10 @@ class TestSaveStatsJson:
         assert data["execution_time_seconds"] == 5.5
         assert data["statistics"]["files_processed"] == 10
         assert data["statistics"]["lines_output"] == 500
+        assert (
+            data["statistics"]["lines_output"]
+            == data["statistics"]["abp_kept"] + data["statistics"]["other_kept"]
+        )
         assert data["statistics"]["url_path_removed"] == 0
         assert data["statistics"]["invalid_removed"] == 0
         assert data["statistics"]["duplicate_pruned"] == 50

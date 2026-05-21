@@ -52,6 +52,13 @@ SOURCE_HEALTH_STATUSES: Final[tuple[str, ...]] = (
     "stale_cache",
     "validated_cache",
 )
+PIPELINE_DETAIL_FINDING_CODES: Final[frozenset[str]] = frozenset({
+    "pipeline_stats_invalid",
+    "pipeline_statistics_invalid",
+    "pipeline_output_count_missing",
+    "pipeline_output_count_invalid",
+    "pipeline_output_count_mismatch",
+})
 
 Finding = dict[str, object]
 
@@ -178,6 +185,34 @@ def _load_json(path: Path, description: str) -> dict[str, object]:
     return data
 
 
+def _load_pipeline_stats(path: Path) -> tuple[dict[str, object], list[Finding]]:
+    """Load pipeline stats as a recoverable validation input."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, [
+            _finding(
+                "pipeline_stats_invalid",
+                "Pipeline-stats report could not be loaded",
+                pipeline_stats_path=str(path),
+                error=str(exc),
+            )
+        ]
+
+    if not isinstance(data, dict):
+        return {}, [
+            _finding(
+                "pipeline_stats_invalid",
+                "Pipeline-stats report must be a JSON object",
+                pipeline_stats_path=str(path),
+                actual_type=type(data).__name__,
+            )
+        ]
+
+    return data, []
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     """Write text through an atomic sibling temp file."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,12 +271,17 @@ def _validate_report_schema_versions(
     source_health: dict[str, object],
     pipeline_stats: dict[str, object],
     canaries: dict[str, object],
+    *,
+    validate_pipeline_stats: bool = True,
 ) -> list[Finding]:
     """Return hard errors for unsupported report schema versions."""
     errors: list[Finding] = []
     if source_health.get("schema_version") != SOURCE_HEALTH_SCHEMA_VERSION:
         errors.append(_finding("source_health_schema_version", "Unsupported source-health schema"))
-    if pipeline_stats.get("schema_version") != PIPELINE_STATS_SCHEMA_VERSION:
+    if (
+        validate_pipeline_stats
+        and pipeline_stats.get("schema_version") != PIPELINE_STATS_SCHEMA_VERSION
+    ):
         errors.append(_finding(
             "pipeline_stats_schema_version",
             "Unsupported pipeline-stats schema",
@@ -249,6 +289,54 @@ def _validate_report_schema_versions(
     if canaries.get("schema_version") != 1:
         errors.append(_finding("canary_schema_version", "Unsupported canary schema"))
     return errors
+
+
+def _extract_pipeline_output_count(
+    pipeline_stats: dict[str, object],
+    pipeline_stats_path: Path,
+) -> tuple[int | None, list[Finding]]:
+    """Extract a trusted statistics.lines_output value from schema-versioned stats."""
+    schema_version = pipeline_stats.get("schema_version")
+    if schema_version != PIPELINE_STATS_SCHEMA_VERSION:
+        return None, []
+
+    statistics = pipeline_stats.get("statistics")
+    if not isinstance(statistics, dict):
+        return None, [
+            _finding(
+                "pipeline_statistics_invalid",
+                "Pipeline statistics object is missing or invalid",
+                pipeline_stats_path=str(pipeline_stats_path),
+                schema_version=schema_version,
+                field="statistics",
+            )
+        ]
+
+    if "lines_output" not in statistics:
+        return None, [
+            _finding(
+                "pipeline_output_count_missing",
+                "Pipeline statistics is missing statistics.lines_output",
+                pipeline_stats_path=str(pipeline_stats_path),
+                schema_version=schema_version,
+                field="statistics.lines_output",
+            )
+        ]
+
+    value = statistics["lines_output"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None, [
+            _finding(
+                "pipeline_output_count_invalid",
+                "Pipeline statistics.lines_output must be a non-negative integer",
+                pipeline_stats_path=str(pipeline_stats_path),
+                schema_version=schema_version,
+                field="statistics.lines_output",
+                value=value,
+            )
+        ]
+
+    return value, []
 
 
 # =============================================================================
@@ -567,6 +655,21 @@ def validate_previous_output_delta(
 # =============================================================================
 
 
+def _render_markdown_finding(finding: Finding) -> list[str]:
+    """Render one finding, with compact details for pipeline count diagnostics."""
+    lines = [f"- `{finding['code']}`: {finding['message']}"]
+    if finding["code"] not in PIPELINE_DETAIL_FINDING_CODES:
+        return lines
+
+    details = finding.get("details")
+    if not isinstance(details, dict):
+        return lines
+
+    for key, value in details.items():
+        lines.append(f"  - `{key}`: {value}")
+    return lines
+
+
 def render_markdown_summary(summary: ValidationSummary) -> str:
     """Render a concise Markdown triage report."""
     title_status = "Failed" if summary.errors else "Passed"
@@ -581,14 +684,16 @@ def render_markdown_summary(summary: ValidationSummary) -> str:
     ]
 
     if summary.errors:
-        lines.extend(f"- `{item['code']}`: {item['message']}" for item in summary.errors)
+        for item in summary.errors:
+            lines.extend(_render_markdown_finding(item))
     else:
         lines.append("- None")
 
     lines.append("")
     lines.append("### Warnings")
     if summary.warnings:
-        lines.extend(f"- `{item['code']}`: {item['message']}" for item in summary.warnings)
+        for item in summary.warnings:
+            lines.extend(_render_markdown_finding(item))
     else:
         lines.append("- None")
 
@@ -629,11 +734,22 @@ def validate_release(
 ) -> ValidationSummary:
     """Validate a release candidate and optionally write summary reports."""
     source_health = _load_json(source_health_path, "source-health report")
-    pipeline_stats = _load_json(pipeline_stats_path, "pipeline-stats report")
+    pipeline_stats, pipeline_stats_load_errors = _load_pipeline_stats(pipeline_stats_path)
     canaries = _load_json(canaries_path, "canary config")
 
-    errors = _validate_report_schema_versions(source_health, pipeline_stats, canaries)
+    errors = _validate_report_schema_versions(
+        source_health,
+        pipeline_stats,
+        canaries,
+        validate_pipeline_stats=not pipeline_stats_load_errors,
+    )
+    errors.extend(pipeline_stats_load_errors)
     warnings: list[Finding] = []
+    pipeline_count, pipeline_count_errors = _extract_pipeline_output_count(
+        pipeline_stats,
+        pipeline_stats_path,
+    )
+    errors.extend(pipeline_count_errors)
 
     source_errors, source_warnings, source_details = validate_source_health(
         source_health,
@@ -646,6 +762,18 @@ def validate_release(
     errors.extend(output_scan.errors)
 
     current_count = output_scan.line_count
+    if pipeline_count is not None and pipeline_count != current_count:
+        errors.append(_finding(
+            "pipeline_output_count_mismatch",
+            "Pipeline reported output count does not match scanned release artifact",
+            pipeline_reported_output_rules=pipeline_count,
+            scanned_output_rules=current_count,
+            absolute_delta=abs(pipeline_count - current_count),
+            pipeline_stats_path=str(pipeline_stats_path),
+            schema_version=pipeline_stats.get("schema_version"),
+            field="statistics.lines_output",
+        ))
+
     if current_count < thresholds.minimum_output_rules:
         errors.append(_finding(
             "output_below_minimum_count",
@@ -680,20 +808,16 @@ def validate_release(
             "Previous release output is unavailable; delta comparison skipped",
         ))
 
-    stats = pipeline_stats.get("statistics", {})
-    pipeline_count = 0
-    if isinstance(stats, dict):
-        pipeline_count = int(stats.get("lines_output", 0))
+    counts = {"current_output_rules": current_count}
+    if pipeline_count is not None:
+        counts["pipeline_reported_output_rules"] = pipeline_count
 
     summary = ValidationSummary(
         errors=errors,
         warnings=warnings,
         generated_at=_utc_now(),
         thresholds=_thresholds_to_dict(thresholds),
-        counts={
-            "current_output_rules": current_count,
-            "pipeline_reported_output_rules": pipeline_count,
-        },
+        counts=counts,
         source_health=source_details,
         syntax=output_scan.syntax,
         canaries=canary_details,
