@@ -70,7 +70,7 @@ def test_readme_public_reuse_paths() -> None:
         "--retries",
         "--health-report",
         "--json-stats",
-        "https://github.com/<owner>/<repo>/releases/latest/download/merged.txt",
+        "https://github.com/<owner>/<repo>/releases/download/latest/merged.txt",
     ]
     for snippet in required_snippets:
         assert snippet in text
