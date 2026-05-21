@@ -1,13 +1,24 @@
 # Blocklist Compiler - Ignore patterns
 
 # ============================================
-# Local development only (not in public repo)
+# Public source and review assets
 # ============================================
-tests/
-docs/
+# Keep scripts, config, workflows, constraints, README, public docs, tests,
+# and small fixtures trackable. Generated blocklist data and diagnostics are
+# ignored in the generated/runtime section below.
+
+# ============================================
+# ============================================
 run.py
 AGENTS.md
 
+# ============================================
+# Generated/runtime outputs
+# ============================================
+lists/
+.cache/
+reports/
+state.json
 
 # ============================================
 # Python
@@ -30,13 +41,6 @@ ENV/
 .idea/
 *.swp
 *.swo
-
-# ============================================
-# Runtime data (generated)
-# ============================================
-lists/
-.cache/
-state.json
 
 # ============================================
 # OS files
