@@ -76,7 +76,7 @@ runtime outputs, not source files to edit or commit.
 For a fork, replace `<owner>/<repo>` with your repository:
 
 ```text
-https://github.com/<owner>/<repo>/releases/latest/download/merged.txt
+https://github.com/<owner>/<repo>/releases/download/latest/merged.txt
 ```
 
 Diagnostics are written during workflow runs as `reports/source-health.json`,
