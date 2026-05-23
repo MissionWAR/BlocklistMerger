@@ -518,12 +518,14 @@ def classify_rule_effect(rule: str) -> RuleEffect:
         scope, reason, uncertain = _abp_scope_and_uncertainty(names)
         if syntax.kind == RULE_KIND_REGEX:
             scope = SCOPE_REGEX
-            reason = "regex_exception_preserved_no_structural_pruning_proof"
+            reason = "regex_exception_preserved_dns_rule_no_structural_pruning_proof"
             uncertain = True
         elif syntax.kind != RULE_KIND_ABP:
             scope = SCOPE_UNCERTAIN
             reason = "exception_scope_unproven"
             uncertain = True
+        elif uncertain:
+            reason = f"exception_scope_unproven;{reason}"
 
         return RuleEffect(
             syntax_kind=syntax.kind,
@@ -566,7 +568,7 @@ def classify_rule_effect(rule: str) -> RuleEffect:
             syntax_kind=syntax.kind,
             effect=EFFECT_BLOCK,
             scope=SCOPE_REGEX,
-            reason="regex_preserved_no_structural_pruning_proof",
+            reason="regex_preserved_dns_rule_no_structural_pruning_proof",
             docs_source=DOCS_AGH_DNS_SYNTAX,
             uncertain=True,
         )
