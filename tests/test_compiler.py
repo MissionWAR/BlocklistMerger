@@ -11,6 +11,7 @@ import tempfile
 import pytest
 
 from scripts.compiler import (
+    CompileStats,
     compile_rules,
     extract_abp_info,
     extract_hosts_info,
@@ -276,18 +277,18 @@ class TestCompilation:
         assert "||sub.example.com^" in rules
 
     def test_badfilter_parent_not_pruning(self):
-        """$badfilter rules should NOT prune children.
+        """$badfilter directives are diagnostics only and should not prune children.
 
-        $badfilter disables other rules, it doesn't block anything!
+        $badfilter disables other rules, it doesn't block anything.
         """
         lines = [
             "||example.com^$badfilter",
             "||sub.example.com^",
         ]
         rules, stats = self._compile(lines)
-        # Both should be kept
-        assert any("badfilter" in r for r in rules)
+        assert "||example.com^$badfilter" not in rules
         assert "||sub.example.com^" in rules
+        assert stats.rule_effect_disable == 1
 
     def test_duplicate_removal(self):
         """Duplicate rules should be removed."""
@@ -326,6 +327,7 @@ class TestCompilation:
         rules, stats = self._compile(["/example.*/"])
         assert "/example.*/" in rules
         assert stats.other_kept == 1
+        assert stats.regex_preserved_no_pruning == 1
 
     def test_other_rules_written_deterministically(self):
         """Other-rule output should not depend on set iteration or input order."""
@@ -387,6 +389,93 @@ class TestCompilation:
         assert stats.exception_rule_keys == 1
         assert stats.duplicate_index_size == 6
         assert stats.other_rule_count == 2
+
+
+class TestCompilerSemanticDiagnostics:
+    """Compiler-level RuleEffect integration diagnostics."""
+
+    def _compile(self, lines):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(lines, output)
+            with open(output) as f:
+                return [line.strip() for line in f if line.strip()], stats
+
+    def test_stats_expose_semantic_counter_fields(self):
+        """CompileStats exposes the Phase 7 inspect-only semantic counters."""
+        stats = CompileStats()
+
+        assert stats.rule_effect_block == 0
+        assert stats.rule_effect_exception == 0
+        assert stats.rule_effect_rewrite == 0
+        assert stats.rule_effect_disable == 0
+        assert stats.rule_effect_ignored == 0
+        assert stats.rule_effect_unsupported == 0
+        assert stats.rule_effect_uncertain == 0
+        assert stats.compression_policy_broadened == 0
+        assert stats.regex_preserved_no_pruning == 0
+
+    def test_effect_counters_and_nonblocking_rows_are_diagnostics_only(self):
+        """Compiler classifies every non-empty row before deciding output behavior."""
+        lines = [
+            "||block.example.com^",
+            "@@||exception.example.com^",
+            "||rewrite.example.com^$dnsrewrite=1.2.3.4",
+            "||disable.example.com^$badfilter",
+            "||unsupported.example.com^$future=value",
+            "8.8.8.8 dns.google",
+            "/regex.*/",
+            "0.0.0.0 hosts-policy.example.com",
+            "plain-policy.example.com",
+        ]
+
+        rules, stats = self._compile(lines)
+
+        assert rules == [
+            "||block.example.com^",
+            "||hosts-policy.example.com^",
+            "||plain-policy.example.com^",
+            "/regex.*/",
+        ]
+        assert stats.rule_effect_block == 4
+        assert stats.rule_effect_exception == 1
+        assert stats.rule_effect_rewrite == 1
+        assert stats.rule_effect_disable == 1
+        assert stats.rule_effect_unsupported == 1
+        assert stats.rule_effect_ignored == 1
+        assert stats.rule_effect_uncertain == 2
+        assert stats.compression_policy_broadened == 2
+        assert stats.regex_preserved_no_pruning == 1
+        assert stats.formats_compressed == 2
+
+    def test_badfilter_and_unknown_modifiers_are_not_blocking_output(self):
+        """Disabling and unsupported rows are consumed for diagnostics only."""
+        lines = [
+            "||disable.example.com^$badfilter",
+            "||unsupported.example.com^$future=value",
+        ]
+
+        rules, stats = self._compile(lines)
+
+        assert rules == []
+        assert stats.rule_effect_disable == 1
+        assert stats.rule_effect_unsupported == 1
+        assert stats.rule_effect_uncertain == 1
+        assert stats.abp_kept == 0
+        assert stats.total_output == 0
+
+    def test_equal_scoped_exception_still_prunes_block_and_records_effects(self):
+        """Safe exception consumption keeps existing whitelist diagnostics."""
+        block_rule = "||covered.example.com^$client=10.0.0.1"
+        exception_rule = "@@||covered.example.com^$client=10.0.0.1"
+
+        rules, stats = self._compile([block_rule, exception_rule])
+
+        assert rules == []
+        assert stats.whitelist_conflict_pruned == 1
+        assert stats.rule_effect_block == 1
+        assert stats.rule_effect_exception == 1
+        assert stats.rule_effect_uncertain == 2
 
 
 class TestEdgeCases:
@@ -494,40 +583,43 @@ class TestModifierHandling:
     # $dnsrewrite tests
     # -------------------------------------------------------------------------
 
-    def test_dnsrewrite_never_pruned(self):
-        """$dnsrewrite rules should NEVER be pruned."""
+    def test_dnsrewrite_not_emitted_as_blocking_coverage(self):
+        """$dnsrewrite rows are rewrite diagnostics, not blocklist output."""
         lines = [
             "||example.com^",
             "||sub.example.com^$dnsrewrite=1.2.3.4",
         ]
-        rules, _ = self._compile(lines)
+        rules, stats = self._compile(lines)
         assert "||example.com^" in rules
-        assert "||sub.example.com^$dnsrewrite=1.2.3.4" in rules
+        assert "||sub.example.com^$dnsrewrite=1.2.3.4" not in rules
+        assert stats.rule_effect_rewrite == 1
 
-    def test_dnsrewrite_parent_never_pruned_standard_child(self):
-        """$dnsrewrite parent MUST NOT prune standard child, because it doesn't block!"""
+    def test_dnsrewrite_parent_does_not_remove_standard_child(self):
+        """A rewrite parent is not blocking coverage and cannot remove a child block."""
         lines = [
             "||example.com^$dnsrewrite=1.2.3.4",
             "||sub.example.com^",
         ]
-        rules, _ = self._compile(lines)
-        assert "||example.com^$dnsrewrite=1.2.3.4" in rules
+        rules, stats = self._compile(lines)
+        assert "||example.com^$dnsrewrite=1.2.3.4" not in rules
         # DNS rewrite is special behavior, so the blocking rule for sub.example.com must remain.
         assert "||sub.example.com^" in rules
+        assert stats.rule_effect_rewrite == 1
 
     # -------------------------------------------------------------------------
     # $badfilter tests
     # -------------------------------------------------------------------------
 
-    def test_badfilter_never_pruned(self):
-        """$badfilter rules should NEVER be pruned."""
+    def test_badfilter_not_emitted_as_blocking_coverage(self):
+        """$badfilter rows are disabling diagnostics, not blocklist output."""
         lines = [
             "||example.com^",
             "||sub.example.com^$badfilter",
         ]
-        rules, _ = self._compile(lines)
+        rules, stats = self._compile(lines)
         assert "||example.com^" in rules
-        assert "||sub.example.com^$badfilter" in rules
+        assert "||sub.example.com^$badfilter" not in rules
+        assert stats.rule_effect_disable == 1
 
     # -------------------------------------------------------------------------
     # $denyallow tests
@@ -659,15 +751,11 @@ class TestModifierHandling:
     @pytest.mark.parametrize(
         "child_modifier",
         [
-            "dnsrewrite=1.2.3.4",
             "denyallow=allowed.example",
-            "badfilter",
-            "future=value",
-            "client='unterminated",
         ],
     )
-    def test_broad_parent_keeps_special_unknown_and_uncertain_children(self, child_modifier):
-        """Special, unknown, and uncertain child modifiers must not be parent-pruned."""
+    def test_broad_parent_keeps_supported_child_with_unproven_coverage(self, child_modifier):
+        """Supported child modifiers with unproven coverage must not be parent-pruned."""
         child_rule = f"||sub.example.com^${child_modifier}"
 
         rules, stats = self._compile(["||example.com^", child_rule])
@@ -679,20 +767,35 @@ class TestModifierHandling:
     @pytest.mark.parametrize(
         "parent_modifier",
         [
-            "dnsrewrite=1.2.3.4",
             "denyallow=allowed.example",
-            "badfilter",
-            "future=value",
-            "client='unterminated",
         ],
     )
-    def test_special_unknown_and_uncertain_parents_keep_children(self, parent_modifier):
-        """Special, unknown, and uncertain parents cannot prove child coverage."""
+    def test_supported_parent_with_unproven_coverage_keeps_children(self, parent_modifier):
+        """Supported parents with unproven coverage cannot prove child coverage."""
         parent_rule = f"||example.com^${parent_modifier}"
 
         rules, stats = self._compile([parent_rule, "||sub.example.com^"])
 
         assert parent_rule in rules
+        assert "||sub.example.com^" in rules
+        assert stats.abp_subdomain_pruned == 0
+
+    @pytest.mark.parametrize(
+        "modifier",
+        [
+            "dnsrewrite=1.2.3.4",
+            "badfilter",
+            "future=value",
+            "client='unterminated",
+        ],
+    )
+    def test_nonblocking_or_unsupported_modifier_rows_are_skipped(self, modifier):
+        """Rewrite, disabling, unsupported, and uncertain rows are diagnostics only."""
+        parent_rule = f"||example.com^${modifier}"
+
+        rules, stats = self._compile([parent_rule, "||sub.example.com^"])
+
+        assert parent_rule not in rules
         assert "||sub.example.com^" in rules
         assert stats.abp_subdomain_pruned == 0
 
@@ -1055,7 +1158,6 @@ class TestDuplicateHandling:
             ("client=10.0.0.1", "client=192.168.1.5"),
             ("ctag=pc", "ctag=mobile"),
             ("dnstype=A", "dnstype=AAAA"),
-            ("dnsrewrite=1.2.3.4", "dnsrewrite=5.6.7.8"),
             ("denyallow=allowed.example", "denyallow=other.example"),
         ],
     )
@@ -1075,26 +1177,28 @@ class TestDuplicateHandling:
         assert stats.duplicate_pruned == 0
 
     def test_badfilter_not_duplicate_of_plain_block(self):
-        """badfilter changes behavior and cannot duplicate a normal block."""
+        """badfilter is a disabling directive, not a duplicate block variant."""
         lines = [
             "||example.com^",
             "||example.com^$badfilter",
         ]
         rules, stats = self._compile(lines)
         assert "||example.com^" in rules
-        assert "||example.com^$badfilter" in rules
+        assert "||example.com^$badfilter" not in rules
         assert stats.duplicate_pruned == 0
+        assert stats.rule_effect_disable == 1
 
-    def test_unknown_modifier_variants_are_kept(self):
-        """Uncertain modifiers keep raw differences instead of name-only dedupe."""
+    def test_unknown_modifier_variants_are_not_blocking_output(self):
+        """Unsupported modifier variants are counted but not emitted as coverage."""
         lines = [
             "||example.com^$future=value-one",
             "||example.com^$future=value-two",
         ]
         rules, stats = self._compile(lines)
-        assert "||example.com^$future=value-one" in rules
-        assert "||example.com^$future=value-two" in rules
+        assert rules == []
         assert stats.duplicate_pruned == 0
+        assert stats.rule_effect_unsupported == 2
+        assert stats.rule_effect_uncertain == 2
 
     def test_cross_format_same_domain(self):
         """Same domain in multiple formats - ABP wins."""
@@ -1419,15 +1523,17 @@ class TestTLDWildcardModifiers:
         assert "||*.autos^" in rules
         assert "||spam.autos^$important" in rules
 
-    def test_tld_wildcard_dnsrewrite_not_pruned(self):
-        """Child with $dnsrewrite should never be pruned by TLD wildcard."""
+    def test_tld_wildcard_dnsrewrite_child_not_emitted(self):
+        """Child with $dnsrewrite is rewrite diagnostics, not block output."""
         lines = [
             "||*.autos^",
             "||special.autos^$dnsrewrite=1.2.3.4",
         ]
         rules, stats = self._compile(lines)
         assert "||*.autos^" in rules
-        assert "||special.autos^$dnsrewrite=1.2.3.4" in rules
+        assert "||special.autos^$dnsrewrite=1.2.3.4" not in rules
+        assert stats.tld_wildcard_pruned == 0
+        assert stats.rule_effect_rewrite == 1
 
     @pytest.mark.parametrize(
         "modifier",
@@ -1452,9 +1558,6 @@ class TestTLDWildcardModifiers:
         "child_modifier",
         [
             "denyallow=allowed.example",
-            "badfilter",
-            "future=value",
-            "client='unterminated",
         ],
     )
     def test_tld_wildcard_keeps_special_unknown_and_uncertain_children(
@@ -1503,11 +1606,7 @@ class TestWildcardParentSemanticPruning:
     @pytest.mark.parametrize(
         "child_modifier",
         [
-            "dnsrewrite=1.2.3.4",
             "denyallow=allowed.example",
-            "badfilter",
-            "future=value",
-            "client='unterminated",
         ],
     )
     def test_wildcard_parent_keeps_special_unknown_and_uncertain_children(
