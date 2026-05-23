@@ -10,6 +10,15 @@ downstream code can keep rules instead of proving unsafe equivalence.
 
 from typing import Final, NamedTuple
 
+from scripts.rule_syntax import (
+    RULE_KIND_ABP,
+    RULE_KIND_HOSTS,
+    RULE_KIND_INVALID,
+    RULE_KIND_PLAIN_DOMAIN,
+    RULE_KIND_REGEX,
+    classify_rule_syntax,
+)
+
 # =============================================================================
 # MODIFIER CONSTANTS
 # =============================================================================
@@ -41,10 +50,74 @@ NO_COVERAGE_MODIFIERS: Final[frozenset[str]] = frozenset({
     "dnsrewrite",
 })
 
+SCOPED_MODIFIERS: Final[frozenset[str]] = frozenset({
+    "client",
+    "ctag",
+    "denyallow",
+    "dnstype",
+})
+
+PRIORITY_MODIFIERS: Final[frozenset[str]] = frozenset({
+    "important",
+})
+
+EFFECT_BLOCK: Final[str] = "block"
+EFFECT_EXCEPTION: Final[str] = "exception"
+EFFECT_REWRITE: Final[str] = "rewrite"
+EFFECT_DISABLE: Final[str] = "disable"
+EFFECT_IGNORED: Final[str] = "ignored"
+EFFECT_UNSUPPORTED: Final[str] = "unsupported"
+EFFECT_UNCERTAIN: Final[str] = "uncertain"
+
+SCOPE_APEX_AND_SUBDOMAINS: Final[str] = "apex_and_subdomains"
+SCOPE_EXACT_HOST: Final[str] = "exact_host"
+SCOPE_REGEX: Final[str] = "regex"
+SCOPE_SCOPED_APEX_AND_SUBDOMAINS: Final[str] = "scoped_apex_and_subdomains"
+SCOPE_NONE: Final[str] = "none"
+SCOPE_UNSUPPORTED_MODIFIER: Final[str] = "unsupported_modifier"
+SCOPE_UNCERTAIN: Final[str] = "uncertain"
+
+DOCS_AGH_DNS_SYNTAX: Final[str] = "adguard_dns_filtering_syntax"
+DOCS_AGH_HOSTS_BLOCKLISTS: Final[str] = "adguard_home_hosts_blocklists"
+DOCS_PROJECT_POLICY: Final[str] = "project_policy"
+
+BLOCKING_IPS: Final[frozenset[str]] = frozenset({
+    "0.0.0.0",
+    "127.0.0.1",
+    "::1",
+    "::0",
+    "::",
+    "0:0:0:0:0:0:0:0",
+    "0:0:0:0:0:0:0:1",
+})
+
+LOCAL_HOSTNAMES: Final[frozenset[str]] = frozenset({
+    "localhost",
+    "localhost.localdomain",
+    "local",
+    "broadcasthost",
+    "ip6-localhost",
+    "ip6-loopback",
+    "ip6-localnet",
+    "ip6-mcastprefix",
+    "ip6-allnodes",
+    "ip6-allrouters",
+    "ip6-allhosts",
+})
+
 __all__ = [
+    "EFFECT_BLOCK",
+    "EFFECT_DISABLE",
+    "EFFECT_EXCEPTION",
+    "EFFECT_IGNORED",
+    "EFFECT_REWRITE",
+    "EFFECT_UNCERTAIN",
+    "EFFECT_UNSUPPORTED",
     "ModifierValue",
     "ParsedModifier",
+    "RuleEffect",
     "canonical_modifier_signature",
+    "classify_rule_effect",
     "modifier_names",
     "modifier_scope_covers",
     "parse_modifier_text",
@@ -89,6 +162,27 @@ class ParsedModifier(NamedTuple):
     raw_value: str | None
     values: tuple[ModifierValue, ...]
     negated: bool
+    uncertain: bool
+
+
+class RuleEffect(NamedTuple):
+    """
+    Classification-only rule effect diagnostics.
+
+    Attributes:
+        syntax_kind: Coarse syntax kind from `classify_rule_syntax()`.
+        effect: Behavioral effect label. This is not an effective-rule resolver.
+        scope: Documented or policy-visible scope label for the raw rule.
+        reason: Short machine-readable explanation for diagnostics.
+        docs_source: Source key backing the classification.
+        uncertain: True when the row must not prove pruning coverage.
+    """
+
+    syntax_kind: str
+    effect: str
+    scope: str
+    reason: str
+    docs_source: str
     uncertain: bool
 
 
@@ -229,6 +323,70 @@ def _modifier_signature(modifier: ParsedModifier) -> tuple[object, ...]:
     )
 
 
+def _docs_source(*sources: str) -> str:
+    """Return a stable docs-source string for one or more evidence sources."""
+    return ";".join(sources)
+
+
+def _has_unsupported_modifier(modifiers: tuple[ParsedModifier, ...]) -> bool:
+    """Return True when any modifier chunk cannot be treated as AGH DNS coverage."""
+    return any(modifier.uncertain or modifier.name not in KNOWN_MODIFIERS for modifier in modifiers)
+
+
+def _modifier_reason(names: frozenset[str]) -> str | None:
+    """Return a reason fragment for known scoped or priority modifiers."""
+    scoped = names & SCOPED_MODIFIERS
+    if scoped:
+        return f"known_scoped_modifier:{','.join(sorted(scoped))};no_global_coverage_proof"
+
+    priority = names & PRIORITY_MODIFIERS
+    if priority:
+        return "known_priority_modifier:important;no_structural_pruning_proof"
+
+    return None
+
+
+def _abp_scope_and_uncertainty(names: frozenset[str]) -> tuple[str, str, bool]:
+    """Return scope, reason suffix, and uncertainty for known ABP modifiers."""
+    reason = _modifier_reason(names)
+    if reason is None:
+        return SCOPE_APEX_AND_SUBDOMAINS, "abp_basic_apex_and_subdomains", False
+    if names & SCOPED_MODIFIERS:
+        return SCOPE_SCOPED_APEX_AND_SUBDOMAINS, reason, True
+    return SCOPE_APEX_AND_SUBDOMAINS, reason, True
+
+
+def _is_blocking_ip(ip: str) -> bool:
+    """Return True when a hosts-rule IP is a local blocking address."""
+    return ip in BLOCKING_IPS or ip.startswith("0.") or ip.startswith("127.")
+
+
+def _hosts_domains(pattern: str) -> tuple[str | None, tuple[str, ...]]:
+    """Extract a hosts-rule IP and non-local domains for classification."""
+    parts = pattern.split()
+    if len(parts) < 2:
+        return None, ()
+
+    ip = parts[0]
+    if not _is_blocking_ip(ip):
+        return ip, ()
+
+    domains: list[str] = []
+    for part in parts[1:]:
+        if part.startswith("#"):
+            break
+        domain = part.lower().strip().rstrip(".")
+        if domain and domain not in LOCAL_HOSTNAMES:
+            domains.append(domain)
+
+    return ip, tuple(domains)
+
+
+def _is_local_hostname(value: str) -> bool:
+    """Return True when a plain-domain or hosts token is a local hostname."""
+    return value.lower().strip().rstrip(".") in LOCAL_HOSTNAMES
+
+
 # =============================================================================
 # PUBLIC API
 # =============================================================================
@@ -298,6 +456,170 @@ def canonical_modifier_signature(modifiers: tuple[ParsedModifier, ...]) -> tuple
     collapse unrelated behavior.
     """
     return tuple(sorted(_modifier_signature(modifier) for modifier in modifiers))
+
+
+def classify_rule_effect(rule: str) -> RuleEffect:
+    """
+    Classify a raw rule's DNS effect before compression or pruning.
+
+    Args:
+        rule: Raw cleaned rule text.
+
+    Returns:
+        A `RuleEffect` diagnostic record. The result explains syntax/effect
+        semantics only; it does not resolve `badfilter`, delete exceptions, or
+        prove structural pruning coverage.
+    """
+    syntax = classify_rule_syntax(rule)
+    modifiers = parse_modifier_text(syntax.modifier_text)
+    names = modifier_names(modifiers)
+
+    if syntax.is_invalid:
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_IGNORED,
+            scope=SCOPE_NONE,
+            reason="invalid_syntax",
+            docs_source=DOCS_AGH_DNS_SYNTAX,
+            uncertain=False,
+        )
+
+    if syntax.has_url_path:
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_UNSUPPORTED,
+            scope=SCOPE_NONE,
+            reason="url_path_not_dns_rule",
+            docs_source=DOCS_AGH_DNS_SYNTAX,
+            uncertain=True,
+        )
+
+    if _has_unsupported_modifier(modifiers):
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_UNSUPPORTED,
+            scope=SCOPE_UNSUPPORTED_MODIFIER,
+            reason="unsupported_or_uncertain_modifier",
+            docs_source=DOCS_AGH_DNS_SYNTAX,
+            uncertain=True,
+        )
+
+    if "badfilter" in names:
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_DISABLE,
+            scope=SCOPE_APEX_AND_SUBDOMAINS,
+            reason="badfilter_disables_matching_basic_rules",
+            docs_source=DOCS_AGH_DNS_SYNTAX,
+            uncertain=False,
+        )
+
+    if syntax.is_exception:
+        scope, reason, uncertain = _abp_scope_and_uncertainty(names)
+        if syntax.kind == RULE_KIND_REGEX:
+            scope = SCOPE_REGEX
+            reason = "regex_exception_preserved_no_structural_pruning_proof"
+            uncertain = True
+        elif syntax.kind != RULE_KIND_ABP:
+            scope = SCOPE_UNCERTAIN
+            reason = "exception_scope_unproven"
+            uncertain = True
+
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_EXCEPTION,
+            scope=scope,
+            reason=reason,
+            docs_source=DOCS_AGH_DNS_SYNTAX,
+            uncertain=uncertain,
+        )
+
+    if "dnsrewrite" in names:
+        scope, reason, uncertain = _abp_scope_and_uncertainty(names - {"dnsrewrite"})
+        if reason == "abp_basic_apex_and_subdomains":
+            reason = "dnsrewrite_custom_response"
+        else:
+            reason = f"dnsrewrite_custom_response;{reason}"
+
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_REWRITE,
+            scope=scope,
+            reason=reason,
+            docs_source=DOCS_AGH_DNS_SYNTAX,
+            uncertain=uncertain,
+        )
+
+    if syntax.kind == RULE_KIND_ABP:
+        scope, reason, uncertain = _abp_scope_and_uncertainty(names)
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_BLOCK,
+            scope=scope,
+            reason=reason,
+            docs_source=DOCS_AGH_DNS_SYNTAX,
+            uncertain=uncertain,
+        )
+
+    if syntax.kind == RULE_KIND_REGEX:
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_BLOCK,
+            scope=SCOPE_REGEX,
+            reason="regex_preserved_no_structural_pruning_proof",
+            docs_source=DOCS_AGH_DNS_SYNTAX,
+            uncertain=True,
+        )
+
+    if syntax.kind == RULE_KIND_HOSTS:
+        _ip, domains = _hosts_domains(syntax.pattern)
+        if not domains:
+            return RuleEffect(
+                syntax_kind=syntax.kind,
+                effect=EFFECT_IGNORED,
+                scope=SCOPE_NONE,
+                reason="hosts_rule_without_blocking_domain",
+                docs_source=DOCS_AGH_HOSTS_BLOCKLISTS,
+                uncertain=False,
+            )
+
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_BLOCK,
+            scope=SCOPE_EXACT_HOST,
+            reason="agh_exact_host_baseline;project_policy_promotes_to_abp",
+            docs_source=_docs_source(DOCS_AGH_HOSTS_BLOCKLISTS, DOCS_PROJECT_POLICY),
+            uncertain=False,
+        )
+
+    if syntax.kind == RULE_KIND_PLAIN_DOMAIN:
+        if _is_local_hostname(syntax.pattern):
+            return RuleEffect(
+                syntax_kind=syntax.kind,
+                effect=EFFECT_IGNORED,
+                scope=SCOPE_NONE,
+                reason="local_hostname_ignored",
+                docs_source=DOCS_AGH_HOSTS_BLOCKLISTS,
+                uncertain=False,
+            )
+
+        return RuleEffect(
+            syntax_kind=syntax.kind,
+            effect=EFFECT_BLOCK,
+            scope=SCOPE_EXACT_HOST,
+            reason="agh_exact_host_baseline;project_policy_promotes_to_abp",
+            docs_source=_docs_source(DOCS_AGH_HOSTS_BLOCKLISTS, DOCS_PROJECT_POLICY),
+            uncertain=False,
+        )
+
+    return RuleEffect(
+        syntax_kind=syntax.kind if syntax.kind != RULE_KIND_INVALID else RULE_KIND_INVALID,
+        effect=EFFECT_UNCERTAIN,
+        scope=SCOPE_UNCERTAIN,
+        reason="unclassified_dns_rule_syntax",
+        docs_source=DOCS_AGH_DNS_SYNTAX,
+        uncertain=True,
+    )
 
 
 def modifier_scope_covers(
