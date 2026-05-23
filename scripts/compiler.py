@@ -52,13 +52,22 @@ from typing import Final, NamedTuple
 import tldextract
 
 from scripts.rule_semantics import (
+    EFFECT_BLOCK,
+    EFFECT_DISABLE,
+    EFFECT_EXCEPTION,
+    EFFECT_IGNORED,
+    EFFECT_REWRITE,
+    EFFECT_UNCERTAIN,
+    EFFECT_UNSUPPORTED,
     ParsedModifier,
     canonical_modifier_signature,
+    classify_rule_effect,
     modifier_names,
     modifier_scope_covers,
     parse_modifier_text,
 )
 from scripts.rule_syntax import (
+    RULE_KIND_REGEX,
     classify_rule_syntax,
     split_pattern_and_modifiers,
 )
@@ -214,6 +223,15 @@ class CompileStats:
         exception_rule_keys: Number of exception domain keys tracked before pruning
         duplicate_index_size: Number of semantic duplicate keys tracked before pruning
         other_rule_count: Number of non-ABP rules tracked before output
+        rule_effect_block: Input rows classified as blocking effect
+        rule_effect_exception: Input rows classified as exception effect
+        rule_effect_rewrite: Input rows classified as rewrite effect
+        rule_effect_disable: Input rows classified as disabling effect
+        rule_effect_ignored: Input rows classified as ignored effect
+        rule_effect_unsupported: Input rows classified as unsupported effect
+        rule_effect_uncertain: Input rows carrying unproven semantics
+        compression_policy_broadened: Hosts/plain rows promoted under project policy
+        regex_preserved_no_pruning: Regex rows preserved outside structural pruning
 
     Example:
         >>> stats = CompileStats()
@@ -244,6 +262,17 @@ class CompileStats:
     exception_rule_keys: int = 0
     duplicate_index_size: int = 0
     other_rule_count: int = 0
+
+    # Rule-effect diagnostics
+    rule_effect_block: int = 0
+    rule_effect_exception: int = 0
+    rule_effect_rewrite: int = 0
+    rule_effect_disable: int = 0
+    rule_effect_ignored: int = 0
+    rule_effect_unsupported: int = 0
+    rule_effect_uncertain: int = 0
+    compression_policy_broadened: int = 0
+    regex_preserved_no_pruning: int = 0
 
 
 # =============================================================================
@@ -335,6 +364,42 @@ def _store_rule_variant(
     duplicate_index.add(duplicate_key)
     storage.setdefault(storage_key, []).append(record)
     return True
+
+
+def _record_rule_effect(stats: CompileStats, effect: str, uncertain: bool) -> None:
+    """Record exactly one effect bucket, plus uncertainty diagnostics when present."""
+    if effect == EFFECT_BLOCK:
+        stats.rule_effect_block += 1
+    elif effect == EFFECT_EXCEPTION:
+        stats.rule_effect_exception += 1
+    elif effect == EFFECT_REWRITE:
+        stats.rule_effect_rewrite += 1
+    elif effect == EFFECT_DISABLE:
+        stats.rule_effect_disable += 1
+    elif effect == EFFECT_IGNORED:
+        stats.rule_effect_ignored += 1
+    elif effect == EFFECT_UNSUPPORTED:
+        stats.rule_effect_unsupported += 1
+    elif effect == EFFECT_UNCERTAIN:
+        stats.rule_effect_uncertain += 1
+        return
+    else:
+        stats.rule_effect_uncertain += 1
+        return
+
+    if uncertain:
+        stats.rule_effect_uncertain += 1
+
+
+def _is_nonblocking_effect(effect: str) -> bool:
+    """Return True when a classified row must not enter blocking output indexes."""
+    return effect in {
+        EFFECT_REWRITE,
+        EFFECT_DISABLE,
+        EFFECT_IGNORED,
+        EFFECT_UNSUPPORTED,
+        EFFECT_UNCERTAIN,
+    }
 
 
 def extract_abp_info(rule: str) -> tuple[str | None, frozenset[str], bool, bool]:
@@ -607,9 +672,17 @@ def _parse_and_compress_lines(
         if not (line := line.strip()):
             continue
 
+        effect = classify_rule_effect(line)
+        _record_rule_effect(stats, effect.effect, effect.uncertain)
+
         syntax = classify_rule_syntax(line)
         if syntax.has_url_path or syntax.is_invalid:
             stats.malformed_discarded += 1
+            continue
+
+        if _is_nonblocking_effect(effect.effect):
+            if effect.reason == "local_hostname_ignored":
+                stats.local_hostname_pruned += 1
             continue
 
         # ABP-style rules
@@ -667,6 +740,7 @@ def _parse_and_compress_lines(
                     stats,
                 ):
                     stats.formats_compressed += 1
+                    stats.compression_policy_broadened += 1
             continue
 
         # Plain domain rules
@@ -683,6 +757,7 @@ def _parse_and_compress_lines(
                     stats,
                 ):
                     stats.formats_compressed += 1
+                    stats.compression_policy_broadened += 1
             else:
                 stats.local_hostname_pruned += 1
             continue
@@ -691,6 +766,8 @@ def _parse_and_compress_lines(
         if line.startswith("/") or "|" in line or "*" in line:
             if line not in other_rules:
                 other_rules.add(line)
+                if effect.syntax_kind == RULE_KIND_REGEX:
+                    stats.regex_preserved_no_pruning += 1
             else:
                 stats.duplicate_pruned += 1
             continue
