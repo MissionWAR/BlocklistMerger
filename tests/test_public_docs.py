@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
+AGH_SEMANTICS = ROOT / "docs" / "AGH_SEMANTICS.md"
 SCOPE_DOC = ROOT / "docs" / "SCOPE.md"
 WORKFLOW = ROOT / ".github" / "workflows" / "update.yml"
 
@@ -126,3 +127,27 @@ def test_scope_doc_defers_v2_config_platform() -> None:
     ]
     for item in deferred_items:
         assert item in scope
+
+
+def test_agh_semantics_matrix_is_publicly_discoverable() -> None:
+    """README should link the AGH semantics baseline and preserve required vocabulary."""
+    readme = _read_text(README)
+
+    assert AGH_SEMANTICS.exists()
+    assert "docs/AGH_SEMANTICS.md" in readme
+    semantics = _read_text(AGH_SEMANTICS)
+
+    required_vocabulary = [
+        "badfilter",
+        "denyallow",
+        "dnsrewrite",
+        "dnstype",
+        "client",
+        "ctag",
+        "coverage-broadening compression",
+        "unsupported",
+        "uncertain",
+        "regex",
+    ]
+    for term in required_vocabulary:
+        assert term in semantics

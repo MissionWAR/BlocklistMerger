@@ -37,6 +37,8 @@ https://github.com/MissionWAR/BlocklistMerger/releases/download/latest/merged.tx
 This repository publishes one AdGuard Home-compatible `merged.txt` release asset from the
 URLs in `config/sources.txt`. Broader configuration-platform ideas are deferred; see
 [`docs/SCOPE.md`](docs/SCOPE.md).
+The AdGuard Home DNS semantics baseline is documented in
+[`docs/AGH_SEMANTICS.md`](docs/AGH_SEMANTICS.md).
 
 ---
 
