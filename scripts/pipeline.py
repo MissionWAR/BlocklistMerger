@@ -43,6 +43,12 @@ from scripts.cleaner import (
     clean_line,
 )
 from scripts.compiler import CompileStats, compile_rules
+from scripts.pruning_proof import (
+    DEFAULT_SAMPLE_CAP,
+    ProofLedger,
+    render_capped_report,
+    write_report_json,
+)
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -416,7 +422,13 @@ def _semantics_diagnostics(stats: PipelineStats) -> SemanticsDiagnostics:
 # PIPELINE FUNCTIONS
 # =============================================================================
 
-def process_files(input_dir: str, output_file: str) -> PipelineStats:
+def process_files(
+    input_dir: str,
+    output_file: str,
+    *,
+    coverage_proof_report: str | Path | None = None,
+    coverage_proof_sample_cap: int = DEFAULT_SAMPLE_CAP,
+) -> PipelineStats:
     """
     Run the full pipeline on input directory.
 
@@ -429,6 +441,8 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
     Args:
         input_dir: Directory containing raw blocklist files
         output_file: Path to output merged list
+        coverage_proof_report: Optional explicit path for a capped proof report
+        coverage_proof_sample_cap: Maximum samples per proof report bucket
 
     Returns:
         PipelineStats with detailed metrics from all stages
@@ -440,15 +454,27 @@ def process_files(input_dir: str, output_file: str) -> PipelineStats:
         >>> stats = process_files("lists/_raw", "lists/merged.txt")
         >>> print(f"Reduced {stats['lines_raw']:,} to {stats['lines_output']:,}")
     """
-    return process_files_with_profile(input_dir, output_file).stats
+    return process_files_with_profile(
+        input_dir,
+        output_file,
+        coverage_proof_report=coverage_proof_report,
+        coverage_proof_sample_cap=coverage_proof_sample_cap,
+    ).stats
 
 
-def process_files_with_profile(input_dir: str, output_file: str) -> PipelineRunResult:
+def process_files_with_profile(
+    input_dir: str,
+    output_file: str,
+    *,
+    coverage_proof_report: str | Path | None = None,
+    coverage_proof_sample_cap: int = DEFAULT_SAMPLE_CAP,
+) -> PipelineRunResult:
     """
     Run the full pipeline and return stats plus inspect-only runtime profile data.
 
     This keeps `process_files()` compatible for existing callers while the CLI can
-    attach runtime-size observations to the versioned JSON report.
+    attach runtime-size observations to the versioned JSON report. Coverage proof
+    reports are manual-only and written only when an explicit path is provided.
     """
     input_path = Path(input_dir)
 
@@ -456,6 +482,7 @@ def process_files_with_profile(input_dir: str, output_file: str) -> PipelineRunR
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
     stats = _new_pipeline_stats()
+    proof_ledger = ProofLedger() if coverage_proof_report is not None else None
 
     # =========================================================================
     # STAGE 1 & 2: Read, clean, compile, and deduplicate
@@ -489,7 +516,14 @@ def process_files_with_profile(input_dir: str, output_file: str) -> PipelineRunR
                         result.spool_path.unlink(missing_ok=True)
 
             compile_start = time.time()
-            compile_stats = compile_rules(_get_cleaned_lines(), output_file)
+            if proof_ledger is None:
+                compile_stats = compile_rules(_get_cleaned_lines(), output_file)
+            else:
+                compile_stats = compile_rules(
+                    _get_cleaned_lines(),
+                    output_file,
+                    proof_ledger=proof_ledger,
+                )
             compile_seconds = time.time() - compile_start
 
         memory = _memory_profile()
@@ -540,6 +574,12 @@ def process_files_with_profile(input_dir: str, output_file: str) -> PipelineRunR
         "compiler_cardinalities": _compiler_cardinalities(compile_stats),
         "memory": memory,
     }
+
+    if coverage_proof_report is not None and proof_ledger is not None:
+        write_report_json(
+            coverage_proof_report,
+            render_capped_report(proof_ledger, sample_cap=coverage_proof_sample_cap),
+        )
 
     return PipelineRunResult(stats, runtime_profile)
 
