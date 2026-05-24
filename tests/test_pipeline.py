@@ -192,6 +192,49 @@ class TestProcessFiles:
         assert stats["lines_output"] == 1
         assert stats["malformed_discarded"] == 3
 
+    def test_compiler_semantic_diagnostics_project_to_pipeline_stats(
+        self,
+        make_input_dir,
+        monkeypatch,
+    ):
+        """Compiler-owned semantic diagnostics should surface in pipeline stats."""
+        input_dir, output_file = make_input_dir({
+            "list1.txt": "||keep.com^\n",
+        })
+
+        def fake_compile_rules(lines, output_file):
+            assert list(lines) == ["||keep.com^"]
+            with open(output_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write("||keep.com^\n")
+            return CompileStats(
+                total_output=1,
+                abp_kept=1,
+                rule_effect_block=2,
+                rule_effect_exception=3,
+                rule_effect_rewrite=4,
+                rule_effect_disable=5,
+                rule_effect_ignored=6,
+                rule_effect_unsupported=7,
+                rule_effect_uncertain=8,
+                compression_policy_broadened=9,
+                regex_preserved_no_pruning=10,
+            )
+
+        monkeypatch.setattr(pipeline_module, "compile_rules", fake_compile_rules)
+
+        stats = process_files(input_dir, output_file)
+
+        assert stats["lines_output"] == 1
+        assert stats["rule_effect_block"] == 2
+        assert stats["rule_effect_exception"] == 3
+        assert stats["rule_effect_rewrite"] == 4
+        assert stats["rule_effect_disable"] == 5
+        assert stats["rule_effect_ignored"] == 6
+        assert stats["rule_effect_unsupported"] == 7
+        assert stats["rule_effect_uncertain"] == 8
+        assert stats["compression_policy_broadened"] == 9
+        assert stats["regex_preserved_no_pruning"] == 10
+
     def test_clean_worker_spools_lines_without_returning_list_payload(self, tmp_path: Path):
         """Worker results should return bounded spool metadata, not cleaned line lists."""
         input_file = tmp_path / "input.txt"
@@ -388,6 +431,15 @@ class TestProcessFiles:
             "malformed_discarded": 0,
             "abp_kept": 1,
             "other_kept": 0,
+            "rule_effect_block": 1,
+            "rule_effect_exception": 2,
+            "rule_effect_rewrite": 3,
+            "rule_effect_disable": 4,
+            "rule_effect_ignored": 5,
+            "rule_effect_unsupported": 6,
+            "rule_effect_uncertain": 7,
+            "compression_policy_broadened": 8,
+            "regex_preserved_no_pruning": 9,
         }
 
         print_summary(stats)
@@ -395,6 +447,9 @@ class TestProcessFiles:
         output = capsys.readouterr().out
         assert "URL paths:" in output
         assert "Invalid rules:" in output
+        assert "Semantic diagnostics:" in output
+        assert "Rule effects:" in output
+        assert "Compression policy:" in output
 
 
 class TestSaveStatsJson:
@@ -424,6 +479,15 @@ class TestSaveStatsJson:
             "abp_kept": 400,
             "other_kept": 100,
             "malformed_discarded": 7,
+            "rule_effect_block": 11,
+            "rule_effect_exception": 12,
+            "rule_effect_rewrite": 13,
+            "rule_effect_disable": 14,
+            "rule_effect_ignored": 15,
+            "rule_effect_unsupported": 16,
+            "rule_effect_uncertain": 17,
+            "compression_policy_broadened": 18,
+            "regex_preserved_no_pruning": 19,
         }
         runtime_profile = {
             "worker_count": 4,
@@ -453,7 +517,7 @@ class TestSaveStatsJson:
         with open(json_path) as f:
             data = json.load(f)
 
-        assert data["schema_version"] == 2
+        assert data["schema_version"] == 3
         assert data["version"] == "1.5.0"
         assert data["timestamp"].endswith("Z")
         assert data["execution_time_seconds"] == 5.5
@@ -470,6 +534,25 @@ class TestSaveStatsJson:
         assert data["statistics"]["other_kept"] == 100
         assert data["statistics"]["formats_compressed"] == 100
         assert data["statistics"]["malformed_discarded"] == 7
+        assert data["statistics"]["rule_effect_block"] == 11
+        assert data["statistics"]["rule_effect_uncertain"] == 17
+        assert data["statistics"]["compression_policy_broadened"] == 18
+        assert data["statistics"]["regex_preserved_no_pruning"] == 19
+        assert data["semantics"] == {
+            "rule_effect_counts": {
+                "block": 11,
+                "exception": 12,
+                "rewrite": 13,
+                "disable": 14,
+                "ignored": 15,
+                "unsupported": 16,
+                "uncertain": 17,
+            },
+            "compression_policy": {
+                "hosts_plain_promoted_to_abp": 18,
+                "regex_preserved_no_pruning": 19,
+            },
+        }
         assert data["runtime_profile"] == runtime_profile
         assert not os.path.exists(os.path.join(tmp_dir, "stats.tmp"))
 
