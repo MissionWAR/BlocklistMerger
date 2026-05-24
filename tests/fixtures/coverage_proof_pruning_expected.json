@@ -1,0 +1,607 @@
+{
+  "records": [
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_home_hosts_blocklists;project_policy",
+        "domain": "hosts-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "||hosts-proof.example.com^",
+        "priority": "normal",
+        "raw_rule": "0.0.0.0 hosts-proof.example.com",
+        "rule_kind": "abp",
+        "scope": "exact_host",
+        "source_kind": "hosts"
+      },
+      "covering": null,
+      "decision_id": "cross_format_broadened:000006",
+      "decision_type": "cross_format_broadened",
+      "fingerprint": "73d8e8a84c57b3bf7aad00a75b66e7f046c116abb8bdc001a52e5d5f1aa8a0ad",
+      "outcome": "changed",
+      "project_policy_delta": "preserved",
+      "proof_status": "proven",
+      "reason": "cross_format_broadened",
+      "sample": {
+        "input_scope": "exact_host",
+        "output_scope": "apex_and_subdomains",
+        "policy": "project_policy_promotes_to_abp"
+      },
+      "strict_agh_delta": "gained"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_home_hosts_blocklists;project_policy",
+        "domain": "plain-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "||plain-proof.example.com^",
+        "priority": "normal",
+        "raw_rule": "plain-proof.example.com",
+        "rule_kind": "abp",
+        "scope": "exact_host",
+        "source_kind": "plain_domain"
+      },
+      "covering": null,
+      "decision_id": "cross_format_broadened:000007",
+      "decision_type": "cross_format_broadened",
+      "fingerprint": "7e35f4fed4667a895aceb4004e3399a8d7fc509be79b09901da65e9e83256713",
+      "outcome": "changed",
+      "project_policy_delta": "preserved",
+      "proof_status": "proven",
+      "reason": "cross_format_broadened",
+      "sample": {
+        "input_scope": "exact_host",
+        "output_scope": "apex_and_subdomains",
+        "policy": "project_policy_promotes_to_abp"
+      },
+      "strict_agh_delta": "gained"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "duplicate-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "block",
+        "modifier_signature": [
+          [
+            "client",
+            false,
+            true,
+            [
+              [
+                "10.0.0.1",
+                false
+              ]
+            ],
+            false,
+            ""
+          ],
+          [
+            "dnstype",
+            false,
+            true,
+            [
+              [
+                "A",
+                false
+              ]
+            ],
+            false,
+            ""
+          ]
+        ],
+        "normalized_rule": "||duplicate-proof.example.com^$dnstype=A,client=10.0.0.1",
+        "priority": "normal",
+        "raw_rule": "||duplicate-proof.example.com^$dnstype=A,client=10.0.0.1",
+        "rule_kind": "abp",
+        "scope": "scoped_apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "covering": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "duplicate-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "block",
+        "modifier_signature": [
+          [
+            "client",
+            false,
+            true,
+            [
+              [
+                "10.0.0.1",
+                false
+              ]
+            ],
+            false,
+            ""
+          ],
+          [
+            "dnstype",
+            false,
+            true,
+            [
+              [
+                "A",
+                false
+              ]
+            ],
+            false,
+            ""
+          ]
+        ],
+        "normalized_rule": "||duplicate-proof.example.com^$client=10.0.0.1,dnstype=a",
+        "priority": "normal",
+        "raw_rule": "||duplicate-proof.example.com^$client=10.0.0.1,dnstype=a",
+        "rule_kind": "abp",
+        "scope": "scoped_apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "decision_id": "duplicate:000001",
+      "decision_type": "duplicate",
+      "fingerprint": "8f5cd02ff3c8151321810d115bcf007ee076d8b17bc109c62d870cdd514ce6fb",
+      "outcome": "pruned",
+      "project_policy_delta": "preserved",
+      "proof_status": "proven",
+      "reason": "duplicate_rule",
+      "sample": {
+        "duplicate_key": "('duplicate-proof.example.com', False, 'block', (('client', False, True, (('10.0.0.1', False),), False, ''), ('dnstype', False, True, (('A', False),), False, '')))"
+      },
+      "strict_agh_delta": "preserved"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "exception-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "block",
+        "modifier_signature": [
+          [
+            "client",
+            false,
+            true,
+            [
+              [
+                "10.0.0.1",
+                false
+              ]
+            ],
+            false,
+            ""
+          ]
+        ],
+        "normalized_rule": "||exception-proof.example.com^$client=10.0.0.1",
+        "priority": "normal",
+        "raw_rule": "||exception-proof.example.com^$client=10.0.0.1",
+        "rule_kind": "abp",
+        "scope": "scoped_apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "covering": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "exception-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "exception",
+        "modifier_signature": [
+          [
+            "client",
+            false,
+            true,
+            [
+              [
+                "10.0.0.1",
+                false
+              ]
+            ],
+            false,
+            ""
+          ]
+        ],
+        "normalized_rule": "@@||exception-proof.example.com^$client=10.0.0.1",
+        "priority": "normal",
+        "raw_rule": "@@||exception-proof.example.com^$client=10.0.0.1",
+        "rule_kind": "abp",
+        "scope": "scoped_apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "decision_id": "exception_covered:000011",
+      "decision_type": "exception_covered",
+      "fingerprint": "c9a8cbc600bd160f79751a20106d5f1922fc1448fcae5be186a46d7025dbce9c",
+      "outcome": "removed",
+      "project_policy_delta": "changed",
+      "proof_status": "proven",
+      "reason": "exception_covered",
+      "sample": {
+        "candidate_rule": "||exception-proof.example.com^$client=10.0.0.1",
+        "covering_rule": "@@||exception-proof.example.com^$client=10.0.0.1",
+        "modifier_scope_proven": true
+      },
+      "strict_agh_delta": "changed"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "uncertain-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "||uncertain-proof.example.com^",
+        "priority": "normal",
+        "raw_rule": "||uncertain-proof.example.com^",
+        "rule_kind": "abp",
+        "scope": "apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "covering": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "uncertain-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "exception",
+        "modifier_signature": [
+          [
+            "client",
+            false,
+            true,
+            [
+              [
+                "10.0.0.1",
+                false
+              ]
+            ],
+            false,
+            ""
+          ]
+        ],
+        "normalized_rule": "@@||uncertain-proof.example.com^$client=10.0.0.1",
+        "priority": "normal",
+        "raw_rule": "@@||uncertain-proof.example.com^$client=10.0.0.1",
+        "rule_kind": "abp",
+        "scope": "scoped_apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "decision_id": "kept_because_uncertain:000012",
+      "decision_type": "kept_because_uncertain",
+      "fingerprint": "1bdedabc46aa18b06e5b038a369aca0aa87e347391c4bad6819ee9d5a2be472e",
+      "outcome": "kept",
+      "project_policy_delta": "uncertain",
+      "proof_status": "uncertain",
+      "reason": "kept_because_uncertain",
+      "sample": {
+        "candidate_rule": "||uncertain-proof.example.com^",
+        "covering_rule": "@@||uncertain-proof.example.com^$client=10.0.0.1",
+        "reason_detail": "exception_domain_scope_matched_modifier_scope_unproven"
+      },
+      "strict_agh_delta": "uncertain"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "unsupported-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "unsupported",
+        "modifier_signature": [
+          [
+            "future",
+            false,
+            true,
+            [
+              [
+                "value",
+                false
+              ]
+            ],
+            true,
+            "future=value"
+          ]
+        ],
+        "normalized_rule": "||unsupported-proof.example.com^$future=value",
+        "priority": "normal",
+        "raw_rule": "||unsupported-proof.example.com^$future=value",
+        "rule_kind": "abp",
+        "scope": "unsupported_modifier",
+        "source_kind": "abp"
+      },
+      "covering": null,
+      "decision_id": "nonblocking:000002",
+      "decision_type": "nonblocking",
+      "fingerprint": "86c9bb91a947df87f561eaa9876f0d303da6a83258d3cdc52d2bd21b9669acd2",
+      "outcome": "removed",
+      "project_policy_delta": "not_applicable",
+      "proof_status": "not_applicable",
+      "reason": "unsupported_modifier_removed",
+      "sample": {
+        "docs_source": "adguard_dns_filtering_syntax",
+        "effect_reason": "unsupported_or_uncertain_modifier"
+      },
+      "strict_agh_delta": "not_applicable"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "disabled-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "disable",
+        "modifier_signature": [
+          [
+            "badfilter",
+            false,
+            false,
+            [],
+            false,
+            ""
+          ]
+        ],
+        "normalized_rule": "||disabled-proof.example.com^$badfilter",
+        "priority": "normal",
+        "raw_rule": "||disabled-proof.example.com^$badfilter",
+        "rule_kind": "abp",
+        "scope": "apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "covering": null,
+      "decision_id": "nonblocking:000003",
+      "decision_type": "nonblocking",
+      "fingerprint": "b0a4346534de6fe9558fba46ad6744287f7278a13a16da0392c417486697d40c",
+      "outcome": "removed",
+      "project_policy_delta": "not_applicable",
+      "proof_status": "not_applicable",
+      "reason": "badfilter_disabled",
+      "sample": {
+        "docs_source": "adguard_dns_filtering_syntax",
+        "effect_reason": "badfilter_disables_matching_basic_rules"
+      },
+      "strict_agh_delta": "not_applicable"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "rewrite-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "rewrite",
+        "modifier_signature": [
+          [
+            "dnsrewrite",
+            false,
+            true,
+            [
+              [
+                "1.2.3.4",
+                false
+              ]
+            ],
+            false,
+            ""
+          ]
+        ],
+        "normalized_rule": "||rewrite-proof.example.com^$dnsrewrite=1.2.3.4",
+        "priority": "normal",
+        "raw_rule": "||rewrite-proof.example.com^$dnsrewrite=1.2.3.4",
+        "rule_kind": "abp",
+        "scope": "apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "covering": null,
+      "decision_id": "nonblocking:000004",
+      "decision_type": "nonblocking",
+      "fingerprint": "069b7e0d8cd9f70879eae5743a9a61fbfeb380167cb1df06e65105110956b13b",
+      "outcome": "changed",
+      "project_policy_delta": "changed",
+      "proof_status": "not_applicable",
+      "reason": "dnsrewrite_changed",
+      "sample": {
+        "docs_source": "adguard_dns_filtering_syntax",
+        "effect_reason": "dnsrewrite_custom_response"
+      },
+      "strict_agh_delta": "changed"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "child.parent-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "||child.parent-proof.example.com^",
+        "priority": "normal",
+        "raw_rule": "||child.parent-proof.example.com^",
+        "rule_kind": "abp",
+        "scope": "apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "covering": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "parent-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "||parent-proof.example.com^",
+        "priority": "normal",
+        "raw_rule": "||parent-proof.example.com^",
+        "rule_kind": "abp",
+        "scope": "apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "decision_id": "parent_covered:000008",
+      "decision_type": "parent_covered",
+      "fingerprint": "15ecc7b2a3a01c255b9c7a70627f06982310e5248923f7a3c145805fe34ff85e",
+      "outcome": "pruned",
+      "project_policy_delta": "preserved",
+      "proof_status": "proven",
+      "reason": "parent_covered",
+      "sample": {
+        "candidate_rule": "||child.parent-proof.example.com^",
+        "covering_rule": "||parent-proof.example.com^",
+        "modifier_scope_proven": true
+      },
+      "strict_agh_delta": "preserved"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "",
+        "domain_shape": "regex",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "/^regex-proof\\.example\\.com$/",
+        "priority": "normal",
+        "raw_rule": "/^regex-proof\\.example\\.com$/",
+        "rule_kind": "regex",
+        "scope": "regex",
+        "source_kind": "regex"
+      },
+      "covering": null,
+      "decision_id": "regex_uncertain:000005",
+      "decision_type": "regex_uncertain",
+      "fingerprint": "ba6b012327ec1733966a57380e9bf12a93f4cdbb8ea437493488bce079552ea2",
+      "outcome": "kept",
+      "project_policy_delta": "uncertain",
+      "proof_status": "uncertain",
+      "reason": "regex_uncertain_kept",
+      "sample": {
+        "docs_source": "adguard_dns_filtering_syntax",
+        "effect_reason": "regex_preserved_dns_rule_no_structural_pruning_proof"
+      },
+      "strict_agh_delta": "uncertain"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "spam.autos",
+        "domain_shape": "registered_domain",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "||spam.autos^",
+        "priority": "normal",
+        "raw_rule": "||spam.autos^",
+        "rule_kind": "abp",
+        "scope": "apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "covering": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "autos",
+        "domain_shape": "tld_wildcard",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "||*.autos^",
+        "priority": "normal",
+        "raw_rule": "||*.autos^",
+        "rule_kind": "abp",
+        "scope": "apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "decision_id": "tld_wildcard_covered:000010",
+      "decision_type": "tld_wildcard_covered",
+      "fingerprint": "08a8f8bf559e6d701b9ac9e2fb87794a5ffa6b2d50e91bd9c38baa49e4ee677f",
+      "outcome": "pruned",
+      "project_policy_delta": "preserved",
+      "proof_status": "proven",
+      "reason": "tld_wildcard_covered",
+      "sample": {
+        "candidate_rule": "||spam.autos^",
+        "covering_rule": "||*.autos^",
+        "modifier_scope_proven": true
+      },
+      "strict_agh_delta": "preserved"
+    },
+    {
+      "candidate": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "child.wild-proof.example.com",
+        "domain_shape": "subdomain",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "||child.wild-proof.example.com^",
+        "priority": "normal",
+        "raw_rule": "||child.wild-proof.example.com^",
+        "rule_kind": "abp",
+        "scope": "apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "covering": {
+        "agh_behavior_basis": "adguard_dns_filtering_syntax",
+        "domain": "wild-proof.example.com",
+        "domain_shape": "wildcard",
+        "effect": "block",
+        "modifier_signature": [],
+        "normalized_rule": "||*.wild-proof.example.com^",
+        "priority": "normal",
+        "raw_rule": "||*.wild-proof.example.com^",
+        "rule_kind": "abp",
+        "scope": "apex_and_subdomains",
+        "source_kind": "abp"
+      },
+      "decision_id": "wildcard_covered:000009",
+      "decision_type": "wildcard_covered",
+      "fingerprint": "02222575bd4fa1d9335c69c38368129c5dbc4831f0e7e323743a9eebec080b6c",
+      "outcome": "pruned",
+      "project_policy_delta": "preserved",
+      "proof_status": "proven",
+      "reason": "wildcard_covered",
+      "sample": {
+        "candidate_rule": "||child.wild-proof.example.com^",
+        "covering_rule": "||*.wild-proof.example.com^",
+        "modifier_scope_proven": true
+      },
+      "strict_agh_delta": "preserved"
+    }
+  ],
+  "report_type": "full",
+  "schema_version": 1,
+  "summary": {
+    "by_decision_type": {
+      "cross_format_broadened": 2,
+      "duplicate": 1,
+      "exception_covered": 1,
+      "kept_because_uncertain": 1,
+      "nonblocking": 3,
+      "parent_covered": 1,
+      "regex_uncertain": 1,
+      "tld_wildcard_covered": 1,
+      "wildcard_covered": 1
+    },
+    "by_outcome": {
+      "changed": 3,
+      "kept": 2,
+      "pruned": 4,
+      "removed": 3
+    },
+    "by_project_policy_delta": {
+      "changed": 2,
+      "gained": 0,
+      "lost": 0,
+      "not_applicable": 2,
+      "preserved": 6,
+      "uncertain": 2
+    },
+    "by_proof_status": {
+      "not_applicable": 3,
+      "proven": 7,
+      "uncertain": 2
+    },
+    "by_reason": {
+      "badfilter_disabled": 1,
+      "cross_format_broadened": 2,
+      "dnsrewrite_changed": 1,
+      "duplicate_rule": 1,
+      "exception_covered": 1,
+      "kept_because_uncertain": 1,
+      "parent_covered": 1,
+      "regex_uncertain_kept": 1,
+      "tld_wildcard_covered": 1,
+      "unsupported_modifier_removed": 1,
+      "wildcard_covered": 1
+    },
+    "by_strict_agh_delta": {
+      "changed": 2,
+      "gained": 2,
+      "lost": 0,
+      "not_applicable": 2,
+      "preserved": 4,
+      "uncertain": 2
+    },
+    "total_records": 12
+  }
+}
