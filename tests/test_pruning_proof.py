@@ -23,6 +23,7 @@ from scripts.pruning_proof import (
     REASON_BADFILTER_DISABLED,
     REASON_DUPLICATE_RULE,
     REASON_KEPT_BECAUSE_UNCERTAIN,
+    CappedProofLedger,
     ProofLedger,
     RuleFacet,
     make_proof_record,
@@ -134,6 +135,40 @@ def test_proof_record_dict_contains_all_decision_facets(
         **payload_without_fingerprint,
         "fingerprint": _expected_fingerprint(payload_without_fingerprint),
     }
+
+
+def test_capped_ledger_keeps_exact_counts_without_materializing_unsampled_records() -> None:
+    ledger = CappedProofLedger(sample_cap=1)
+    materialized = 0
+
+    def candidate_factory() -> RuleFacet:
+        nonlocal materialized
+        materialized += 1
+        return _candidate_facet()
+
+    for index in range(3):
+        ledger.append_decision(
+            decision_id=f"duplicate:{index + 1:06d}",
+            decision_type="duplicate",
+            outcome=OUTCOME_PRUNED,
+            proof_status=PROOF_STATUS_PROVEN,
+            reason=REASON_DUPLICATE_RULE,
+            candidate_factory=candidate_factory,
+            covering_factory=_covering_facet,
+            strict_agh_delta=DELTA_PRESERVED,
+            project_policy_delta=DELTA_PRESERVED,
+            sample_factory=lambda: {"source": "fixture"},
+        )
+
+    report = render_capped_report(ledger)
+    bucket = report["sample_buckets"][0]
+
+    assert len(ledger) == 3
+    assert materialized == 1
+    assert report["summary"]["total_records"] == 3
+    assert report["summary"]["by_reason"] == {REASON_DUPLICATE_RULE: 3}
+    assert bucket["total_records"] == 3
+    assert bucket["sampled_records"] == 1
 
 
 def test_fingerprint_is_independent_of_sample_dictionary_order() -> None:

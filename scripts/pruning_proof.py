@@ -10,7 +10,7 @@ whether a rule should be pruned; it only models and fingerprints proof records.
 import hashlib
 import json
 from collections import Counter, defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Final, NamedTuple
 
@@ -89,6 +89,7 @@ __all__ = [
     "REASON_TLD_WILDCARD_COVERED",
     "REASON_UNSUPPORTED_MODIFIER_REMOVED",
     "REASON_WILDCARD_COVERED",
+    "CappedProofLedger",
     "ProofRecord",
     "ProofLedger",
     "PROOF_REPORT_SCHEMA_VERSION",
@@ -188,13 +189,186 @@ class ProofLedger:
         """Return ledger records in append order."""
         return tuple(self._records)
 
+    def __len__(self) -> int:
+        """Return the number of records without materializing a snapshot."""
+        return len(self._records)
+
     def append(self, record: ProofRecord) -> None:
         """Append one proof record."""
         self._records.append(record)
 
+    def append_decision(
+        self,
+        *,
+        decision_id: str,
+        decision_type: str,
+        outcome: str,
+        proof_status: str,
+        reason: str,
+        candidate_factory: Callable[[], RuleFacet],
+        covering_factory: Callable[[], RuleFacet | None],
+        strict_agh_delta: str,
+        project_policy_delta: str,
+        sample_factory: Callable[[], dict[str, object] | None] | None = None,
+    ) -> None:
+        """Build and append one full proof record."""
+        self.append(
+            make_proof_record(
+                decision_id=decision_id,
+                decision_type=decision_type,
+                outcome=outcome,
+                proof_status=proof_status,
+                reason=reason,
+                candidate=candidate_factory(),
+                covering=covering_factory(),
+                strict_agh_delta=strict_agh_delta,
+                project_policy_delta=project_policy_delta,
+                sample=sample_factory() if sample_factory is not None else None,
+            )
+        )
+
     def summary(self) -> dict[str, object]:
         """Return aggregate proof counters by all report dimensions."""
         return summarize_records(self._records)
+
+
+class CappedProofLedger(ProofLedger):
+    """
+    Aggregate production proof records while materializing only capped samples.
+
+    The production report needs exact counters and a bounded number of
+    fingerprinted samples per bucket. Avoiding full record materialization keeps
+    manual proof runs close to normal pipeline cost at large input sizes.
+    """
+
+    def __init__(self, sample_cap: int = DEFAULT_SAMPLE_CAP) -> None:
+        if sample_cap < 1:
+            msg = "sample_cap must be at least 1"
+            raise ValueError(msg)
+        self.sample_cap = sample_cap
+        self._total_records = 0
+        self._decision_type_counts: Counter[str] = Counter()
+        self._outcome_counts: Counter[str] = Counter()
+        self._proof_status_counts: Counter[str] = Counter()
+        self._reason_counts: Counter[str] = Counter()
+        self._strict_delta_counts: Counter[str] = Counter()
+        self._project_delta_counts: Counter[str] = Counter()
+        self._bucket_counts: Counter[tuple[str, str, str, str]] = Counter()
+        self._bucket_samples: dict[tuple[str, str, str, str], list[ProofRecord]] = defaultdict(list)
+
+    @property
+    def records(self) -> tuple[ProofRecord, ...]:
+        """Return only materialized sample records in deterministic order."""
+        return tuple(
+            record
+            for bucket in sorted(self._bucket_samples)
+            for record in _sorted_records(self._bucket_samples[bucket])
+        )
+
+    def __len__(self) -> int:
+        """Return the total number of aggregated records."""
+        return self._total_records
+
+    def _record_summary(
+        self,
+        *,
+        decision_type: str,
+        outcome: str,
+        proof_status: str,
+        reason: str,
+        strict_agh_delta: str,
+        project_policy_delta: str,
+    ) -> tuple[str, str, str, str]:
+        """Update aggregate counters and return the production sample bucket."""
+        bucket = (strict_agh_delta, project_policy_delta, reason, outcome)
+        self._total_records += 1
+        self._decision_type_counts[decision_type] += 1
+        self._outcome_counts[outcome] += 1
+        self._proof_status_counts[proof_status] += 1
+        self._reason_counts[reason] += 1
+        self._strict_delta_counts[strict_agh_delta] += 1
+        self._project_delta_counts[project_policy_delta] += 1
+        self._bucket_counts[bucket] += 1
+        return bucket
+
+    def append(self, record: ProofRecord) -> None:
+        """Aggregate an already materialized record, keeping only capped samples."""
+        bucket = self._record_summary(
+            decision_type=record.decision_type,
+            outcome=record.outcome,
+            proof_status=record.proof_status,
+            reason=record.reason,
+            strict_agh_delta=record.strict_agh_delta,
+            project_policy_delta=record.project_policy_delta,
+        )
+        if len(self._bucket_samples[bucket]) < self.sample_cap:
+            self._bucket_samples[bucket].append(record)
+
+    def append_decision(
+        self,
+        *,
+        decision_id: str,
+        decision_type: str,
+        outcome: str,
+        proof_status: str,
+        reason: str,
+        candidate_factory: Callable[[], RuleFacet],
+        covering_factory: Callable[[], RuleFacet | None],
+        strict_agh_delta: str,
+        project_policy_delta: str,
+        sample_factory: Callable[[], dict[str, object] | None] | None = None,
+    ) -> None:
+        """Aggregate one proof decision, building details only for capped samples."""
+        bucket = self._record_summary(
+            decision_type=decision_type,
+            outcome=outcome,
+            proof_status=proof_status,
+            reason=reason,
+            strict_agh_delta=strict_agh_delta,
+            project_policy_delta=project_policy_delta,
+        )
+        if len(self._bucket_samples[bucket]) >= self.sample_cap:
+            return
+
+        self._bucket_samples[bucket].append(
+            make_proof_record(
+                decision_id=decision_id,
+                decision_type=decision_type,
+                outcome=outcome,
+                proof_status=proof_status,
+                reason=reason,
+                candidate=candidate_factory(),
+                covering=covering_factory(),
+                strict_agh_delta=strict_agh_delta,
+                project_policy_delta=project_policy_delta,
+                sample=sample_factory() if sample_factory is not None else None,
+            )
+        )
+
+    def summary(self) -> dict[str, object]:
+        """Return exact aggregate proof counters by all report dimensions."""
+        return {
+            "total_records": self._total_records,
+            "by_decision_type": _sorted_count_dict(self._decision_type_counts),
+            "by_outcome": _sorted_count_dict(self._outcome_counts),
+            "by_proof_status": _sorted_count_dict(self._proof_status_counts),
+            "by_reason": _sorted_count_dict(self._reason_counts),
+            "by_strict_agh_delta": _delta_count_dict(self._strict_delta_counts),
+            "by_project_policy_delta": _delta_count_dict(self._project_delta_counts),
+        }
+
+    def sample_buckets(self) -> list[dict[str, object]]:
+        """Return capped production sample buckets."""
+        sample_buckets: list[dict[str, object]] = []
+        for bucket in sorted(self._bucket_counts):
+            sampled_records = _sorted_records(self._bucket_samples.get(bucket, ()))
+            sample_buckets.append({
+                "bucket": _bucket_dict(bucket),
+                "total_records": self._bucket_counts[bucket],
+                "sampled_records": len(sampled_records),
+                "records": [_capped_sample_record(record) for record in sampled_records],
+            })
+        return sample_buckets
 
 
 # =============================================================================
@@ -412,6 +586,15 @@ def render_capped_report(
         raise ValueError(msg)
 
     ledger = _as_ledger(ledger_or_records)
+    if isinstance(ledger, CappedProofLedger):
+        return {
+            "schema_version": PROOF_REPORT_SCHEMA_VERSION,
+            "report_type": "capped",
+            "sample_cap": ledger.sample_cap,
+            "summary": ledger.summary(),
+            "sample_buckets": ledger.sample_buckets(),
+        }
+
     grouped: dict[tuple[str, str, str, str], list[ProofRecord]] = defaultdict(list)
     for record in _sorted_records(ledger.records):
         grouped[_bucket_key(record)].append(record)

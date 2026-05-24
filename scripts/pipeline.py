@@ -45,7 +45,7 @@ from scripts.cleaner import (
 from scripts.compiler import CompileStats, compile_rules
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
-    ProofLedger,
+    CappedProofLedger,
     render_capped_report,
     write_report_json,
 )
@@ -482,7 +482,11 @@ def process_files_with_profile(
         raise FileNotFoundError(f"Input directory not found: {input_dir}")
 
     stats = _new_pipeline_stats()
-    proof_ledger = ProofLedger() if coverage_proof_report is not None else None
+    proof_ledger = (
+        CappedProofLedger(sample_cap=coverage_proof_sample_cap)
+        if coverage_proof_report is not None
+        else None
+    )
 
     # =========================================================================
     # STAGE 1 & 2: Read, clean, compile, and deduplicate
@@ -578,7 +582,7 @@ def process_files_with_profile(
     if coverage_proof_report is not None and proof_ledger is not None:
         write_report_json(
             coverage_proof_report,
-            render_capped_report(proof_ledger, sample_cap=coverage_proof_sample_cap),
+            render_capped_report(proof_ledger),
         )
 
     return PipelineRunResult(stats, runtime_profile)

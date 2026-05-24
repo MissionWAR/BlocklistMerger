@@ -42,7 +42,7 @@ Whitelist Handling:
 """
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -78,7 +78,6 @@ from scripts.pruning_proof import (
     REASON_WILDCARD_COVERED,
     ProofLedger,
     RuleFacet,
-    make_proof_record,
 )
 from scripts.rule_semantics import (
     EFFECT_BLOCK,
@@ -490,29 +489,27 @@ def _append_proof_record(
     outcome: str,
     proof_status: str,
     reason: str,
-    candidate: RuleFacet,
-    covering: RuleFacet | None,
+    candidate: Callable[[], RuleFacet],
+    covering: Callable[[], RuleFacet | None],
     strict_agh_delta: str,
     project_policy_delta: str,
-    sample: dict[str, object] | None = None,
+    sample: Callable[[], dict[str, object] | None] | None = None,
 ) -> None:
     """Append one compiler proof record when optional proof plumbing is enabled."""
     if proof_ledger is None:
         return
 
-    proof_ledger.append(
-        make_proof_record(
-            decision_id=f"{decision_type}:{len(proof_ledger.records) + 1:06d}",
-            decision_type=decision_type,
-            outcome=outcome,
-            proof_status=proof_status,
-            reason=reason,
-            candidate=candidate,
-            covering=covering,
-            strict_agh_delta=strict_agh_delta,
-            project_policy_delta=project_policy_delta,
-            sample=sample,
-        )
+    proof_ledger.append_decision(
+        decision_id=f"{decision_type}:{len(proof_ledger) + 1:06d}",
+        decision_type=decision_type,
+        outcome=outcome,
+        proof_status=proof_status,
+        reason=reason,
+        candidate_factory=candidate,
+        covering_factory=covering,
+        strict_agh_delta=strict_agh_delta,
+        project_policy_delta=project_policy_delta,
+        sample_factory=sample,
     )
 
 
@@ -551,11 +548,11 @@ def _record_nonblocking_proof(
         outcome=outcome,
         proof_status=PROOF_STATUS_NOT_APPLICABLE,
         reason=reason,
-        candidate=_facet_from_line(line, effect=effect, syntax=syntax),
-        covering=None,
+        candidate=lambda: _facet_from_line(line, effect=effect, syntax=syntax),
+        covering=lambda: None,
         strict_agh_delta=strict_delta,
         project_policy_delta=project_delta,
-        sample={"effect_reason": effect.reason, "docs_source": effect.docs_source},
+        sample=lambda: {"effect_reason": effect.reason, "docs_source": effect.docs_source},
     )
 
 
@@ -573,11 +570,11 @@ def _record_regex_uncertain_kept(
         outcome=OUTCOME_KEPT,
         proof_status=PROOF_STATUS_UNCERTAIN,
         reason=REASON_REGEX_UNCERTAIN_KEPT,
-        candidate=_facet_from_line(line, effect=effect, syntax=syntax),
-        covering=None,
+        candidate=lambda: _facet_from_line(line, effect=effect, syntax=syntax),
+        covering=lambda: None,
         strict_agh_delta=DELTA_UNCERTAIN,
         project_policy_delta=DELTA_UNCERTAIN,
-        sample={"effect_reason": effect.reason, "docs_source": effect.docs_source},
+        sample=lambda: {"effect_reason": effect.reason, "docs_source": effect.docs_source},
     )
 
 
@@ -597,7 +594,7 @@ def _record_cross_format_broadened(
         outcome=OUTCOME_CHANGED,
         proof_status=PROOF_STATUS_PROVEN,
         reason=REASON_CROSS_FORMAT_BROADENED,
-        candidate=_facet_from_line(
+        candidate=lambda: _facet_from_line(
             line,
             effect=effect,
             syntax=syntax,
@@ -605,10 +602,10 @@ def _record_cross_format_broadened(
             domain=domain,
             rule_kind=RULE_KIND_ABP,
         ),
-        covering=None,
+        covering=lambda: None,
         strict_agh_delta=DELTA_GAINED,
         project_policy_delta=DELTA_PRESERVED,
-        sample={
+        sample=lambda: {
             "input_scope": effect.scope,
             "output_scope": "apex_and_subdomains",
             "policy": "project_policy_promotes_to_abp",
@@ -656,11 +653,11 @@ def _store_rule_variant(
             outcome=OUTCOME_PRUNED,
             proof_status=PROOF_STATUS_PROVEN,
             reason=REASON_DUPLICATE_RULE,
-            candidate=_facet_from_record(record),
-            covering=_facet_from_record(duplicate_index[duplicate_key]),
+            candidate=lambda: _facet_from_record(record),
+            covering=lambda: _facet_from_record(duplicate_index[duplicate_key]),
             strict_agh_delta=DELTA_PRESERVED,
             project_policy_delta=DELTA_PRESERVED,
-            sample={"duplicate_key": repr(duplicate_key)},
+            sample=lambda: {"duplicate_key": repr(duplicate_key)},
         )
         return False
 
@@ -1294,11 +1291,11 @@ def _record_proven_pruning(
         outcome=outcome,
         proof_status=PROOF_STATUS_PROVEN,
         reason=reason,
-        candidate=_facet_from_record(candidate),
-        covering=_facet_from_record(covering),
+        candidate=lambda: _facet_from_record(candidate),
+        covering=lambda: _facet_from_record(covering),
         strict_agh_delta=strict_agh_delta,
         project_policy_delta=project_policy_delta,
-        sample={
+        sample=lambda: {
             "candidate_rule": candidate.rule,
             "covering_rule": covering.rule,
             "modifier_scope_proven": modifier_scope_covers(
@@ -1323,11 +1320,11 @@ def _record_uncertain_keep(
         outcome=OUTCOME_KEPT,
         proof_status=PROOF_STATUS_UNCERTAIN,
         reason=REASON_KEPT_BECAUSE_UNCERTAIN,
-        candidate=_facet_from_record(candidate),
-        covering=_facet_from_record(covering),
+        candidate=lambda: _facet_from_record(candidate),
+        covering=lambda: _facet_from_record(covering),
         strict_agh_delta=DELTA_UNCERTAIN,
         project_policy_delta=DELTA_UNCERTAIN,
-        sample={
+        sample=lambda: {
             "candidate_rule": candidate.rule,
             "covering_rule": covering.rule,
             "reason_detail": reason_detail,

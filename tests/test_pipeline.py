@@ -23,6 +23,7 @@ from scripts.pruning_proof import (
     OUTCOME_PRUNED,
     PROOF_STATUS_PROVEN,
     REASON_DUPLICATE_RULE,
+    CappedProofLedger,
     ProofLedger,
     RuleFacet,
     make_proof_record,
@@ -322,6 +323,7 @@ class TestProcessFiles:
 
         def fake_compile_rules(lines, output_file, *, proof_ledger=None):
             assert list(lines) == ["||keep.com^"]
+            assert isinstance(proof_ledger, CappedProofLedger)
             assert isinstance(proof_ledger, ProofLedger)
             for record in expected_records:
                 proof_ledger.append(record)

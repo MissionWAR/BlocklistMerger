@@ -587,6 +587,28 @@ class TestCompilerProofLedgerPlumbing:
         assert stats.formats_compressed == 2
         assert stats.compression_policy_broadened == 2
 
+    def test_proof_record_append_does_not_materialize_ledger_records(self):
+        """Proof appends should stay O(1) at production ledger sizes."""
+
+        class NoMaterializingRecordsLedger(ProofLedger):
+            @property
+            def records(self):
+                raise AssertionError("records snapshot should not be used while appending")
+
+        ledger = NoMaterializingRecordsLedger()
+
+        rules, stats = self._compile(
+            [
+                "||duplicate.example.com^",
+                "||duplicate.example.com^",
+            ],
+            proof_ledger=ledger,
+        )
+
+        assert rules == ["||duplicate.example.com^"]
+        assert stats.duplicate_pruned == 1
+        assert len(ledger) == 1
+
     def test_optional_ledger_records_nonblocking_diagnostics_and_regex_uncertainty(self):
         """Diagnostics-only rows are recorded as changed, uncertain, or not applicable."""
         ledger = ProofLedger()
