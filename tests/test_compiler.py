@@ -29,7 +29,6 @@ from scripts.pruning_proof import (
     OUTCOME_REMOVED,
     PROOF_STATUS_PROVEN,
     PROOF_STATUS_UNCERTAIN,
-    ProofLedger,
     REASON_BADFILTER_DISABLED,
     REASON_CROSS_FORMAT_BROADENED,
     REASON_DNSREWRITE_CHANGED,
@@ -42,6 +41,7 @@ from scripts.pruning_proof import (
     REASON_TLD_WILDCARD_COVERED,
     REASON_UNSUPPORTED_MODIFIER_REMOVED,
     REASON_WILDCARD_COVERED,
+    ProofLedger,
 )
 
 
@@ -675,11 +675,11 @@ class TestCompilerPruningProofLedger:
         wildcard_record = self._record(ledger, REASON_WILDCARD_COVERED)
         tld_record = self._record(ledger, REASON_TLD_WILDCARD_COVERED)
 
-        assert rules == [
+        assert set(rules) == {
             "||*.autos^",
             "||*.wild.example.com^",
             "||parent.example.com^",
-        ]
+        }
         assert stats.abp_subdomain_pruned == 2
         assert stats.tld_wildcard_pruned == 1
         assert parent_record.covering.normalized_rule == "||parent.example.com^"

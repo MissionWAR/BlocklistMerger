@@ -59,18 +59,25 @@ from scripts.pruning_proof import (
     DELTA_UNCERTAIN,
     OUTCOME_CHANGED,
     OUTCOME_KEPT,
+    OUTCOME_PRUNED,
     OUTCOME_REMOVED,
     PROOF_STATUS_NOT_APPLICABLE,
     PROOF_STATUS_PROVEN,
     PROOF_STATUS_UNCERTAIN,
-    ProofLedger,
-    RuleFacet,
     REASON_BADFILTER_DISABLED,
     REASON_CROSS_FORMAT_BROADENED,
     REASON_DNSREWRITE_CHANGED,
+    REASON_DUPLICATE_RULE,
+    REASON_EXCEPTION_COVERED,
     REASON_IGNORED_NONBLOCKING,
+    REASON_KEPT_BECAUSE_UNCERTAIN,
+    REASON_PARENT_COVERED,
     REASON_REGEX_UNCERTAIN_KEPT,
+    REASON_TLD_WILDCARD_COVERED,
     REASON_UNSUPPORTED_MODIFIER_REMOVED,
+    REASON_WILDCARD_COVERED,
+    ProofLedger,
+    RuleFacet,
     make_proof_record,
 )
 from scripts.rule_semantics import (
@@ -141,6 +148,7 @@ class AbpRuleRecord(NamedTuple):
 RuleEntry = AbpRuleRecord
 WildcardEntry = AbpRuleRecord
 RuleDuplicateKey = tuple[str, bool, str, tuple[object, ...]]
+RuleDuplicateIndex = dict[RuleDuplicateKey, RuleEntry]
 RuleStorage = dict[str, list[RuleEntry]]
 WildcardStorage = dict[str, list[WildcardEntry]]
 ExceptionRules = list[RuleEntry]
@@ -633,17 +641,30 @@ def _rule_storage_key(record: AbpRuleRecord) -> str:
 def _store_rule_variant(
     storage: RuleStorage | WildcardStorage,
     storage_key: str,
-    duplicate_index: set[RuleDuplicateKey],
+    duplicate_index: RuleDuplicateIndex,
     record: RuleEntry,
     stats: CompileStats,
+    proof_ledger: ProofLedger | None,
 ) -> bool:
     """Store a semantic rule variant, returning False when it was a duplicate."""
     duplicate_key = _duplicate_key(record)
     if duplicate_key in duplicate_index:
         stats.duplicate_pruned += 1
+        _append_proof_record(
+            proof_ledger,
+            decision_type="duplicate",
+            outcome=OUTCOME_PRUNED,
+            proof_status=PROOF_STATUS_PROVEN,
+            reason=REASON_DUPLICATE_RULE,
+            candidate=_facet_from_record(record),
+            covering=_facet_from_record(duplicate_index[duplicate_key]),
+            strict_agh_delta=DELTA_PRESERVED,
+            project_policy_delta=DELTA_PRESERVED,
+            sample={"duplicate_key": repr(duplicate_key)},
+        )
         return False
 
-    duplicate_index.add(duplicate_key)
+    duplicate_index[duplicate_key] = record
     storage.setdefault(storage_key, []).append(record)
     return True
 
@@ -945,7 +966,7 @@ def _parse_and_compress_lines(
     abp_wildcards: WildcardStorage,
     exceptions: ExceptionRules,
     other_rules: set[str],
-    duplicate_index: set[RuleDuplicateKey],
+    duplicate_index: RuleDuplicateIndex,
     proof_ledger: ProofLedger | None,
 ) -> None:
     """Phase 1: Parse all rules, convert formats to ABP, and categorize them."""
@@ -1003,7 +1024,14 @@ def _parse_and_compress_lines(
             if record.is_wildcard:
                 tld = get_tld(record.domain)
                 if tld and record.domain == tld:
-                    _store_rule_variant(abp_wildcards, tld, duplicate_index, record, stats)
+                    _store_rule_variant(
+                        abp_wildcards,
+                        tld,
+                        duplicate_index,
+                        record,
+                        stats,
+                        proof_ledger,
+                    )
                 else:
                     _store_rule_variant(
                         abp_rules,
@@ -1011,6 +1039,7 @@ def _parse_and_compress_lines(
                         duplicate_index,
                         record,
                         stats,
+                        proof_ledger,
                     )
             else:
                 _store_rule_variant(
@@ -1019,6 +1048,7 @@ def _parse_and_compress_lines(
                     duplicate_index,
                     record,
                     stats,
+                    proof_ledger,
                 )
             continue
 
@@ -1049,6 +1079,7 @@ def _parse_and_compress_lines(
                     duplicate_index,
                     record,
                     stats,
+                    proof_ledger,
                 ):
                     stats.formats_compressed += 1
                     stats.compression_policy_broadened += 1
@@ -1082,6 +1113,7 @@ def _parse_and_compress_lines(
                     duplicate_index,
                     record,
                     stats,
+                    proof_ledger,
                 ):
                     stats.formats_compressed += 1
                     stats.compression_policy_broadened += 1
@@ -1124,7 +1156,7 @@ def _record_compiler_cardinalities(
     abp_rules: RuleStorage,
     abp_wildcards: WildcardStorage,
     exceptions: ExceptionRules,
-    duplicate_index: set[RuleDuplicateKey],
+    duplicate_index: RuleDuplicateIndex,
     other_rules: set[str],
 ) -> None:
     """Record inspect-only compiler structure sizes after parsing."""
@@ -1213,6 +1245,22 @@ def _is_whitelisted(record: RuleEntry, exceptions: ExceptionRules) -> bool:
     return any(_exception_covers_block(exception, record) for exception in exceptions)
 
 
+def _find_covering_exception(record: RuleEntry, exceptions: ExceptionRules) -> RuleEntry | None:
+    """Return the first exception that proves removal for a block rule."""
+    for exception in exceptions:
+        if _exception_covers_block(exception, record):
+            return exception
+    return None
+
+
+def _find_domain_scope_exception(record: RuleEntry, exceptions: ExceptionRules) -> RuleEntry | None:
+    """Return the first exception with matching domain scope but unproven modifiers."""
+    for exception in exceptions:
+        if _exception_domain_scope_covers(exception, record):
+            return exception
+    return None
+
+
 def _any_parent_record_covers(child: RuleEntry, parents: list[RuleEntry]) -> bool:
     """Return True when any parent variant proves coverage for a child variant."""
     return any(
@@ -1221,12 +1269,79 @@ def _any_parent_record_covers(child: RuleEntry, parents: list[RuleEntry]) -> boo
     )
 
 
+def _find_covering_parent_record(child: RuleEntry, parents: list[RuleEntry]) -> RuleEntry | None:
+    """Return the first parent variant that proves coverage for a child variant."""
+    for parent in parents:
+        if modifier_scope_covers(parent.modifiers, child.modifiers):
+            return parent
+    return None
+
+
+def _record_proven_pruning(
+    proof_ledger: ProofLedger | None,
+    *,
+    reason: str,
+    candidate: RuleEntry,
+    covering: RuleEntry,
+    outcome: str = OUTCOME_PRUNED,
+    strict_agh_delta: str = DELTA_PRESERVED,
+    project_policy_delta: str = DELTA_PRESERVED,
+) -> None:
+    """Record a proven pruning or removal decision for active compiler coverage."""
+    _append_proof_record(
+        proof_ledger,
+        decision_type=reason,
+        outcome=outcome,
+        proof_status=PROOF_STATUS_PROVEN,
+        reason=reason,
+        candidate=_facet_from_record(candidate),
+        covering=_facet_from_record(covering),
+        strict_agh_delta=strict_agh_delta,
+        project_policy_delta=project_policy_delta,
+        sample={
+            "candidate_rule": candidate.rule,
+            "covering_rule": covering.rule,
+            "modifier_scope_proven": modifier_scope_covers(
+                covering.modifiers,
+                candidate.modifiers,
+            ),
+        },
+    )
+
+
+def _record_uncertain_keep(
+    proof_ledger: ProofLedger | None,
+    *,
+    candidate: RuleEntry,
+    covering: RuleEntry,
+    reason_detail: str,
+) -> None:
+    """Record active coverage kept because a possible covering rule was unproven."""
+    _append_proof_record(
+        proof_ledger,
+        decision_type="kept_because_uncertain",
+        outcome=OUTCOME_KEPT,
+        proof_status=PROOF_STATUS_UNCERTAIN,
+        reason=REASON_KEPT_BECAUSE_UNCERTAIN,
+        candidate=_facet_from_record(candidate),
+        covering=_facet_from_record(covering),
+        strict_agh_delta=DELTA_UNCERTAIN,
+        project_policy_delta=DELTA_UNCERTAIN,
+        sample={
+            "candidate_rule": candidate.rule,
+            "covering_rule": covering.rule,
+            "reason_detail": reason_detail,
+        },
+    )
+
+
 def _prune_redundant_rules(
     abp_rules: RuleStorage,
     abp_wildcards: WildcardStorage,
     tld_wildcards: set[str],
     exceptions: ExceptionRules,
-    stats: CompileStats
+    stats: CompileStats,
+    proof_ledger: ProofLedger | None,
 ) -> RuleStorage:
     """Phase 3: Remove redundant subdomain and whitelist-conflicted rules."""
     pruned_abp: RuleStorage = {}
@@ -1235,48 +1350,94 @@ def _prune_redundant_rules(
         for record in records:
             clean_domain = record.domain
 
-            if _is_whitelisted(record, exceptions):
+            covering_exception = _find_covering_exception(record, exceptions)
+            if covering_exception is not None:
                 stats.whitelist_conflict_pruned += 1
+                _record_proven_pruning(
+                    proof_ledger,
+                    reason=REASON_EXCEPTION_COVERED,
+                    candidate=record,
+                    covering=covering_exception,
+                    outcome=OUTCOME_REMOVED,
+                    strict_agh_delta=DELTA_CHANGED,
+                    project_policy_delta=DELTA_CHANGED,
+                )
                 continue
+            uncertain_covering = _find_domain_scope_exception(record, exceptions)
+            uncertain_reason = "exception_domain_scope_matched_modifier_scope_unproven"
 
             tld = get_tld(clean_domain)
             if (
                 tld
                 and tld in tld_wildcards
                 and clean_domain != tld
-                and _any_parent_record_covers(record, abp_wildcards[tld])
             ):
-                stats.tld_wildcard_pruned += 1
-                continue
+                covering_tld = _find_covering_parent_record(record, abp_wildcards[tld])
+                if covering_tld is not None:
+                    stats.tld_wildcard_pruned += 1
+                    _record_proven_pruning(
+                        proof_ledger,
+                        reason=REASON_TLD_WILDCARD_COVERED,
+                        candidate=record,
+                        covering=covering_tld,
+                    )
+                    continue
+                uncertain_covering = uncertain_covering or abp_wildcards[tld][0]
+                uncertain_reason = "tld_wildcard_modifier_scope_unproven"
 
-            should_prune = False
-            if (
-                record.is_wildcard
-                and clean_domain in abp_rules
-                and _any_parent_record_covers(record, abp_rules[clean_domain])
-            ):
-                should_prune = True
+            pruning_reason: str | None = None
+            covering_parent: RuleEntry | None = None
+            if record.is_wildcard and clean_domain in abp_rules:
+                covering_parent = _find_covering_parent_record(record, abp_rules[clean_domain])
+                if covering_parent is not None:
+                    pruning_reason = REASON_PARENT_COVERED
+                elif uncertain_covering is None and abp_rules[clean_domain]:
+                    uncertain_covering = abp_rules[clean_domain][0]
+                    uncertain_reason = "wildcard_candidate_parent_modifier_scope_unproven"
 
-            if not should_prune:
+            if covering_parent is None:
                 for parent in walk_parent_domains(clean_domain):
-                    if parent in abp_rules and _any_parent_record_covers(
-                        record,
-                        abp_rules[parent],
-                    ):
-                        should_prune = True
-                        break
+                    if parent in abp_rules:
+                        covering_parent = _find_covering_parent_record(
+                            record,
+                            abp_rules[parent],
+                        )
+                        if covering_parent is not None:
+                            pruning_reason = REASON_PARENT_COVERED
+                            break
+                        if uncertain_covering is None and abp_rules[parent]:
+                            uncertain_covering = abp_rules[parent][0]
+                            uncertain_reason = "parent_modifier_scope_unproven"
 
                     wildcard_key = f"*.{parent}"
-                    if wildcard_key in abp_rules and _any_parent_record_covers(
-                        record,
-                        abp_rules[wildcard_key],
-                    ):
-                        should_prune = True
-                        break
+                    if wildcard_key in abp_rules:
+                        covering_parent = _find_covering_parent_record(
+                            record,
+                            abp_rules[wildcard_key],
+                        )
+                        if covering_parent is not None:
+                            pruning_reason = REASON_WILDCARD_COVERED
+                            break
+                        if uncertain_covering is None and abp_rules[wildcard_key]:
+                            uncertain_covering = abp_rules[wildcard_key][0]
+                            uncertain_reason = "wildcard_modifier_scope_unproven"
 
-            if should_prune:
+            if covering_parent is not None and pruning_reason is not None:
                 stats.abp_subdomain_pruned += 1
+                _record_proven_pruning(
+                    proof_ledger,
+                    reason=pruning_reason,
+                    candidate=record,
+                    covering=covering_parent,
+                )
             else:
+                if uncertain_covering is not None:
+                    _record_uncertain_keep(
+                        proof_ledger,
+                        candidate=record,
+                        covering=uncertain_covering,
+                        reason_detail=uncertain_reason,
+                    )
                 pruned_abp.setdefault(domain, []).append(record)
 
     return pruned_abp
@@ -1289,6 +1450,7 @@ def _write_output(
     pruned_abp: RuleStorage,
     exceptions: ExceptionRules,
     other_rules: set[str],
+    proof_ledger: ProofLedger | None,
 ) -> None:
     """Phase 4: Write deduplicated rules to output atomically."""
     output_path = Path(output_file)
@@ -1298,8 +1460,18 @@ def _write_output(
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
         for records in abp_wildcards.values():
             for record in records:
-                if _is_whitelisted(record, exceptions):
+                covering_exception = _find_covering_exception(record, exceptions)
+                if covering_exception is not None:
                     stats.whitelist_conflict_pruned += 1
+                    _record_proven_pruning(
+                        proof_ledger,
+                        reason=REASON_EXCEPTION_COVERED,
+                        candidate=record,
+                        covering=covering_exception,
+                        outcome=OUTCOME_REMOVED,
+                        strict_agh_delta=DELTA_CHANGED,
+                        project_policy_delta=DELTA_CHANGED,
+                    )
                     continue
                 f.write(record.rule + "\n")
                 stats.abp_kept += 1
@@ -1348,7 +1520,7 @@ def compile_rules(
     # Data structures to accumulate parsed rules
     abp_rules: RuleStorage = {}
     abp_wildcards: WildcardStorage = {}
-    duplicate_index: set[RuleDuplicateKey] = set()
+    duplicate_index: RuleDuplicateIndex = {}
     exceptions: ExceptionRules = []
     other_rules: set[str] = set()
 
@@ -1382,7 +1554,8 @@ def compile_rules(
         abp_wildcards=abp_wildcards,
         tld_wildcards=tld_wildcards,
         exceptions=exceptions,
-        stats=stats
+        stats=stats,
+        proof_ledger=proof_ledger,
     )
 
     # PHASE 4: Output to file
@@ -1392,7 +1565,8 @@ def compile_rules(
         abp_wildcards=abp_wildcards,
         pruned_abp=pruned_abp,
         exceptions=exceptions,
-        other_rules=other_rules
+        other_rules=other_rules,
+        proof_ledger=proof_ledger,
     )
 
     return stats
