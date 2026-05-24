@@ -56,7 +56,7 @@ def _source_health(statuses: list[str]) -> dict[str, object]:
 
 def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "version": "1.5.0",
         "timestamp": "2026-05-17T15:01:00Z",
         "execution_time_seconds": 1.25,
@@ -81,6 +81,30 @@ def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
             "malformed_discarded": 0,
             "abp_kept": lines_output,
             "other_kept": 0,
+            "rule_effect_block": lines_output,
+            "rule_effect_exception": 0,
+            "rule_effect_rewrite": 0,
+            "rule_effect_disable": 0,
+            "rule_effect_ignored": 0,
+            "rule_effect_unsupported": 0,
+            "rule_effect_uncertain": 0,
+            "compression_policy_broadened": 0,
+            "regex_preserved_no_pruning": 0,
+        },
+        "semantics": {
+            "rule_effect_counts": {
+                "block": lines_output,
+                "exception": 0,
+                "rewrite": 0,
+                "disable": 0,
+                "ignored": 0,
+                "unsupported": 0,
+                "uncertain": 0,
+            },
+            "compression_policy": {
+                "hosts_plain_promoted_to_abp": 0,
+                "regex_preserved_no_pruning": 0,
+            },
         },
         "runtime_profile": {
             "worker_count": 4,
@@ -346,7 +370,7 @@ def test_pipeline_output_count_mismatch_hard_fails_with_diagnostics(tmp_path: Pa
         "scanned_output_rules": 2,
         "absolute_delta": 3,
         "pipeline_stats_path": str(paths["pipeline_stats"]),
-        "schema_version": 2,
+        "schema_version": 3,
         "field": "statistics.lines_output",
     }
 
@@ -428,7 +452,7 @@ def test_legacy_pipeline_stats_schema_is_hard_error_without_count_comparison(
     tmp_path: Path,
 ) -> None:
     pipeline_stats = _pipeline_stats(5)
-    pipeline_stats["schema_version"] = 1
+    pipeline_stats["schema_version"] = 2
 
     summary = _validate(tmp_path, pipeline_stats=pipeline_stats)
 
@@ -499,6 +523,47 @@ def test_runtime_profile_is_inspect_only_for_release_validation(tmp_path: Path) 
         or "cardinality" in str(finding.get("code", ""))
     ]
     assert runtime_findings == []
+
+
+def test_semantic_diagnostics_are_inspect_only_for_release_validation(tmp_path: Path) -> None:
+    pipeline_stats = _pipeline_stats(2)
+    statistics = pipeline_stats["statistics"]
+    assert isinstance(statistics, dict)
+    statistics["rule_effect_unsupported"] = 999_999
+    statistics["rule_effect_uncertain"] = 999_999
+    statistics["compression_policy_broadened"] = 999_999
+    statistics["regex_preserved_no_pruning"] = 999_999
+    pipeline_stats["semantics"] = {
+        "rule_effect_counts": {
+            "block": 0,
+            "exception": 999_999,
+            "rewrite": 999_999,
+            "disable": 999_999,
+            "ignored": 999_999,
+            "unsupported": 999_999,
+            "uncertain": 999_999,
+        },
+        "compression_policy": {
+            "hosts_plain_promoted_to_abp": 999_999,
+            "regex_preserved_no_pruning": 999_999,
+        },
+    }
+
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||tracker.example.com^"],
+        pipeline_stats=pipeline_stats,
+    )
+
+    semantic_findings = [
+        finding
+        for finding in [*summary.errors, *summary.warnings]
+        if "rule_effect" in str(finding)
+        or "semantics" in str(finding)
+        or "compression_policy" in str(finding)
+        or "regex_preserved_no_pruning" in str(finding)
+    ]
+    assert semantic_findings == []
 
 
 def test_cli_returns_nonzero_for_errors_and_writes_summaries(
