@@ -9,6 +9,7 @@ clean -> compile pipeline produces correct output.
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -677,6 +678,93 @@ class TestSaveStatsJson:
         }
         assert data["runtime_profile"] == runtime_profile
         assert not os.path.exists(os.path.join(tmp_dir, "stats.tmp"))
+
+
+class TestPipelineCli:
+    """Test command-line pipeline report options."""
+
+    def test_cli_explicit_coverage_proof_writes_report_independent_of_json_stats(
+        self,
+        make_input_dir,
+        monkeypatch,
+        tmp_path: Path,
+    ) -> None:
+        """The CLI should generate proof reports only for an explicit path."""
+        input_dir, output_file = make_input_dir({
+            "list1.txt": "||example.com^\n||ads.example.com^\n",
+        })
+        proof_report = tmp_path / "reports" / "coverage-proof.json"
+        stats_report = tmp_path / "reports" / "pipeline-stats.json"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "scripts.pipeline",
+                input_dir,
+                output_file,
+                "--coverage-proof",
+                str(proof_report),
+                "--json-stats",
+                str(stats_report),
+            ],
+        )
+
+        assert pipeline_module.main() == 0
+
+        proof_data = json.loads(proof_report.read_text(encoding="utf-8"))
+        stats_data = json.loads(stats_report.read_text(encoding="utf-8"))
+        proof_sample = proof_data["sample_buckets"][0]["records"][0]
+        assert proof_data["report_type"] == "capped"
+        assert proof_data["summary"]["total_records"] >= 1
+        assert proof_sample["fingerprint"]
+        assert stats_data["schema_version"] == 3
+        assert "coverage_proof" not in stats_data
+        assert "coverage-proof" not in json.dumps(stats_data)
+
+    def test_cli_without_coverage_proof_writes_no_default_report(
+        self,
+        make_input_dir,
+        monkeypatch,
+        tmp_path: Path,
+    ) -> None:
+        """Omitting --coverage-proof should leave proof report paths absent."""
+        input_dir, output_file = make_input_dir({
+            "list1.txt": "||example.com^\n||ads.example.com^\n",
+        })
+        proof_report = tmp_path / "reports" / "coverage-proof.json"
+        stats_report = tmp_path / "reports" / "pipeline-stats.json"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "scripts.pipeline",
+                input_dir,
+                output_file,
+                "--json-stats",
+                str(stats_report),
+            ],
+        )
+
+        assert pipeline_module.main() == 0
+
+        assert stats_report.exists()
+        assert not proof_report.exists()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        Path("scripts/release_validator.py"),
+        Path(".github/workflows/update.yml"),
+    ],
+)
+def test_release_boundaries_do_not_reference_coverage_proof_gates(path: Path) -> None:
+    """Phase 8 proof reports must not become scheduled release gates."""
+    text = path.read_text(encoding="utf-8")
+
+    assert "coverage-proof" not in text
+    assert "coverage_proof" not in text
+    assert "ProofLedger" not in text
 
 
 if __name__ == "__main__":
