@@ -7,6 +7,7 @@ Tests deduplication logic, TLD wildcards, and cross-format optimization.
 """
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,42 @@ from scripts.compiler import (
     get_tld,
     walk_parent_domains,
 )
+from scripts.pruning_proof import (
+    DELTA_CHANGED,
+    DELTA_GAINED,
+    DELTA_NOT_APPLICABLE,
+    DELTA_PRESERVED,
+    DELTA_UNCERTAIN,
+    OUTCOME_KEPT,
+    OUTCOME_PRUNED,
+    OUTCOME_REMOVED,
+    PROOF_STATUS_PROVEN,
+    PROOF_STATUS_UNCERTAIN,
+    REASON_BADFILTER_DISABLED,
+    REASON_CROSS_FORMAT_BROADENED,
+    REASON_DNSREWRITE_CHANGED,
+    REASON_DUPLICATE_RULE,
+    REASON_EXCEPTION_COVERED,
+    REASON_IGNORED_NONBLOCKING,
+    REASON_KEPT_BECAUSE_UNCERTAIN,
+    REASON_PARENT_COVERED,
+    REASON_REGEX_UNCERTAIN_KEPT,
+    REASON_TLD_WILDCARD_COVERED,
+    REASON_UNSUPPORTED_MODIFIER_REMOVED,
+    REASON_WILDCARD_COVERED,
+    ProofLedger,
+)
+
+
+def test_hosts_plain_policy_tests_do_not_use_misleading_legacy_names():
+    """Hosts/plain tests should name the project policy, not strict AGH behavior."""
+    test_source = Path(__file__).read_text(encoding="utf-8")
+    forbidden_names = (
+        "test_hosts" + "_no_subdomain_pruning",
+        "test_plain" + "_no_subdomain_pruning",
+    )
+
+    assert not [name for name in forbidden_names if name in test_source]
 
 
 class TestABPExtraction:
@@ -126,6 +163,16 @@ class TestCompilation:
                 rules = [line.strip() for line in f if line.strip()]
             return rules, stats
 
+    def _compile_with_ledger(self, lines):
+        """Helper to run compilation with proof records enabled."""
+        ledger = ProofLedger()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(lines, output, proof_ledger=ledger)
+            with open(output) as f:
+                rules = [line.strip() for line in f if line.strip()]
+            return rules, stats, ledger
+
     def test_abp_subdomain_pruning(self):
         """Subdomain should be pruned when parent exists."""
         lines = [
@@ -203,27 +250,55 @@ class TestCompilation:
         assert "||example.com^" in rules
         assert "sub.example.com" not in rules
 
-    def test_hosts_no_subdomain_pruning(self):
-        """WITH COMPRESSION: Hosts become ABP, so subdomain pruning DOES happen."""
+    def test_hosts_project_aggressive_promotion_prunes_subdomain(self):
+        """Project policy promotes hosts exact-host rows to ABP before pruning."""
         lines = [
             "0.0.0.0 example.com",
             "0.0.0.0 sub.example.com",
         ]
-        rules, stats = self._compile(lines)
-        # With compression: both become ABP, then sub is pruned
-        assert "||example.com^" in rules
-        assert len(rules) == 1
+        rules, stats, ledger = self._compile_with_ledger(lines)
+        promotion_records = [
+            record for record in ledger.records if record.reason == REASON_CROSS_FORMAT_BROADENED
+        ]
+        parent_records = [
+            record for record in ledger.records if record.reason == REASON_PARENT_COVERED
+        ]
 
-    def test_plain_no_subdomain_pruning(self):
-        """WITH COMPRESSION: Plain domains become ABP, so subdomain pruning DOES happen."""
+        assert rules == ["||example.com^"]
+        assert stats.formats_compressed == 2
+        assert stats.compression_policy_broadened == 2
+        assert stats.abp_subdomain_pruned == 1
+        assert len(promotion_records) == 2
+        assert len(parent_records) == 1
+        assert {record.candidate.source_kind for record in promotion_records} == {"hosts"}
+        assert {record.candidate.scope for record in promotion_records} == {"exact_host"}
+        assert all(record.strict_agh_delta == DELTA_GAINED for record in promotion_records)
+        assert all(record.project_policy_delta == DELTA_PRESERVED for record in promotion_records)
+
+    def test_plain_project_aggressive_promotion_prunes_subdomain(self):
+        """Project policy promotes plain exact-host rows to ABP before pruning."""
         lines = [
             "example.com",
             "sub.example.com",
         ]
-        rules, stats = self._compile(lines)
-        # With compression: both become ABP, then sub is pruned
-        assert "||example.com^" in rules
-        assert len(rules) == 1
+        rules, stats, ledger = self._compile_with_ledger(lines)
+        promotion_records = [
+            record for record in ledger.records if record.reason == REASON_CROSS_FORMAT_BROADENED
+        ]
+        parent_records = [
+            record for record in ledger.records if record.reason == REASON_PARENT_COVERED
+        ]
+
+        assert rules == ["||example.com^"]
+        assert stats.formats_compressed == 2
+        assert stats.compression_policy_broadened == 2
+        assert stats.abp_subdomain_pruned == 1
+        assert len(promotion_records) == 2
+        assert len(parent_records) == 1
+        assert {record.candidate.source_kind for record in promotion_records} == {"plain_domain"}
+        assert {record.candidate.scope for record in promotion_records} == {"exact_host"}
+        assert all(record.strict_agh_delta == DELTA_GAINED for record in promotion_records)
+        assert all(record.project_policy_delta == DELTA_PRESERVED for record in promotion_records)
 
     def test_whitelist_conflict_removal(self):
         """Block rules for whitelisted domains should be removed.
@@ -476,6 +551,258 @@ class TestCompilerSemanticDiagnostics:
         assert stats.rule_effect_block == 1
         assert stats.rule_effect_exception == 1
         assert stats.rule_effect_uncertain == 2
+
+
+class TestCompilerProofLedgerPlumbing:
+    """Optional proof-ledger records emitted by compiler diagnostics."""
+
+    def _compile(self, lines, *, proof_ledger=None):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            if proof_ledger is None:
+                stats = compile_rules(lines, output)
+            else:
+                stats = compile_rules(lines, output, proof_ledger=proof_ledger)
+            with open(output) as f:
+                return [line.strip() for line in f if line.strip()], stats
+
+    def test_compile_rules_two_positional_arguments_remain_default_contract(self):
+        """The historical compile_rules(lines, output_file) call remains unchanged."""
+        lines = [
+            "||block.example.com^",
+            "0.0.0.0 host-policy.example.com",
+            "plain-policy.example.com",
+            "/regex.*/",
+        ]
+
+        rules, stats = self._compile(lines)
+
+        assert rules == [
+            "||block.example.com^",
+            "||host-policy.example.com^",
+            "||plain-policy.example.com^",
+            "/regex.*/",
+        ]
+        assert stats.total_output == 4
+        assert stats.formats_compressed == 2
+        assert stats.compression_policy_broadened == 2
+
+    def test_optional_ledger_records_nonblocking_diagnostics_and_regex_uncertainty(self):
+        """Diagnostics-only rows are recorded as changed, uncertain, or not applicable."""
+        ledger = ProofLedger()
+        lines = [
+            "||unsupported.example.com^$future=value",
+            "||disable.example.com^$badfilter",
+            "||rewrite.example.com^$dnsrewrite=1.2.3.4",
+            "8.8.8.8 dns.google",
+            "/regex.*/",
+        ]
+
+        rules, stats = self._compile(lines, proof_ledger=ledger)
+        records_by_reason = {record.reason: record for record in ledger.records}
+
+        assert rules == ["/regex.*/"]
+        assert stats.rule_effect_unsupported == 1
+        assert stats.rule_effect_disable == 1
+        assert stats.rule_effect_rewrite == 1
+        assert stats.rule_effect_ignored == 1
+        assert stats.regex_preserved_no_pruning == 1
+        assert set(records_by_reason) == {
+            REASON_UNSUPPORTED_MODIFIER_REMOVED,
+            REASON_BADFILTER_DISABLED,
+            REASON_DNSREWRITE_CHANGED,
+            REASON_IGNORED_NONBLOCKING,
+            REASON_REGEX_UNCERTAIN_KEPT,
+        }
+        assert (
+            records_by_reason[REASON_UNSUPPORTED_MODIFIER_REMOVED].strict_agh_delta
+            == DELTA_NOT_APPLICABLE
+        )
+        assert records_by_reason[REASON_BADFILTER_DISABLED].project_policy_delta == (
+            DELTA_NOT_APPLICABLE
+        )
+        assert records_by_reason[REASON_DNSREWRITE_CHANGED].strict_agh_delta == "changed"
+        assert records_by_reason[REASON_IGNORED_NONBLOCKING].project_policy_delta == (
+            DELTA_NOT_APPLICABLE
+        )
+        regex_record = records_by_reason[REASON_REGEX_UNCERTAIN_KEPT]
+        assert regex_record.outcome == OUTCOME_KEPT
+        assert regex_record.strict_agh_delta == DELTA_UNCERTAIN
+        assert regex_record.project_policy_delta == DELTA_UNCERTAIN
+        assert regex_record.candidate.rule_kind == "regex"
+
+    def test_hosts_and_plain_promotion_records_dual_baseline_delta(self):
+        """Hosts/plain promotion gains strict AGH coverage while preserving project policy."""
+        ledger = ProofLedger()
+
+        rules, stats = self._compile(
+            [
+                "0.0.0.0 hosts-policy.example.com",
+                "plain-policy.example.net",
+            ],
+            proof_ledger=ledger,
+        )
+        promotion_records = [
+            record
+            for record in ledger.records
+            if record.reason == REASON_CROSS_FORMAT_BROADENED
+        ]
+
+        assert rules == [
+            "||hosts-policy.example.com^",
+            "||plain-policy.example.net^",
+        ]
+        assert stats.formats_compressed == 2
+        assert len(promotion_records) == 2
+        assert {record.candidate.source_kind for record in promotion_records} == {
+            "hosts",
+            "plain_domain",
+        }
+        assert {record.candidate.normalized_rule for record in promotion_records} == set(rules)
+        assert all(record.strict_agh_delta == DELTA_GAINED for record in promotion_records)
+        assert all(record.project_policy_delta == DELTA_PRESERVED for record in promotion_records)
+
+
+class TestCompilerPruningProofLedger:
+    """Proof-ledger records for existing pruning decisions."""
+
+    def _compile(self, lines):
+        ledger = ProofLedger()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(lines, output, proof_ledger=ledger)
+            with open(output) as f:
+                rules = [line.strip() for line in f if line.strip()]
+            return rules, stats, ledger
+
+    def _record(self, ledger, reason):
+        matches = [record for record in ledger.records if record.reason == reason]
+        assert len(matches) == 1
+        return matches[0]
+
+    def _assert_required_facets(self, record):
+        assert record.candidate.rule_kind
+        assert record.candidate.domain_shape
+        assert record.candidate.modifier_signature is not None
+        assert record.candidate.effect
+        assert record.candidate.priority
+        assert record.candidate.agh_behavior_basis
+        assert record.outcome
+        assert record.reason
+        assert record.strict_agh_delta
+        assert record.project_policy_delta
+        assert record.fingerprint
+
+    def test_duplicate_pruning_records_exact_semantic_equivalence(self):
+        rules, stats, ledger = self._compile([
+            "||dup.example.com^$client=10.0.0.1,dnstype=a",
+            "||dup.example.com^$dnstype=A,client=10.0.0.1",
+        ])
+
+        record = self._record(ledger, REASON_DUPLICATE_RULE)
+
+        assert rules == ["||dup.example.com^$client=10.0.0.1,dnstype=a"]
+        assert stats.duplicate_pruned == 1
+        assert record.outcome == OUTCOME_PRUNED
+        assert record.proof_status == PROOF_STATUS_PROVEN
+        assert record.strict_agh_delta == DELTA_PRESERVED
+        assert record.project_policy_delta == DELTA_PRESERVED
+        assert record.covering is not None
+        assert record.candidate.modifier_signature == record.covering.modifier_signature
+        self._assert_required_facets(record)
+
+    def test_parent_wildcard_and_tld_pruning_record_covering_facets(self):
+        rules, stats, ledger = self._compile([
+            "||parent.example.com^",
+            "||child.parent.example.com^",
+            "||*.wild.example.com^",
+            "||child.wild.example.com^",
+            "||*.autos^",
+            "||spam.autos^",
+        ])
+
+        parent_record = self._record(ledger, REASON_PARENT_COVERED)
+        wildcard_record = self._record(ledger, REASON_WILDCARD_COVERED)
+        tld_record = self._record(ledger, REASON_TLD_WILDCARD_COVERED)
+
+        assert set(rules) == {
+            "||*.autos^",
+            "||*.wild.example.com^",
+            "||parent.example.com^",
+        }
+        assert stats.abp_subdomain_pruned == 2
+        assert stats.tld_wildcard_pruned == 1
+        assert parent_record.covering.normalized_rule == "||parent.example.com^"
+        assert wildcard_record.covering.normalized_rule == "||*.wild.example.com^"
+        assert tld_record.covering.normalized_rule == "||*.autos^"
+        assert wildcard_record.covering.domain_shape == "wildcard"
+        assert tld_record.covering.domain_shape == "tld_wildcard"
+        for record in (parent_record, wildcard_record, tld_record):
+            assert record.outcome == OUTCOME_PRUNED
+            assert record.proof_status == PROOF_STATUS_PROVEN
+            assert record.strict_agh_delta == DELTA_PRESERVED
+            assert record.project_policy_delta == DELTA_PRESERVED
+            self._assert_required_facets(record)
+
+    def test_exception_pruning_records_proven_and_uncertain_decisions(self):
+        rules, stats, ledger = self._compile([
+            "||covered.example.com^$client=10.0.0.1",
+            "@@||covered.example.com^$client=10.0.0.1",
+            "||uncertain.example.com^",
+            "@@||uncertain.example.com^$client=10.0.0.1",
+        ])
+
+        proven_record = self._record(ledger, REASON_EXCEPTION_COVERED)
+        uncertain_record = self._record(ledger, REASON_KEPT_BECAUSE_UNCERTAIN)
+
+        assert rules == ["||uncertain.example.com^"]
+        assert stats.whitelist_conflict_pruned == 1
+        assert proven_record.outcome == OUTCOME_REMOVED
+        assert proven_record.proof_status == PROOF_STATUS_PROVEN
+        assert proven_record.strict_agh_delta == DELTA_CHANGED
+        assert proven_record.project_policy_delta == DELTA_CHANGED
+        assert proven_record.covering.normalized_rule == (
+            "@@||covered.example.com^$client=10.0.0.1"
+        )
+        assert uncertain_record.outcome == OUTCOME_KEPT
+        assert uncertain_record.proof_status == PROOF_STATUS_UNCERTAIN
+        assert uncertain_record.strict_agh_delta == DELTA_UNCERTAIN
+        assert uncertain_record.project_policy_delta == DELTA_UNCERTAIN
+        assert uncertain_record.covering.normalized_rule == (
+            "@@||uncertain.example.com^$client=10.0.0.1"
+        )
+        self._assert_required_facets(proven_record)
+        self._assert_required_facets(uncertain_record)
+
+    def test_unproven_parent_modifier_scope_records_kept_uncertain(self):
+        child_rule = "||child.example.com^$important"
+        rules, stats, ledger = self._compile(["||example.com^", child_rule])
+
+        record = self._record(ledger, REASON_KEPT_BECAUSE_UNCERTAIN)
+
+        assert "||example.com^" in rules
+        assert child_rule in rules
+        assert stats.abp_subdomain_pruned == 0
+        assert record.candidate.normalized_rule == child_rule
+        assert record.covering.normalized_rule == "||example.com^"
+        assert record.outcome == OUTCOME_KEPT
+        assert record.proof_status == PROOF_STATUS_UNCERTAIN
+        assert record.strict_agh_delta == DELTA_UNCERTAIN
+        assert record.project_policy_delta == DELTA_UNCERTAIN
+        self._assert_required_facets(record)
+
+    def test_tld_wildcard_whitelist_removal_records_output_write_decision(self):
+        rules, stats, ledger = self._compile(["||*.autos^", "@@||*.autos^"])
+
+        record = self._record(ledger, REASON_EXCEPTION_COVERED)
+
+        assert rules == []
+        assert stats.whitelist_conflict_pruned == 1
+        assert record.candidate.normalized_rule == "||*.autos^"
+        assert record.covering.normalized_rule == "@@||*.autos^"
+        assert record.outcome == OUTCOME_REMOVED
+        assert record.proof_status == PROOF_STATUS_PROVEN
+        self._assert_required_facets(record)
 
 
 class TestEdgeCases:
@@ -895,10 +1222,9 @@ class TestRealWorldScenarios:
         assert "||adtracking.com^" in rules
 
 
-class TestNoFalseNegatives:
+class TestCoveragePreservationBoundaries:
     """
-    Critical tests to ensure we DON'T incorrectly prune rules.
-    False negatives = removing rules we shouldn't = BROKEN BLOCKING.
+    Critical tests for rules that must stay and explicit aggressive policy cases.
     """
 
     def _compile(self, lines):
@@ -908,35 +1234,28 @@ class TestNoFalseNegatives:
             with open(output) as f:
                 return [line.strip() for line in f if line.strip()], stats
 
-    def test_hosts_subdomain_MUST_be_kept(self):
+    def test_hosts_project_aggressive_subdomain_pruning_is_expected(self):
         """
-        WITH COMPRESSION: Hosts are converted to ABP first.
-        Then ABP subdomain deduplication kicks in.
-
-        This IS the intended behavior with compression - more dedup!
+        Project policy converts hosts rows to ABP before subdomain deduplication.
         """
         lines = [
             "0.0.0.0 example.com",
             "0.0.0.0 sub.example.com",
         ]
         rules, stats = self._compile(lines)
-        # With compression, both become ABP, then sub is pruned
         assert "||example.com^" in rules
-        # sub.example.com is NOW pruned (this is the benefit of compression)
         assert len(rules) == 1
         assert stats.abp_subdomain_pruned == 1
 
-    def test_plain_subdomain_MUST_be_kept(self):
+    def test_plain_project_aggressive_subdomain_pruning_is_expected(self):
         """
-        WITH COMPRESSION: Plain domains are converted to ABP first.
-        Then ABP subdomain deduplication kicks in.
+        Project policy converts plain rows to ABP before subdomain deduplication.
         """
         lines = [
             "example.com",
             "sub.example.com",
         ]
         rules, stats = self._compile(lines)
-        # With compression, both become ABP, then sub is pruned
         assert "||example.com^" in rules
         assert len(rules) == 1
         assert stats.abp_subdomain_pruned == 1

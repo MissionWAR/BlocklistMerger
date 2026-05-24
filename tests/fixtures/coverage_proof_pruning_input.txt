@@ -1,0 +1,18 @@
+||parent-proof.example.com^
+||child.parent-proof.example.com^
+||*.wild-proof.example.com^
+||child.wild-proof.example.com^
+||*.autos^
+||spam.autos^
+||duplicate-proof.example.com^$client=10.0.0.1,dnstype=a
+||duplicate-proof.example.com^$dnstype=A,client=10.0.0.1
+||exception-proof.example.com^$client=10.0.0.1
+@@||exception-proof.example.com^$client=10.0.0.1
+||uncertain-proof.example.com^
+@@||uncertain-proof.example.com^$client=10.0.0.1
+||unsupported-proof.example.com^$future=value
+||disabled-proof.example.com^$badfilter
+||rewrite-proof.example.com^$dnsrewrite=1.2.3.4
+/^regex-proof\.example\.com$/
+0.0.0.0 hosts-proof.example.com
+plain-proof.example.com

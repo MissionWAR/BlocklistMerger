@@ -9,6 +9,7 @@ clean -> compile pipeline produces correct output.
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -17,6 +18,48 @@ import pytest
 import scripts.pipeline as pipeline_module
 from scripts.compiler import CompileStats
 from scripts.pipeline import print_summary, process_files, save_stats_json
+from scripts.pruning_proof import (
+    DELTA_PRESERVED,
+    OUTCOME_PRUNED,
+    PROOF_STATUS_PROVEN,
+    REASON_DUPLICATE_RULE,
+    ProofLedger,
+    RuleFacet,
+    make_proof_record,
+)
+
+
+def _proof_facet(domain: str = "ads.example.com") -> RuleFacet:
+    """Return a compact proof facet for pipeline report tests."""
+    return RuleFacet(
+        raw_rule=f"||{domain}^",
+        normalized_rule=f"||{domain}^",
+        source_kind="abp",
+        rule_kind="abp",
+        domain=domain,
+        domain_shape="subdomain",
+        effect="block",
+        scope="apex_and_subdomains",
+        modifier_signature=(),
+        priority="normal",
+        agh_behavior_basis="adguard_dns_filtering_syntax",
+    )
+
+
+def _proof_record(decision_id: str, *, index: int = 0):
+    """Return one deterministic proof record in the duplicate bucket."""
+    return make_proof_record(
+        decision_id=decision_id,
+        decision_type="duplicate",
+        outcome=OUTCOME_PRUNED,
+        proof_status=PROOF_STATUS_PROVEN,
+        reason=REASON_DUPLICATE_RULE,
+        candidate=_proof_facet(f"ads-{index}.example.com"),
+        covering=_proof_facet("example.com"),
+        strict_agh_delta=DELTA_PRESERVED,
+        project_policy_delta=DELTA_PRESERVED,
+        sample={"index": index},
+    )
 
 
 class TestProcessFiles:
@@ -234,6 +277,86 @@ class TestProcessFiles:
         assert stats["rule_effect_uncertain"] == 8
         assert stats["compression_policy_broadened"] == 9
         assert stats["regex_preserved_no_pruning"] == 10
+
+    def test_default_process_files_does_not_create_proof_report_and_uses_two_arg_compile(
+        self,
+        make_input_dir,
+        monkeypatch,
+    ):
+        """Default processing should not construct proof output or change compile call shape."""
+        input_dir, output_file = make_input_dir({
+            "list1.txt": "||keep.com^\n",
+        })
+        report_path = Path(output_file).with_name("coverage-proof.json")
+        reports_dir = Path(output_file).parent / "reports"
+
+        def fake_compile_rules(lines, output_file):
+            assert list(lines) == ["||keep.com^"]
+            with open(output_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write("||keep.com^\n")
+            return CompileStats(total_output=1, abp_kept=1)
+
+        monkeypatch.setattr(pipeline_module, "compile_rules", fake_compile_rules)
+
+        stats = process_files(input_dir, output_file)
+
+        assert stats["lines_output"] == 1
+        assert not report_path.exists()
+        assert not reports_dir.exists()
+
+    def test_explicit_process_files_with_profile_writes_capped_coverage_proof_report(
+        self,
+        make_input_dir,
+        monkeypatch,
+        tmp_path: Path,
+    ):
+        """Explicit proof reports should be capped, fingerprinted, and stats-compatible."""
+        input_dir, output_file = make_input_dir({
+            "list1.txt": "||keep.com^\n",
+        })
+        report_path = tmp_path / "reports" / "coverage-proof.json"
+        expected_records = [
+            _proof_record(f"decision:{index:03d}", index=index)
+            for index in range(3)
+        ]
+
+        def fake_compile_rules(lines, output_file, *, proof_ledger=None):
+            assert list(lines) == ["||keep.com^"]
+            assert isinstance(proof_ledger, ProofLedger)
+            for record in expected_records:
+                proof_ledger.append(record)
+            with open(output_file, "w", encoding="utf-8", newline="\n") as f:
+                f.write("||keep.com^\n")
+            return CompileStats(total_output=1, abp_kept=1, duplicate_pruned=3)
+
+        monkeypatch.setattr(pipeline_module, "compile_rules", fake_compile_rules)
+
+        result = pipeline_module.process_files_with_profile(
+            input_dir,
+            output_file,
+            coverage_proof_report=report_path,
+            coverage_proof_sample_cap=2,
+        )
+
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        sample_bucket = data["sample_buckets"][0]
+        sample_records = sample_bucket["records"]
+        assert result.stats["lines_output"] == 1
+        assert result.stats["duplicate_pruned"] == 3
+        assert data["report_type"] == "capped"
+        assert data["sample_cap"] == 2
+        assert data["summary"]["total_records"] == 3
+        assert data["summary"]["by_reason"] == {"duplicate_rule": 3}
+        assert sample_bucket["total_records"] == 3
+        assert sample_bucket["sampled_records"] == 2
+        assert [record["fingerprint"] for record in sample_records] == [
+            expected_records[0].fingerprint,
+            expected_records[1].fingerprint,
+        ]
+        assert {record["candidate_domain"] for record in sample_records} == {
+            "ads-0.example.com",
+            "ads-1.example.com",
+        }
 
     def test_clean_worker_spools_lines_without_returning_list_payload(self, tmp_path: Path):
         """Worker results should return bounded spool metadata, not cleaned line lists."""
@@ -555,6 +678,93 @@ class TestSaveStatsJson:
         }
         assert data["runtime_profile"] == runtime_profile
         assert not os.path.exists(os.path.join(tmp_dir, "stats.tmp"))
+
+
+class TestPipelineCli:
+    """Test command-line pipeline report options."""
+
+    def test_cli_explicit_coverage_proof_writes_report_independent_of_json_stats(
+        self,
+        make_input_dir,
+        monkeypatch,
+        tmp_path: Path,
+    ) -> None:
+        """The CLI should generate proof reports only for an explicit path."""
+        input_dir, output_file = make_input_dir({
+            "list1.txt": "||example.com^\n||ads.example.com^\n",
+        })
+        proof_report = tmp_path / "reports" / "coverage-proof.json"
+        stats_report = tmp_path / "reports" / "pipeline-stats.json"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "scripts.pipeline",
+                input_dir,
+                output_file,
+                "--coverage-proof",
+                str(proof_report),
+                "--json-stats",
+                str(stats_report),
+            ],
+        )
+
+        assert pipeline_module.main() == 0
+
+        proof_data = json.loads(proof_report.read_text(encoding="utf-8"))
+        stats_data = json.loads(stats_report.read_text(encoding="utf-8"))
+        proof_sample = proof_data["sample_buckets"][0]["records"][0]
+        assert proof_data["report_type"] == "capped"
+        assert proof_data["summary"]["total_records"] >= 1
+        assert proof_sample["fingerprint"]
+        assert stats_data["schema_version"] == 3
+        assert "coverage_proof" not in stats_data
+        assert "coverage-proof" not in json.dumps(stats_data)
+
+    def test_cli_without_coverage_proof_writes_no_default_report(
+        self,
+        make_input_dir,
+        monkeypatch,
+        tmp_path: Path,
+    ) -> None:
+        """Omitting --coverage-proof should leave proof report paths absent."""
+        input_dir, output_file = make_input_dir({
+            "list1.txt": "||example.com^\n||ads.example.com^\n",
+        })
+        proof_report = tmp_path / "reports" / "coverage-proof.json"
+        stats_report = tmp_path / "reports" / "pipeline-stats.json"
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "scripts.pipeline",
+                input_dir,
+                output_file,
+                "--json-stats",
+                str(stats_report),
+            ],
+        )
+
+        assert pipeline_module.main() == 0
+
+        assert stats_report.exists()
+        assert not proof_report.exists()
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        Path("scripts/release_validator.py"),
+        Path(".github/workflows/update.yml"),
+    ],
+)
+def test_release_boundaries_do_not_reference_coverage_proof_gates(path: Path) -> None:
+    """Phase 8 proof reports must not become scheduled release gates."""
+    text = path.read_text(encoding="utf-8")
+
+    assert "coverage-proof" not in text
+    assert "coverage_proof" not in text
+    assert "ProofLedger" not in text
 
 
 if __name__ == "__main__":
