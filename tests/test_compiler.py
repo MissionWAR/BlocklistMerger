@@ -7,6 +7,7 @@ Tests deduplication logic, TLD wildcards, and cross-format optimization.
 """
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -43,6 +44,17 @@ from scripts.pruning_proof import (
     REASON_WILDCARD_COVERED,
     ProofLedger,
 )
+
+
+def test_hosts_plain_policy_tests_do_not_use_misleading_legacy_names():
+    """Hosts/plain tests should name the project policy, not strict AGH behavior."""
+    test_source = Path(__file__).read_text(encoding="utf-8")
+    forbidden_names = (
+        "test_hosts" + "_no_subdomain_pruning",
+        "test_plain" + "_no_subdomain_pruning",
+    )
+
+    assert not [name for name in forbidden_names if name in test_source]
 
 
 class TestABPExtraction:
@@ -151,6 +163,16 @@ class TestCompilation:
                 rules = [line.strip() for line in f if line.strip()]
             return rules, stats
 
+    def _compile_with_ledger(self, lines):
+        """Helper to run compilation with proof records enabled."""
+        ledger = ProofLedger()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(lines, output, proof_ledger=ledger)
+            with open(output) as f:
+                rules = [line.strip() for line in f if line.strip()]
+            return rules, stats, ledger
+
     def test_abp_subdomain_pruning(self):
         """Subdomain should be pruned when parent exists."""
         lines = [
@@ -228,27 +250,55 @@ class TestCompilation:
         assert "||example.com^" in rules
         assert "sub.example.com" not in rules
 
-    def test_hosts_no_subdomain_pruning(self):
-        """WITH COMPRESSION: Hosts become ABP, so subdomain pruning DOES happen."""
+    def test_hosts_project_aggressive_promotion_prunes_subdomain(self):
+        """Project policy promotes hosts exact-host rows to ABP before pruning."""
         lines = [
             "0.0.0.0 example.com",
             "0.0.0.0 sub.example.com",
         ]
-        rules, stats = self._compile(lines)
-        # With compression: both become ABP, then sub is pruned
-        assert "||example.com^" in rules
-        assert len(rules) == 1
+        rules, stats, ledger = self._compile_with_ledger(lines)
+        promotion_records = [
+            record for record in ledger.records if record.reason == REASON_CROSS_FORMAT_BROADENED
+        ]
+        parent_records = [
+            record for record in ledger.records if record.reason == REASON_PARENT_COVERED
+        ]
 
-    def test_plain_no_subdomain_pruning(self):
-        """WITH COMPRESSION: Plain domains become ABP, so subdomain pruning DOES happen."""
+        assert rules == ["||example.com^"]
+        assert stats.formats_compressed == 2
+        assert stats.compression_policy_broadened == 2
+        assert stats.abp_subdomain_pruned == 1
+        assert len(promotion_records) == 2
+        assert len(parent_records) == 1
+        assert {record.candidate.source_kind for record in promotion_records} == {"hosts"}
+        assert {record.candidate.scope for record in promotion_records} == {"exact_host"}
+        assert all(record.strict_agh_delta == DELTA_GAINED for record in promotion_records)
+        assert all(record.project_policy_delta == DELTA_PRESERVED for record in promotion_records)
+
+    def test_plain_project_aggressive_promotion_prunes_subdomain(self):
+        """Project policy promotes plain exact-host rows to ABP before pruning."""
         lines = [
             "example.com",
             "sub.example.com",
         ]
-        rules, stats = self._compile(lines)
-        # With compression: both become ABP, then sub is pruned
-        assert "||example.com^" in rules
-        assert len(rules) == 1
+        rules, stats, ledger = self._compile_with_ledger(lines)
+        promotion_records = [
+            record for record in ledger.records if record.reason == REASON_CROSS_FORMAT_BROADENED
+        ]
+        parent_records = [
+            record for record in ledger.records if record.reason == REASON_PARENT_COVERED
+        ]
+
+        assert rules == ["||example.com^"]
+        assert stats.formats_compressed == 2
+        assert stats.compression_policy_broadened == 2
+        assert stats.abp_subdomain_pruned == 1
+        assert len(promotion_records) == 2
+        assert len(parent_records) == 1
+        assert {record.candidate.source_kind for record in promotion_records} == {"plain_domain"}
+        assert {record.candidate.scope for record in promotion_records} == {"exact_host"}
+        assert all(record.strict_agh_delta == DELTA_GAINED for record in promotion_records)
+        assert all(record.project_policy_delta == DELTA_PRESERVED for record in promotion_records)
 
     def test_whitelist_conflict_removal(self):
         """Block rules for whitelisted domains should be removed.
@@ -1172,10 +1222,9 @@ class TestRealWorldScenarios:
         assert "||adtracking.com^" in rules
 
 
-class TestNoFalseNegatives:
+class TestCoveragePreservationBoundaries:
     """
-    Critical tests to ensure we DON'T incorrectly prune rules.
-    False negatives = removing rules we shouldn't = BROKEN BLOCKING.
+    Critical tests for rules that must stay and explicit aggressive policy cases.
     """
 
     def _compile(self, lines):
@@ -1185,35 +1234,28 @@ class TestNoFalseNegatives:
             with open(output) as f:
                 return [line.strip() for line in f if line.strip()], stats
 
-    def test_hosts_subdomain_MUST_be_kept(self):
+    def test_hosts_project_aggressive_subdomain_pruning_is_expected(self):
         """
-        WITH COMPRESSION: Hosts are converted to ABP first.
-        Then ABP subdomain deduplication kicks in.
-
-        This IS the intended behavior with compression - more dedup!
+        Project policy converts hosts rows to ABP before subdomain deduplication.
         """
         lines = [
             "0.0.0.0 example.com",
             "0.0.0.0 sub.example.com",
         ]
         rules, stats = self._compile(lines)
-        # With compression, both become ABP, then sub is pruned
         assert "||example.com^" in rules
-        # sub.example.com is NOW pruned (this is the benefit of compression)
         assert len(rules) == 1
         assert stats.abp_subdomain_pruned == 1
 
-    def test_plain_subdomain_MUST_be_kept(self):
+    def test_plain_project_aggressive_subdomain_pruning_is_expected(self):
         """
-        WITH COMPRESSION: Plain domains are converted to ABP first.
-        Then ABP subdomain deduplication kicks in.
+        Project policy converts plain rows to ABP before subdomain deduplication.
         """
         lines = [
             "example.com",
             "sub.example.com",
         ]
         rules, stats = self._compile(lines)
-        # With compression, both become ABP, then sub is pruned
         assert "||example.com^" in rules
         assert len(rules) == 1
         assert stats.abp_subdomain_pruned == 1
