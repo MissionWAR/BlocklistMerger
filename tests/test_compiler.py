@@ -19,18 +19,29 @@ from scripts.compiler import (
     walk_parent_domains,
 )
 from scripts.pruning_proof import (
+    DELTA_CHANGED,
     DELTA_GAINED,
     DELTA_NOT_APPLICABLE,
     DELTA_PRESERVED,
     DELTA_UNCERTAIN,
     OUTCOME_KEPT,
+    OUTCOME_PRUNED,
+    OUTCOME_REMOVED,
+    PROOF_STATUS_PROVEN,
+    PROOF_STATUS_UNCERTAIN,
     ProofLedger,
     REASON_BADFILTER_DISABLED,
     REASON_CROSS_FORMAT_BROADENED,
     REASON_DNSREWRITE_CHANGED,
+    REASON_DUPLICATE_RULE,
+    REASON_EXCEPTION_COVERED,
     REASON_IGNORED_NONBLOCKING,
+    REASON_KEPT_BECAUSE_UNCERTAIN,
+    REASON_PARENT_COVERED,
     REASON_REGEX_UNCERTAIN_KEPT,
+    REASON_TLD_WILDCARD_COVERED,
     REASON_UNSUPPORTED_MODIFIER_REMOVED,
+    REASON_WILDCARD_COVERED,
 )
 
 
@@ -600,6 +611,148 @@ class TestCompilerProofLedgerPlumbing:
         assert {record.candidate.normalized_rule for record in promotion_records} == set(rules)
         assert all(record.strict_agh_delta == DELTA_GAINED for record in promotion_records)
         assert all(record.project_policy_delta == DELTA_PRESERVED for record in promotion_records)
+
+
+class TestCompilerPruningProofLedger:
+    """Proof-ledger records for existing pruning decisions."""
+
+    def _compile(self, lines):
+        ledger = ProofLedger()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(lines, output, proof_ledger=ledger)
+            with open(output) as f:
+                rules = [line.strip() for line in f if line.strip()]
+            return rules, stats, ledger
+
+    def _record(self, ledger, reason):
+        matches = [record for record in ledger.records if record.reason == reason]
+        assert len(matches) == 1
+        return matches[0]
+
+    def _assert_required_facets(self, record):
+        assert record.candidate.rule_kind
+        assert record.candidate.domain_shape
+        assert record.candidate.modifier_signature is not None
+        assert record.candidate.effect
+        assert record.candidate.priority
+        assert record.candidate.agh_behavior_basis
+        assert record.outcome
+        assert record.reason
+        assert record.strict_agh_delta
+        assert record.project_policy_delta
+        assert record.fingerprint
+
+    def test_duplicate_pruning_records_exact_semantic_equivalence(self):
+        rules, stats, ledger = self._compile([
+            "||dup.example.com^$client=10.0.0.1,dnstype=a",
+            "||dup.example.com^$dnstype=A,client=10.0.0.1",
+        ])
+
+        record = self._record(ledger, REASON_DUPLICATE_RULE)
+
+        assert rules == ["||dup.example.com^$client=10.0.0.1,dnstype=a"]
+        assert stats.duplicate_pruned == 1
+        assert record.outcome == OUTCOME_PRUNED
+        assert record.proof_status == PROOF_STATUS_PROVEN
+        assert record.strict_agh_delta == DELTA_PRESERVED
+        assert record.project_policy_delta == DELTA_PRESERVED
+        assert record.covering is not None
+        assert record.candidate.modifier_signature == record.covering.modifier_signature
+        self._assert_required_facets(record)
+
+    def test_parent_wildcard_and_tld_pruning_record_covering_facets(self):
+        rules, stats, ledger = self._compile([
+            "||parent.example.com^",
+            "||child.parent.example.com^",
+            "||*.wild.example.com^",
+            "||child.wild.example.com^",
+            "||*.autos^",
+            "||spam.autos^",
+        ])
+
+        parent_record = self._record(ledger, REASON_PARENT_COVERED)
+        wildcard_record = self._record(ledger, REASON_WILDCARD_COVERED)
+        tld_record = self._record(ledger, REASON_TLD_WILDCARD_COVERED)
+
+        assert rules == [
+            "||*.autos^",
+            "||*.wild.example.com^",
+            "||parent.example.com^",
+        ]
+        assert stats.abp_subdomain_pruned == 2
+        assert stats.tld_wildcard_pruned == 1
+        assert parent_record.covering.normalized_rule == "||parent.example.com^"
+        assert wildcard_record.covering.normalized_rule == "||*.wild.example.com^"
+        assert tld_record.covering.normalized_rule == "||*.autos^"
+        assert wildcard_record.covering.domain_shape == "wildcard"
+        assert tld_record.covering.domain_shape == "tld_wildcard"
+        for record in (parent_record, wildcard_record, tld_record):
+            assert record.outcome == OUTCOME_PRUNED
+            assert record.proof_status == PROOF_STATUS_PROVEN
+            assert record.strict_agh_delta == DELTA_PRESERVED
+            assert record.project_policy_delta == DELTA_PRESERVED
+            self._assert_required_facets(record)
+
+    def test_exception_pruning_records_proven_and_uncertain_decisions(self):
+        rules, stats, ledger = self._compile([
+            "||covered.example.com^$client=10.0.0.1",
+            "@@||covered.example.com^$client=10.0.0.1",
+            "||uncertain.example.com^",
+            "@@||uncertain.example.com^$client=10.0.0.1",
+        ])
+
+        proven_record = self._record(ledger, REASON_EXCEPTION_COVERED)
+        uncertain_record = self._record(ledger, REASON_KEPT_BECAUSE_UNCERTAIN)
+
+        assert rules == ["||uncertain.example.com^"]
+        assert stats.whitelist_conflict_pruned == 1
+        assert proven_record.outcome == OUTCOME_REMOVED
+        assert proven_record.proof_status == PROOF_STATUS_PROVEN
+        assert proven_record.strict_agh_delta == DELTA_CHANGED
+        assert proven_record.project_policy_delta == DELTA_CHANGED
+        assert proven_record.covering.normalized_rule == (
+            "@@||covered.example.com^$client=10.0.0.1"
+        )
+        assert uncertain_record.outcome == OUTCOME_KEPT
+        assert uncertain_record.proof_status == PROOF_STATUS_UNCERTAIN
+        assert uncertain_record.strict_agh_delta == DELTA_UNCERTAIN
+        assert uncertain_record.project_policy_delta == DELTA_UNCERTAIN
+        assert uncertain_record.covering.normalized_rule == (
+            "@@||uncertain.example.com^$client=10.0.0.1"
+        )
+        self._assert_required_facets(proven_record)
+        self._assert_required_facets(uncertain_record)
+
+    def test_unproven_parent_modifier_scope_records_kept_uncertain(self):
+        child_rule = "||child.example.com^$important"
+        rules, stats, ledger = self._compile(["||example.com^", child_rule])
+
+        record = self._record(ledger, REASON_KEPT_BECAUSE_UNCERTAIN)
+
+        assert "||example.com^" in rules
+        assert child_rule in rules
+        assert stats.abp_subdomain_pruned == 0
+        assert record.candidate.normalized_rule == child_rule
+        assert record.covering.normalized_rule == "||example.com^"
+        assert record.outcome == OUTCOME_KEPT
+        assert record.proof_status == PROOF_STATUS_UNCERTAIN
+        assert record.strict_agh_delta == DELTA_UNCERTAIN
+        assert record.project_policy_delta == DELTA_UNCERTAIN
+        self._assert_required_facets(record)
+
+    def test_tld_wildcard_whitelist_removal_records_output_write_decision(self):
+        rules, stats, ledger = self._compile(["||*.autos^", "@@||*.autos^"])
+
+        record = self._record(ledger, REASON_EXCEPTION_COVERED)
+
+        assert rules == []
+        assert stats.whitelist_conflict_pruned == 1
+        assert record.candidate.normalized_rule == "||*.autos^"
+        assert record.covering.normalized_rule == "@@||*.autos^"
+        assert record.outcome == OUTCOME_REMOVED
+        assert record.proof_status == PROOF_STATUS_PROVEN
+        self._assert_required_facets(record)
 
 
 class TestEdgeCases:
