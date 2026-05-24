@@ -716,18 +716,29 @@ def main() -> int:
         "--json-stats", dest="json_stats", metavar="PATH",
         help="Save detailed statistics to a JSON file",
     )
+    parser.add_argument(
+        "--coverage-proof",
+        dest="coverage_proof",
+        metavar="PATH",
+        help="Save a capped coverage proof report to an explicit JSON path",
+    )
 
     parsed = parser.parse_args()
     input_dir = parsed.input_dir
     output_file = parsed.output_file
     json_stats_path = parsed.json_stats
+    coverage_proof_path = parsed.coverage_proof
 
     try:
         print("🚀 Starting blocklist pipeline...")
         print("-" * 60)
 
         start_time = time.time()
-        result = process_files_with_profile(input_dir, output_file)
+        result = process_files_with_profile(
+            input_dir,
+            output_file,
+            coverage_proof_report=coverage_proof_path,
+        )
         stats = result.stats
         total_time = time.time() - start_time
 
@@ -743,6 +754,9 @@ def main() -> int:
                 runtime_profile=result.runtime_profile,
             )
             print(f"📊 Stats saved to: {json_stats_path}")
+
+        if coverage_proof_path:
+            print(f"🧾 Coverage proof saved to: {coverage_proof_path}")
 
         print("✅ Pipeline completed successfully!")
 
