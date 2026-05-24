@@ -18,6 +18,20 @@ from scripts.compiler import (
     get_tld,
     walk_parent_domains,
 )
+from scripts.pruning_proof import (
+    DELTA_GAINED,
+    DELTA_NOT_APPLICABLE,
+    DELTA_PRESERVED,
+    DELTA_UNCERTAIN,
+    OUTCOME_KEPT,
+    ProofLedger,
+    REASON_BADFILTER_DISABLED,
+    REASON_CROSS_FORMAT_BROADENED,
+    REASON_DNSREWRITE_CHANGED,
+    REASON_IGNORED_NONBLOCKING,
+    REASON_REGEX_UNCERTAIN_KEPT,
+    REASON_UNSUPPORTED_MODIFIER_REMOVED,
+)
 
 
 class TestABPExtraction:
@@ -476,6 +490,116 @@ class TestCompilerSemanticDiagnostics:
         assert stats.rule_effect_block == 1
         assert stats.rule_effect_exception == 1
         assert stats.rule_effect_uncertain == 2
+
+
+class TestCompilerProofLedgerPlumbing:
+    """Optional proof-ledger records emitted by compiler diagnostics."""
+
+    def _compile(self, lines, *, proof_ledger=None):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            if proof_ledger is None:
+                stats = compile_rules(lines, output)
+            else:
+                stats = compile_rules(lines, output, proof_ledger=proof_ledger)
+            with open(output) as f:
+                return [line.strip() for line in f if line.strip()], stats
+
+    def test_compile_rules_two_positional_arguments_remain_default_contract(self):
+        """The historical compile_rules(lines, output_file) call remains unchanged."""
+        lines = [
+            "||block.example.com^",
+            "0.0.0.0 host-policy.example.com",
+            "plain-policy.example.com",
+            "/regex.*/",
+        ]
+
+        rules, stats = self._compile(lines)
+
+        assert rules == [
+            "||block.example.com^",
+            "||host-policy.example.com^",
+            "||plain-policy.example.com^",
+            "/regex.*/",
+        ]
+        assert stats.total_output == 4
+        assert stats.formats_compressed == 2
+        assert stats.compression_policy_broadened == 2
+
+    def test_optional_ledger_records_nonblocking_diagnostics_and_regex_uncertainty(self):
+        """Diagnostics-only rows are recorded as changed, uncertain, or not applicable."""
+        ledger = ProofLedger()
+        lines = [
+            "||unsupported.example.com^$future=value",
+            "||disable.example.com^$badfilter",
+            "||rewrite.example.com^$dnsrewrite=1.2.3.4",
+            "8.8.8.8 dns.google",
+            "/regex.*/",
+        ]
+
+        rules, stats = self._compile(lines, proof_ledger=ledger)
+        records_by_reason = {record.reason: record for record in ledger.records}
+
+        assert rules == ["/regex.*/"]
+        assert stats.rule_effect_unsupported == 1
+        assert stats.rule_effect_disable == 1
+        assert stats.rule_effect_rewrite == 1
+        assert stats.rule_effect_ignored == 1
+        assert stats.regex_preserved_no_pruning == 1
+        assert set(records_by_reason) == {
+            REASON_UNSUPPORTED_MODIFIER_REMOVED,
+            REASON_BADFILTER_DISABLED,
+            REASON_DNSREWRITE_CHANGED,
+            REASON_IGNORED_NONBLOCKING,
+            REASON_REGEX_UNCERTAIN_KEPT,
+        }
+        assert (
+            records_by_reason[REASON_UNSUPPORTED_MODIFIER_REMOVED].strict_agh_delta
+            == DELTA_NOT_APPLICABLE
+        )
+        assert records_by_reason[REASON_BADFILTER_DISABLED].project_policy_delta == (
+            DELTA_NOT_APPLICABLE
+        )
+        assert records_by_reason[REASON_DNSREWRITE_CHANGED].strict_agh_delta == "changed"
+        assert records_by_reason[REASON_IGNORED_NONBLOCKING].project_policy_delta == (
+            DELTA_NOT_APPLICABLE
+        )
+        regex_record = records_by_reason[REASON_REGEX_UNCERTAIN_KEPT]
+        assert regex_record.outcome == OUTCOME_KEPT
+        assert regex_record.strict_agh_delta == DELTA_UNCERTAIN
+        assert regex_record.project_policy_delta == DELTA_UNCERTAIN
+        assert regex_record.candidate.rule_kind == "regex"
+
+    def test_hosts_and_plain_promotion_records_dual_baseline_delta(self):
+        """Hosts/plain promotion gains strict AGH coverage while preserving project policy."""
+        ledger = ProofLedger()
+
+        rules, stats = self._compile(
+            [
+                "0.0.0.0 hosts-policy.example.com",
+                "plain-policy.example.net",
+            ],
+            proof_ledger=ledger,
+        )
+        promotion_records = [
+            record
+            for record in ledger.records
+            if record.reason == REASON_CROSS_FORMAT_BROADENED
+        ]
+
+        assert rules == [
+            "||hosts-policy.example.com^",
+            "||plain-policy.example.net^",
+        ]
+        assert stats.formats_compressed == 2
+        assert len(promotion_records) == 2
+        assert {record.candidate.source_kind for record in promotion_records} == {
+            "hosts",
+            "plain_domain",
+        }
+        assert {record.candidate.normalized_rule for record in promotion_records} == set(rules)
+        assert all(record.strict_agh_delta == DELTA_GAINED for record in promotion_records)
+        assert all(record.project_policy_delta == DELTA_PRESERVED for record in promotion_records)
 
 
 class TestEdgeCases:
