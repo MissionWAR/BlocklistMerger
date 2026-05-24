@@ -7,6 +7,7 @@ Tests deduplication logic, TLD wildcards, and cross-format optimization.
 """
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -43,6 +44,17 @@ from scripts.pruning_proof import (
     REASON_WILDCARD_COVERED,
     ProofLedger,
 )
+
+
+def test_hosts_plain_policy_tests_do_not_use_misleading_legacy_names():
+    """Hosts/plain tests should name the project policy, not strict AGH behavior."""
+    test_source = Path(__file__).read_text(encoding="utf-8")
+    forbidden_names = (
+        "test_hosts" + "_no_subdomain_pruning",
+        "test_plain" + "_no_subdomain_pruning",
+    )
+
+    assert not [name for name in forbidden_names if name in test_source]
 
 
 class TestABPExtraction:
