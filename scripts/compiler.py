@@ -51,6 +51,28 @@ from typing import Final, NamedTuple
 
 import tldextract
 
+from scripts.pruning_proof import (
+    DELTA_CHANGED,
+    DELTA_GAINED,
+    DELTA_NOT_APPLICABLE,
+    DELTA_PRESERVED,
+    DELTA_UNCERTAIN,
+    OUTCOME_CHANGED,
+    OUTCOME_KEPT,
+    OUTCOME_REMOVED,
+    PROOF_STATUS_NOT_APPLICABLE,
+    PROOF_STATUS_PROVEN,
+    PROOF_STATUS_UNCERTAIN,
+    ProofLedger,
+    RuleFacet,
+    REASON_BADFILTER_DISABLED,
+    REASON_CROSS_FORMAT_BROADENED,
+    REASON_DNSREWRITE_CHANGED,
+    REASON_IGNORED_NONBLOCKING,
+    REASON_REGEX_UNCERTAIN_KEPT,
+    REASON_UNSUPPORTED_MODIFIER_REMOVED,
+    make_proof_record,
+)
 from scripts.rule_semantics import (
     EFFECT_BLOCK,
     EFFECT_DISABLE,
@@ -67,7 +89,11 @@ from scripts.rule_semantics import (
     parse_modifier_text,
 )
 from scripts.rule_syntax import (
+    RULE_KIND_ABP,
+    RULE_KIND_HOSTS,
+    RULE_KIND_PLAIN_DOMAIN,
     RULE_KIND_REGEX,
+    RuleSyntax,
     classify_rule_syntax,
     split_pattern_and_modifiers,
 )
@@ -89,6 +115,12 @@ class AbpRuleRecord(NamedTuple):
         semantic_signature: Canonical modifier signature for exact equivalence checks.
         is_exception: True for whitelist/exception rules.
         is_wildcard: True for `||*.domain^` rules.
+        source_rule: Original cleaned input row before project-policy compression.
+        source_kind: Input syntax kind before compression.
+        source_effect: RuleEffect effect label for proof diagnostics.
+        source_scope: RuleEffect scope label for proof diagnostics.
+        source_reason: RuleEffect reason label for proof diagnostics.
+        source_docs_source: RuleEffect docs source label for proof diagnostics.
     """
 
     rule: str
@@ -98,6 +130,12 @@ class AbpRuleRecord(NamedTuple):
     semantic_signature: tuple[object, ...]
     is_exception: bool
     is_wildcard: bool
+    source_rule: str
+    source_kind: str
+    source_effect: str
+    source_scope: str
+    source_reason: str
+    source_docs_source: str
 
 
 RuleEntry = AbpRuleRecord
@@ -299,7 +337,16 @@ def normalize_domain(domain: str) -> str:
     return intern(domain.lower().strip().rstrip("."))
 
 
-def _parse_abp_rule(rule: str) -> AbpRuleRecord | None:
+def _parse_abp_rule(
+    rule: str,
+    *,
+    source_rule: str | None = None,
+    source_kind: str | None = None,
+    source_effect: str | None = None,
+    source_scope: str | None = None,
+    source_reason: str | None = None,
+    source_docs_source: str | None = None,
+) -> AbpRuleRecord | None:
     """
     Parse an ABP domain rule into a structured compiler record.
 
@@ -314,6 +361,7 @@ def _parse_abp_rule(rule: str) -> AbpRuleRecord | None:
 
     modifiers = parse_modifier_text(modifier_text)
     names = modifier_names(modifiers)
+    proof_effect = classify_rule_effect(source_rule or rule)
 
     return AbpRuleRecord(
         rule=rule,
@@ -323,6 +371,240 @@ def _parse_abp_rule(rule: str) -> AbpRuleRecord | None:
         semantic_signature=canonical_modifier_signature(modifiers),
         is_exception=match.group(1) is not None,
         is_wildcard=match.group(2) is not None,
+        source_rule=source_rule or rule,
+        source_kind=source_kind or proof_effect.syntax_kind,
+        source_effect=source_effect or proof_effect.effect,
+        source_scope=source_scope or proof_effect.scope,
+        source_reason=source_reason or proof_effect.reason,
+        source_docs_source=source_docs_source or proof_effect.docs_source,
+    )
+
+
+def _domain_shape(domain: str, *, is_wildcard: bool = False) -> str:
+    """Return the proof-facing shape of a normalized domain pattern."""
+    if not domain:
+        return "none"
+    if is_wildcard:
+        if get_tld(domain) == domain:
+            return "tld_wildcard"
+        return "wildcard"
+    if walk_parent_domains(domain):
+        return "subdomain"
+    if get_registered_domain(domain) == domain:
+        return "registered_domain"
+    if get_tld(domain) == domain:
+        return "tld"
+    return "apex"
+
+
+def _priority_label(modifiers: tuple[ParsedModifier, ...]) -> str:
+    """Return the proof-facing priority label for a parsed modifier tuple."""
+    important, priority_safe = _important_priority_state(modifiers)
+    if important and priority_safe:
+        return "important"
+    return "normal"
+
+
+def _proof_domain_from_line(line: str, syntax: RuleSyntax) -> tuple[str, bool]:
+    """Extract a normalized proof domain and wildcard flag from a raw row."""
+    if syntax.kind == RULE_KIND_ABP:
+        record = _parse_abp_rule(line)
+        if record is not None:
+            return record.domain, record.is_wildcard
+    if syntax.kind == RULE_KIND_HOSTS:
+        _ip, domains = extract_hosts_info(line)
+        if domains:
+            return domains[0], False
+    if syntax.kind == RULE_KIND_PLAIN_DOMAIN:
+        return normalize_domain(syntax.pattern), False
+    return "", False
+
+
+def _facet_from_line(
+    line: str,
+    *,
+    effect: object,
+    syntax: RuleSyntax,
+    normalized_rule: str | None = None,
+    domain: str | None = None,
+    is_wildcard: bool | None = None,
+    rule_kind: str | None = None,
+) -> RuleFacet:
+    """Build proof facets for a raw compiler input row."""
+    proof_domain, proof_is_wildcard = _proof_domain_from_line(line, syntax)
+    if domain is not None:
+        proof_domain = domain
+    if is_wildcard is not None:
+        proof_is_wildcard = is_wildcard
+
+    modifiers = parse_modifier_text(syntax.modifier_text)
+    domain_shape = "regex" if syntax.kind == RULE_KIND_REGEX else _domain_shape(
+        proof_domain,
+        is_wildcard=proof_is_wildcard,
+    )
+
+    return RuleFacet(
+        raw_rule=line,
+        normalized_rule=normalized_rule or line,
+        source_kind=effect.syntax_kind,
+        rule_kind=rule_kind or syntax.kind,
+        domain=proof_domain,
+        domain_shape=domain_shape,
+        effect=effect.effect,
+        scope=effect.scope,
+        modifier_signature=canonical_modifier_signature(modifiers),
+        priority=_priority_label(modifiers),
+        agh_behavior_basis=effect.docs_source,
+    )
+
+
+def _facet_from_record(record: RuleEntry) -> RuleFacet:
+    """Build proof facets from an already parsed compiler rule record."""
+    return RuleFacet(
+        raw_rule=record.source_rule,
+        normalized_rule=record.rule,
+        source_kind=record.source_kind,
+        rule_kind=RULE_KIND_ABP,
+        domain=record.domain,
+        domain_shape=_domain_shape(record.domain, is_wildcard=record.is_wildcard),
+        effect=record.source_effect,
+        scope=record.source_scope,
+        modifier_signature=record.semantic_signature,
+        priority=_priority_label(record.modifiers),
+        agh_behavior_basis=record.source_docs_source,
+    )
+
+
+def _append_proof_record(
+    proof_ledger: ProofLedger | None,
+    *,
+    decision_type: str,
+    outcome: str,
+    proof_status: str,
+    reason: str,
+    candidate: RuleFacet,
+    covering: RuleFacet | None,
+    strict_agh_delta: str,
+    project_policy_delta: str,
+    sample: dict[str, object] | None = None,
+) -> None:
+    """Append one compiler proof record when optional proof plumbing is enabled."""
+    if proof_ledger is None:
+        return
+
+    proof_ledger.append(
+        make_proof_record(
+            decision_id=f"{decision_type}:{len(proof_ledger.records) + 1:06d}",
+            decision_type=decision_type,
+            outcome=outcome,
+            proof_status=proof_status,
+            reason=reason,
+            candidate=candidate,
+            covering=covering,
+            strict_agh_delta=strict_agh_delta,
+            project_policy_delta=project_policy_delta,
+            sample=sample,
+        )
+    )
+
+
+def _record_nonblocking_proof(
+    proof_ledger: ProofLedger | None,
+    *,
+    line: str,
+    effect: object,
+    syntax: RuleSyntax,
+) -> None:
+    """Record diagnostics-only rows that do not enter blocking indexes."""
+    if proof_ledger is None:
+        return
+
+    reason: str
+    outcome = OUTCOME_REMOVED
+    strict_delta = DELTA_NOT_APPLICABLE
+    project_delta = DELTA_NOT_APPLICABLE
+    if effect.effect == EFFECT_UNSUPPORTED:
+        reason = REASON_UNSUPPORTED_MODIFIER_REMOVED
+    elif effect.effect == EFFECT_DISABLE:
+        reason = REASON_BADFILTER_DISABLED
+    elif effect.effect == EFFECT_REWRITE:
+        reason = REASON_DNSREWRITE_CHANGED
+        outcome = OUTCOME_CHANGED
+        strict_delta = DELTA_CHANGED
+        project_delta = DELTA_CHANGED
+    elif effect.effect == EFFECT_IGNORED:
+        reason = REASON_IGNORED_NONBLOCKING
+    else:
+        return
+
+    _append_proof_record(
+        proof_ledger,
+        decision_type="nonblocking",
+        outcome=outcome,
+        proof_status=PROOF_STATUS_NOT_APPLICABLE,
+        reason=reason,
+        candidate=_facet_from_line(line, effect=effect, syntax=syntax),
+        covering=None,
+        strict_agh_delta=strict_delta,
+        project_policy_delta=project_delta,
+        sample={"effect_reason": effect.reason, "docs_source": effect.docs_source},
+    )
+
+
+def _record_regex_uncertain_kept(
+    proof_ledger: ProofLedger | None,
+    *,
+    line: str,
+    effect: object,
+    syntax: RuleSyntax,
+) -> None:
+    """Record preserved regex rows as uncertain structural-pruning coverage."""
+    _append_proof_record(
+        proof_ledger,
+        decision_type="regex_uncertain",
+        outcome=OUTCOME_KEPT,
+        proof_status=PROOF_STATUS_UNCERTAIN,
+        reason=REASON_REGEX_UNCERTAIN_KEPT,
+        candidate=_facet_from_line(line, effect=effect, syntax=syntax),
+        covering=None,
+        strict_agh_delta=DELTA_UNCERTAIN,
+        project_policy_delta=DELTA_UNCERTAIN,
+        sample={"effect_reason": effect.reason, "docs_source": effect.docs_source},
+    )
+
+
+def _record_cross_format_broadened(
+    proof_ledger: ProofLedger | None,
+    *,
+    line: str,
+    abp_rule: str,
+    domain: str,
+    effect: object,
+    syntax: RuleSyntax,
+) -> None:
+    """Record hosts/plain-domain promotion under the project aggressive policy."""
+    _append_proof_record(
+        proof_ledger,
+        decision_type="cross_format_broadened",
+        outcome=OUTCOME_CHANGED,
+        proof_status=PROOF_STATUS_PROVEN,
+        reason=REASON_CROSS_FORMAT_BROADENED,
+        candidate=_facet_from_line(
+            line,
+            effect=effect,
+            syntax=syntax,
+            normalized_rule=abp_rule,
+            domain=domain,
+            rule_kind=RULE_KIND_ABP,
+        ),
+        covering=None,
+        strict_agh_delta=DELTA_GAINED,
+        project_policy_delta=DELTA_PRESERVED,
+        sample={
+            "input_scope": effect.scope,
+            "output_scope": "apex_and_subdomains",
+            "policy": "project_policy_promotes_to_abp",
+        },
     )
 
 
@@ -664,6 +946,7 @@ def _parse_and_compress_lines(
     exceptions: ExceptionRules,
     other_rules: set[str],
     duplicate_index: set[RuleDuplicateKey],
+    proof_ledger: ProofLedger | None,
 ) -> None:
     """Phase 1: Parse all rules, convert formats to ABP, and categorize them."""
     for line in lines:
@@ -677,17 +960,37 @@ def _parse_and_compress_lines(
 
         syntax = classify_rule_syntax(line)
         if syntax.has_url_path or syntax.is_invalid:
+            _record_nonblocking_proof(
+                proof_ledger,
+                line=line,
+                effect=effect,
+                syntax=syntax,
+            )
             stats.malformed_discarded += 1
             continue
 
         if _is_nonblocking_effect(effect.effect):
+            _record_nonblocking_proof(
+                proof_ledger,
+                line=line,
+                effect=effect,
+                syntax=syntax,
+            )
             if effect.reason == "local_hostname_ignored":
                 stats.local_hostname_pruned += 1
             continue
 
         # ABP-style rules
         if line.startswith(("||", "@@||")):
-            record = _parse_abp_rule(line)
+            record = _parse_abp_rule(
+                line,
+                source_rule=line,
+                source_kind=effect.syntax_kind,
+                source_effect=effect.effect,
+                source_scope=effect.scope,
+                source_reason=effect.reason,
+                source_docs_source=effect.docs_source,
+            )
 
             if record is None:
                 stats.malformed_discarded += 1
@@ -731,7 +1034,15 @@ def _parse_and_compress_lines(
                     continue
 
                 abp_rule = f"||{domain}^"
-                record = _parse_abp_rule(abp_rule)
+                record = _parse_abp_rule(
+                    abp_rule,
+                    source_rule=line,
+                    source_kind=effect.syntax_kind,
+                    source_effect=effect.effect,
+                    source_scope=effect.scope,
+                    source_reason=effect.reason,
+                    source_docs_source=effect.docs_source,
+                )
                 if record is not None and _store_rule_variant(
                     abp_rules,
                     _rule_storage_key(record),
@@ -741,6 +1052,14 @@ def _parse_and_compress_lines(
                 ):
                     stats.formats_compressed += 1
                     stats.compression_policy_broadened += 1
+                    _record_cross_format_broadened(
+                        proof_ledger,
+                        line=line,
+                        abp_rule=abp_rule,
+                        domain=domain,
+                        effect=effect,
+                        syntax=syntax,
+                    )
             continue
 
         # Plain domain rules
@@ -748,7 +1067,15 @@ def _parse_and_compress_lines(
             domain = normalize_domain(line)
             if domain and domain not in LOCAL_HOSTNAMES:
                 abp_rule = f"||{domain}^"
-                record = _parse_abp_rule(abp_rule)
+                record = _parse_abp_rule(
+                    abp_rule,
+                    source_rule=line,
+                    source_kind=effect.syntax_kind,
+                    source_effect=effect.effect,
+                    source_scope=effect.scope,
+                    source_reason=effect.reason,
+                    source_docs_source=effect.docs_source,
+                )
                 if record is not None and _store_rule_variant(
                     abp_rules,
                     _rule_storage_key(record),
@@ -758,6 +1085,14 @@ def _parse_and_compress_lines(
                 ):
                     stats.formats_compressed += 1
                     stats.compression_policy_broadened += 1
+                    _record_cross_format_broadened(
+                        proof_ledger,
+                        line=line,
+                        abp_rule=abp_rule,
+                        domain=domain,
+                        effect=effect,
+                        syntax=syntax,
+                    )
             else:
                 stats.local_hostname_pruned += 1
             continue
@@ -768,6 +1103,12 @@ def _parse_and_compress_lines(
                 other_rules.add(line)
                 if effect.syntax_kind == RULE_KIND_REGEX:
                     stats.regex_preserved_no_pruning += 1
+                    _record_regex_uncertain_kept(
+                        proof_ledger,
+                        line=line,
+                        effect=effect,
+                        syntax=syntax,
+                    )
             else:
                 stats.duplicate_pruned += 1
             continue
@@ -983,6 +1324,8 @@ def _write_output(
 def compile_rules(
     lines: Iterable[str],
     output_file: str,
+    *,
+    proof_ledger: ProofLedger | None = None,
 ) -> CompileStats:
     """
     Compile and deduplicate rules with format compression.
@@ -995,6 +1338,7 @@ def compile_rules(
     Args:
         lines: Iterable of rule strings to compile (e.g., list, generator, or file object)
         output_file: Path to write the compiled output
+        proof_ledger: Optional append-only ledger for compiler proof decisions.
 
     Returns:
         CompileStats with metrics about the compilation process
@@ -1017,6 +1361,7 @@ def compile_rules(
         exceptions=exceptions,
         other_rules=other_rules,
         duplicate_index=duplicate_index,
+        proof_ledger=proof_ledger,
     )
 
     _record_compiler_cardinalities(

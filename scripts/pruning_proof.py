@@ -53,6 +53,8 @@ REASON_KEPT_BECAUSE_UNCERTAIN: Final[str] = "kept_because_uncertain"
 REASON_UNSUPPORTED_MODIFIER_REMOVED: Final[str] = "unsupported_modifier_removed"
 REASON_BADFILTER_DISABLED: Final[str] = "badfilter_disabled"
 REASON_DNSREWRITE_CHANGED: Final[str] = "dnsrewrite_changed"
+REASON_IGNORED_NONBLOCKING: Final[str] = "ignored_nonblocking"
+REASON_REGEX_UNCERTAIN_KEPT: Final[str] = "regex_uncertain_kept"
 REASON_CROSS_FORMAT_BROADENED: Final[str] = "cross_format_broadened"
 
 PROOF_REPORT_SCHEMA_VERSION: Final[int] = 1
@@ -80,8 +82,10 @@ __all__ = [
     "REASON_DNSREWRITE_CHANGED",
     "REASON_DUPLICATE_RULE",
     "REASON_EXCEPTION_COVERED",
+    "REASON_IGNORED_NONBLOCKING",
     "REASON_KEPT_BECAUSE_UNCERTAIN",
     "REASON_PARENT_COVERED",
+    "REASON_REGEX_UNCERTAIN_KEPT",
     "REASON_TLD_WILDCARD_COVERED",
     "REASON_UNSUPPORTED_MODIFIER_REMOVED",
     "REASON_WILDCARD_COVERED",
