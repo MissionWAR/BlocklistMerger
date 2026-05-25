@@ -624,6 +624,118 @@ def test_semantic_diagnostics_are_inspect_only_for_release_validation(tmp_path: 
     assert semantic_findings == []
 
 
+def test_stage_summaries_are_inspect_only_for_release_validation(tmp_path: Path) -> None:
+    pipeline_stats = _pipeline_stats(2)
+    pipeline_stats["stage_summaries"] = {
+        "cleaner": {
+            "normalize": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {"trimmed": 999_999},
+            },
+            "prefilter": {
+                "processed": 999_999,
+                "emitted": 0,
+                "discarded": 999_999,
+                "reasons": {"comment": 999_999},
+            },
+            "compatibility": {
+                "processed": 999_999,
+                "emitted": 0,
+                "discarded": 999_999,
+                "reasons": {"unsupported_modifier": 999_999},
+            },
+            "syntax": {
+                "processed": 999_999,
+                "emitted": 0,
+                "discarded": 999_999,
+                "reasons": {"invalid": 999_999},
+            },
+            "emit": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {"kept": 999_999},
+            },
+        },
+        "compiler": {
+            "parse": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 999_999,
+                "reasons": {"malformed": 999_999},
+            },
+            "normalize": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {},
+            },
+            "classify": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {"unsupported": 999_999},
+            },
+            "compress": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {"hosts_plain_promoted_to_abp": 999_999},
+            },
+            "index": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 999_999,
+                "reasons": {"duplicate": 999_999},
+            },
+            "prune": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 999_999,
+                "reasons": {"abp_subdomain": 999_999},
+            },
+            "write": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {},
+            },
+        },
+    }
+
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||tracker.example.com^"],
+        pipeline_stats=pipeline_stats,
+    )
+
+    stage_tokens = (
+        "stage",
+        "stage_summaries",
+        "cleaner",
+        "compiler",
+        "normalize",
+        "prefilter",
+        "compatibility",
+        "syntax",
+        "emit",
+        "parse",
+        "classify",
+        "compress",
+        "index",
+        "prune",
+        "write",
+    )
+    stage_findings = [
+        finding
+        for finding in [*summary.errors, *summary.warnings]
+        if any(token in str(finding).lower() for token in stage_tokens)
+    ]
+    assert stage_findings == []
+
+
 def test_cli_returns_nonzero_for_errors_and_writes_summaries(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

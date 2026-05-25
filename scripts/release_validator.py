@@ -23,7 +23,6 @@ from scripts.compiler import (
     PLAIN_DOMAIN_PATTERN,
     extract_abp_info,
     extract_hosts_info,
-    normalize_domain,
     walk_parent_domains,
 )
 from scripts.rule_syntax import classify_rule_syntax
@@ -238,6 +237,11 @@ def _non_empty_line_count(path: Path) -> int:
         return sum(1 for line in f if line.strip())
 
 
+def _canonicalize_domain(domain: str) -> str:
+    """Return the release validator's canonical domain key."""
+    return domain.lower().strip().rstrip(".")
+
+
 def _source_health_counts(report: dict[str, object]) -> tuple[int, dict[str, int]]:
     """Extract stable source-health totals from a report."""
     source_count = int(report.get("source_count") or 0)
@@ -422,11 +426,11 @@ def _add_blocked_domain(
     ip, hosts_domains = extract_hosts_info(line)
     if ip:
         for host_domain in hosts_domains:
-            blocked_domains.add(normalize_domain(host_domain))
+            blocked_domains.add(_canonicalize_domain(host_domain))
         return
 
     if PLAIN_DOMAIN_PATTERN.match(line):
-        domain = normalize_domain(line)
+        domain = _canonicalize_domain(line)
         if domain and domain not in LOCAL_HOSTNAMES:
             blocked_domains.add(domain)
 
@@ -511,15 +515,18 @@ def _domain_is_blocked(
     wildcard_domains: set[str],
 ) -> bool:
     """Return True when emitted domain or parent coverage blocks a domain."""
-    normalized = normalize_domain(domain)
-    if normalized in blocked_domains:
+    canonical_domain = _canonicalize_domain(domain)
+    if canonical_domain in blocked_domains:
         return True
 
-    for parent in walk_parent_domains(normalized):
+    for parent in walk_parent_domains(canonical_domain):
         if parent in blocked_domains:
             return True
 
-    return any(normalized.endswith(f".{wildcard_domain}") for wildcard_domain in wildcard_domains)
+    return any(
+        canonical_domain.endswith(f".{wildcard_domain}")
+        for wildcard_domain in wildcard_domains
+    )
 
 
 def validate_canaries(
