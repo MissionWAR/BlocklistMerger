@@ -642,7 +642,7 @@ class TestSaveStatsJson:
         with open(json_path) as f:
             data = json.load(f)
 
-        assert data["schema_version"] == 3
+        assert data["schema_version"] == 4
         assert data["version"] == "1.5.0"
         assert data["timestamp"].endswith("Z")
         assert data["execution_time_seconds"] == 5.5
@@ -678,6 +678,31 @@ class TestSaveStatsJson:
                 "regex_preserved_no_pruning": 19,
             },
         }
+        assert set(data["stage_summaries"]) == {"cleaner", "compiler"}
+        assert set(data["stage_summaries"]["cleaner"]) == {
+            "normalize",
+            "prefilter",
+            "compatibility",
+            "syntax",
+            "emit",
+        }
+        assert set(data["stage_summaries"]["compiler"]) == {
+            "parse",
+            "normalize",
+            "classify",
+            "compress",
+            "index",
+            "prune",
+            "write",
+        }
+        assert data["stage_summaries"]["cleaner"]["normalize"]["reasons"] == {"trimmed": 10}
+        assert data["stage_summaries"]["cleaner"]["emit"]["reasons"] == {"kept": 800}
+        assert data["stage_summaries"]["compiler"]["compress"]["reasons"] == {
+            "hosts_plain_promoted_to_abp": 18,
+        }
+        serialized_stages = json.dumps(data["stage_summaries"], sort_keys=True)
+        for forbidden in ("sample", "samples", "sample_buckets", "fingerprint", "records"):
+            assert forbidden not in serialized_stages
         assert data["runtime_profile"] == runtime_profile
         assert not os.path.exists(os.path.join(tmp_dir, "stats.tmp"))
 
@@ -719,7 +744,8 @@ class TestPipelineCli:
         assert proof_data["report_type"] == "capped"
         assert proof_data["summary"]["total_records"] >= 1
         assert proof_sample["fingerprint"]
-        assert stats_data["schema_version"] == 3
+        assert stats_data["schema_version"] == 4
+        assert "stage_summaries" in stats_data
         assert "coverage_proof" not in stats_data
         assert "coverage-proof" not in json.dumps(stats_data)
 

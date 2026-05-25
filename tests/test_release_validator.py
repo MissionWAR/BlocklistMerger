@@ -56,7 +56,7 @@ def _source_health(statuses: list[str]) -> dict[str, object]:
 
 def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "version": "1.5.0",
         "timestamp": "2026-05-17T15:01:00Z",
         "execution_time_seconds": 1.25,
@@ -104,6 +104,64 @@ def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
             "compression_policy": {
                 "hosts_plain_promoted_to_abp": 0,
                 "regex_preserved_no_pruning": 0,
+            },
+        },
+        "stage_summaries": {
+            "cleaner": {
+                "normalize": {"processed": 0, "emitted": 0, "discarded": 0, "reasons": {}},
+                "prefilter": {"processed": 0, "emitted": 0, "discarded": 0, "reasons": {}},
+                "compatibility": {
+                    "processed": 0,
+                    "emitted": 0,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "syntax": {"processed": 0, "emitted": 0, "discarded": 0, "reasons": {}},
+                "emit": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {"kept": lines_output},
+                },
+            },
+            "compiler": {
+                "parse": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "normalize": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "classify": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {"block": lines_output},
+                },
+                "compress": {"processed": 0, "emitted": 0, "discarded": 0, "reasons": {}},
+                "index": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "prune": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "write": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
             },
         },
         "runtime_profile": {
@@ -370,7 +428,7 @@ def test_pipeline_output_count_mismatch_hard_fails_with_diagnostics(tmp_path: Pa
         "scanned_output_rules": 2,
         "absolute_delta": 3,
         "pipeline_stats_path": str(paths["pipeline_stats"]),
-        "schema_version": 3,
+        "schema_version": 4,
         "field": "statistics.lines_output",
     }
 
@@ -452,7 +510,7 @@ def test_legacy_pipeline_stats_schema_is_hard_error_without_count_comparison(
     tmp_path: Path,
 ) -> None:
     pipeline_stats = _pipeline_stats(5)
-    pipeline_stats["schema_version"] = 2
+    pipeline_stats["schema_version"] = 3
 
     summary = _validate(tmp_path, pipeline_stats=pipeline_stats)
 
