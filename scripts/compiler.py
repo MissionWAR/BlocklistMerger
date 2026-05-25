@@ -698,7 +698,6 @@ def _is_nonblocking_effect(effect: str) -> bool:
         EFFECT_DISABLE,
         EFFECT_IGNORED,
         EFFECT_UNSUPPORTED,
-        EFFECT_UNCERTAIN,
     }
 
 
