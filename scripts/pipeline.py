@@ -48,7 +48,7 @@ from scripts.compiler import CompileStats, compile_rules
 # CONFIGURATION CONSTANTS
 # =============================================================================
 
-PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 2
+PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 3
 
 # =============================================================================
 # DATA STRUCTURES
@@ -81,6 +81,41 @@ class PipelineStats(TypedDict):
     malformed_discarded: int
     abp_kept: int
     other_kept: int
+    rule_effect_block: int
+    rule_effect_exception: int
+    rule_effect_rewrite: int
+    rule_effect_disable: int
+    rule_effect_ignored: int
+    rule_effect_unsupported: int
+    rule_effect_uncertain: int
+    compression_policy_broadened: int
+    regex_preserved_no_pruning: int
+
+
+class RuleEffectCounts(TypedDict):
+    """Inspect-only counts of compiler rule-effect classifications."""
+
+    block: int
+    exception: int
+    rewrite: int
+    disable: int
+    ignored: int
+    unsupported: int
+    uncertain: int
+
+
+class CompressionPolicyDiagnostics(TypedDict):
+    """Inspect-only counters for project compression policy decisions."""
+
+    hosts_plain_promoted_to_abp: int
+    regex_preserved_no_pruning: int
+
+
+class SemanticsDiagnostics(TypedDict):
+    """Nested semantics view for the versioned pipeline stats JSON report."""
+
+    rule_effect_counts: RuleEffectCounts
+    compression_policy: CompressionPolicyDiagnostics
 
 
 class StageDurations(TypedDict):
@@ -276,6 +311,15 @@ def _new_pipeline_stats() -> PipelineStats:
         "malformed_discarded": 0,
         "abp_kept": 0,
         "other_kept": 0,
+        "rule_effect_block": 0,
+        "rule_effect_exception": 0,
+        "rule_effect_rewrite": 0,
+        "rule_effect_disable": 0,
+        "rule_effect_ignored": 0,
+        "rule_effect_unsupported": 0,
+        "rule_effect_uncertain": 0,
+        "compression_policy_broadened": 0,
+        "regex_preserved_no_pruning": 0,
     }
 
 
@@ -345,6 +389,25 @@ def _empty_runtime_profile() -> RuntimeProfile:
             "tracemalloc_current_bytes": None,
             "tracemalloc_peak_bytes": None,
             "resource_ru_maxrss": None,
+        },
+    }
+
+
+def _semantics_diagnostics(stats: PipelineStats) -> SemanticsDiagnostics:
+    """Return the nested inspect-only semantics view derived from flat counters."""
+    return {
+        "rule_effect_counts": {
+            "block": stats["rule_effect_block"],
+            "exception": stats["rule_effect_exception"],
+            "rewrite": stats["rule_effect_rewrite"],
+            "disable": stats["rule_effect_disable"],
+            "ignored": stats["rule_effect_ignored"],
+            "unsupported": stats["rule_effect_unsupported"],
+            "uncertain": stats["rule_effect_uncertain"],
+        },
+        "compression_policy": {
+            "hosts_plain_promoted_to_abp": stats["compression_policy_broadened"],
+            "regex_preserved_no_pruning": stats["regex_preserved_no_pruning"],
         },
     }
 
@@ -453,6 +516,17 @@ def process_files_with_profile(input_dir: str, output_file: str) -> PipelineRunR
     stats["abp_kept"] = compile_stats.abp_kept
     stats["other_kept"] = compile_stats.other_kept
 
+    # Semantic diagnostics from compiler classification.
+    stats["rule_effect_block"] = compile_stats.rule_effect_block
+    stats["rule_effect_exception"] = compile_stats.rule_effect_exception
+    stats["rule_effect_rewrite"] = compile_stats.rule_effect_rewrite
+    stats["rule_effect_disable"] = compile_stats.rule_effect_disable
+    stats["rule_effect_ignored"] = compile_stats.rule_effect_ignored
+    stats["rule_effect_unsupported"] = compile_stats.rule_effect_unsupported
+    stats["rule_effect_uncertain"] = compile_stats.rule_effect_uncertain
+    stats["compression_policy_broadened"] = compile_stats.compression_policy_broadened
+    stats["regex_preserved_no_pruning"] = compile_stats.regex_preserved_no_pruning
+
     runtime_profile: RuntimeProfile = {
         "worker_count": _cleaner_worker_count(),
         "stage_durations_seconds": {
@@ -524,6 +598,27 @@ def print_summary(stats: PipelineStats) -> None:
     )
     print(f"   Other rules: {stats['other_kept']:>10,}")
 
+    print("\nSemantic diagnostics:")
+    print(
+        "   Rule effects: "
+        f"block={stats['rule_effect_block']:,}, "
+        f"exception={stats['rule_effect_exception']:,}, "
+        f"rewrite={stats['rule_effect_rewrite']:,}, "
+        f"disable={stats['rule_effect_disable']:,}, "
+        f"ignored={stats['rule_effect_ignored']:,}, "
+        f"unsupported={stats['rule_effect_unsupported']:,}, "
+        f"uncertain={stats['rule_effect_uncertain']:,}"
+    )
+    print("   Compression policy:")
+    print(
+        "     Hosts/plain promoted to ABP: "
+        f"{stats['compression_policy_broadened']:>10,}"
+    )
+    print(
+        "     Regex preserved without pruning: "
+        f"{stats['regex_preserved_no_pruning']:>10,}"
+    )
+
 
 def save_stats_json(
     stats: PipelineStats,
@@ -546,6 +641,7 @@ def save_stats_json(
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "execution_time_seconds": round(total_time, 2),
         "statistics": dict(stats),
+        "semantics": _semantics_diagnostics(stats),
         "runtime_profile": runtime_profile or _empty_runtime_profile(),
     }
 

@@ -33,7 +33,13 @@ def _run_case(case_name: str, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "case_name",
-    ["whitelist_basic", "whitelist_wildcard", "modifiers_priority", "semantic_whitelist_scope"],
+    [
+        "whitelist_basic",
+        "whitelist_wildcard",
+        "modifiers_priority",
+        "semantic_whitelist_scope",
+        "agh_semantics_effects",
+    ],
 )
 def test_pipeline_fixtures(case_name: str, tmp_path: Path) -> None:
     """End-to-end tests using small, focused fixtures and golden outputs."""

@@ -1,0 +1,13 @@
+0.0.0.0 hosts-policy.example.com
+plain-policy.example.com
+||unsupported-policy.example.com^$future=value
+||disabled-policy.example.com^$badfilter
+/^regex-policy\.example\.com$/
+||covered-policy.example.com^
+@@||covered-policy.example.com^
+||client-policy.example.com^$client=10.0.0.1
+||ctag-policy.example.com^$ctag=pc
+||dnstype-policy.example.com^$dnstype=A
+||denyallow-policy.example.com^$denyallow=allowed.example.com
+||rewrite-policy.example.com^$dnsrewrite=1.2.3.4
+||important-policy.example.com^$important

@@ -1,0 +1,8 @@
+||hosts-policy.example.com^
+||plain-policy.example.com^
+||client-policy.example.com^$client=10.0.0.1
+||ctag-policy.example.com^$ctag=pc
+||dnstype-policy.example.com^$dnstype=A
+||denyallow-policy.example.com^$denyallow=allowed.example.com
+||important-policy.example.com^$important
+/^regex-policy\.example\.com$/
