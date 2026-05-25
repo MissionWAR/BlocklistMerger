@@ -804,6 +804,20 @@ class TestCompilerPruningProofLedger:
         self._assert_required_facets(proven_record)
         self._assert_required_facets(uncertain_record)
 
+    def test_important_exception_sample_uses_exception_scope_proof(self):
+        rules, stats, ledger = self._compile([
+            "||important-exception.example.com^",
+            "@@||important-exception.example.com^$important",
+        ])
+
+        record = self._record(ledger, REASON_EXCEPTION_COVERED)
+
+        assert rules == []
+        assert stats.whitelist_conflict_pruned == 1
+        assert record.outcome == OUTCOME_REMOVED
+        assert record.sample["modifier_scope_proven"] is True
+        self._assert_required_facets(record)
+
     def test_unproven_parent_modifier_scope_records_kept_uncertain(self):
         child_rule = "||child.example.com^$important"
         rules, stats, ledger = self._compile(["||example.com^", child_rule])

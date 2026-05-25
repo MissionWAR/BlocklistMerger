@@ -1282,6 +1282,7 @@ def _record_proven_pruning(
     outcome: str = OUTCOME_PRUNED,
     strict_agh_delta: str = DELTA_PRESERVED,
     project_policy_delta: str = DELTA_PRESERVED,
+    modifier_scope_proven: bool | None = None,
 ) -> None:
     """Record a proven pruning or removal decision for active compiler coverage."""
     _append_proof_record(
@@ -1297,9 +1298,13 @@ def _record_proven_pruning(
         sample=lambda: {
             "candidate_rule": candidate.rule,
             "covering_rule": covering.rule,
-            "modifier_scope_proven": modifier_scope_covers(
-                covering.modifiers,
-                candidate.modifiers,
+            "modifier_scope_proven": (
+                modifier_scope_proven
+                if modifier_scope_proven is not None
+                else modifier_scope_covers(
+                    covering.modifiers,
+                    candidate.modifiers,
+                )
             ),
         },
     )
@@ -1357,6 +1362,10 @@ def _prune_redundant_rules(
                     outcome=OUTCOME_REMOVED,
                     strict_agh_delta=DELTA_CHANGED,
                     project_policy_delta=DELTA_CHANGED,
+                    modifier_scope_proven=_exception_modifier_scope_covers(
+                        covering_exception,
+                        record,
+                    ),
                 )
                 continue
             uncertain_covering = _find_domain_scope_exception(record, exceptions)
@@ -1467,6 +1476,10 @@ def _write_output(
                         outcome=OUTCOME_REMOVED,
                         strict_agh_delta=DELTA_CHANGED,
                         project_policy_delta=DELTA_CHANGED,
+                        modifier_scope_proven=_exception_modifier_scope_covers(
+                            covering_exception,
+                            record,
+                        ),
                     )
                     continue
                 f.write(record.rule + "\n")
