@@ -56,7 +56,7 @@ def _source_health(statuses: list[str]) -> dict[str, object]:
 
 def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "version": "1.5.0",
         "timestamp": "2026-05-17T15:01:00Z",
         "execution_time_seconds": 1.25,
@@ -104,6 +104,64 @@ def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
             "compression_policy": {
                 "hosts_plain_promoted_to_abp": 0,
                 "regex_preserved_no_pruning": 0,
+            },
+        },
+        "stage_summaries": {
+            "cleaner": {
+                "normalize": {"processed": 0, "emitted": 0, "discarded": 0, "reasons": {}},
+                "prefilter": {"processed": 0, "emitted": 0, "discarded": 0, "reasons": {}},
+                "compatibility": {
+                    "processed": 0,
+                    "emitted": 0,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "syntax": {"processed": 0, "emitted": 0, "discarded": 0, "reasons": {}},
+                "emit": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {"kept": lines_output},
+                },
+            },
+            "compiler": {
+                "parse": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "normalize": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "classify": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {"block": lines_output},
+                },
+                "compress": {"processed": 0, "emitted": 0, "discarded": 0, "reasons": {}},
+                "index": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "prune": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
+                "write": {
+                    "processed": lines_output,
+                    "emitted": lines_output,
+                    "discarded": 0,
+                    "reasons": {},
+                },
             },
         },
         "runtime_profile": {
@@ -370,7 +428,7 @@ def test_pipeline_output_count_mismatch_hard_fails_with_diagnostics(tmp_path: Pa
         "scanned_output_rules": 2,
         "absolute_delta": 3,
         "pipeline_stats_path": str(paths["pipeline_stats"]),
-        "schema_version": 3,
+        "schema_version": 4,
         "field": "statistics.lines_output",
     }
 
@@ -452,7 +510,7 @@ def test_legacy_pipeline_stats_schema_is_hard_error_without_count_comparison(
     tmp_path: Path,
 ) -> None:
     pipeline_stats = _pipeline_stats(5)
-    pipeline_stats["schema_version"] = 2
+    pipeline_stats["schema_version"] = 3
 
     summary = _validate(tmp_path, pipeline_stats=pipeline_stats)
 
@@ -564,6 +622,118 @@ def test_semantic_diagnostics_are_inspect_only_for_release_validation(tmp_path: 
         or "regex_preserved_no_pruning" in str(finding)
     ]
     assert semantic_findings == []
+
+
+def test_stage_summaries_are_inspect_only_for_release_validation(tmp_path: Path) -> None:
+    pipeline_stats = _pipeline_stats(2)
+    pipeline_stats["stage_summaries"] = {
+        "cleaner": {
+            "normalize": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {"trimmed": 999_999},
+            },
+            "prefilter": {
+                "processed": 999_999,
+                "emitted": 0,
+                "discarded": 999_999,
+                "reasons": {"comment": 999_999},
+            },
+            "compatibility": {
+                "processed": 999_999,
+                "emitted": 0,
+                "discarded": 999_999,
+                "reasons": {"unsupported_modifier": 999_999},
+            },
+            "syntax": {
+                "processed": 999_999,
+                "emitted": 0,
+                "discarded": 999_999,
+                "reasons": {"invalid": 999_999},
+            },
+            "emit": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {"kept": 999_999},
+            },
+        },
+        "compiler": {
+            "parse": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 999_999,
+                "reasons": {"malformed": 999_999},
+            },
+            "normalize": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {},
+            },
+            "classify": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {"unsupported": 999_999},
+            },
+            "compress": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {"hosts_plain_promoted_to_abp": 999_999},
+            },
+            "index": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 999_999,
+                "reasons": {"duplicate": 999_999},
+            },
+            "prune": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 999_999,
+                "reasons": {"abp_subdomain": 999_999},
+            },
+            "write": {
+                "processed": 999_999,
+                "emitted": 999_999,
+                "discarded": 0,
+                "reasons": {},
+            },
+        },
+    }
+
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||tracker.example.com^"],
+        pipeline_stats=pipeline_stats,
+    )
+
+    stage_tokens = (
+        "stage",
+        "stage_summaries",
+        "cleaner",
+        "compiler",
+        "normalize",
+        "prefilter",
+        "compatibility",
+        "syntax",
+        "emit",
+        "parse",
+        "classify",
+        "compress",
+        "index",
+        "prune",
+        "write",
+    )
+    stage_findings = [
+        finding
+        for finding in [*summary.errors, *summary.warnings]
+        if any(token in str(finding).lower() for token in stage_tokens)
+    ]
+    assert stage_findings == []
 
 
 def test_cli_returns_nonzero_for_errors_and_writes_summaries(

@@ -5,6 +5,8 @@ test_compiler.py
 Edge case tests for the compiler module.
 Tests deduplication logic, TLD wildcards, and cross-format optimization.
 """
+import inspect
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -44,6 +46,7 @@ from scripts.pruning_proof import (
     REASON_WILDCARD_COVERED,
     ProofLedger,
 )
+from scripts.stage_diagnostics import COMPILER_STAGES, compiler_stage_summaries_from_stats
 
 
 def test_hosts_plain_policy_tests_do_not_use_misleading_legacy_names():
@@ -594,6 +597,44 @@ class TestCompilerProofLedgerPlumbing:
         assert stats.total_output == 4
         assert stats.formats_compressed == 2
         assert stats.compression_policy_broadened == 2
+
+    def test_compile_rules_signature_keeps_only_optional_proof_ledger(self):
+        signature = inspect.signature(compile_rules)
+        parameters = signature.parameters
+
+        assert list(parameters) == ["lines", "output_file", "proof_ledger"]
+        assert parameters["proof_ledger"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters["proof_ledger"].default is None
+        assert "stage_summaries" not in CompileStats.__dataclass_fields__
+
+    def test_compiler_stage_summaries_are_aggregate_only_and_preserve_output(self):
+        lines = [
+            "||example.com^",
+            "||example.com^",
+            "||sub.example.com^",
+            "0.0.0.0 host-policy.example.net",
+            "plain-policy.example.org",
+            "/regex.*/",
+            "||^",
+        ]
+
+        rules, stats = self._compile(lines)
+        summaries = compiler_stage_summaries_from_stats(stats)
+        serialized = json.dumps(summaries, sort_keys=True)
+
+        assert rules == [
+            "||example.com^",
+            "||host-policy.example.net^",
+            "||plain-policy.example.org^",
+            "/regex.*/",
+        ]
+        assert tuple(summaries) == COMPILER_STAGES
+        assert summaries["parse"]["reasons"] == {"malformed": 1}
+        assert summaries["compress"]["reasons"] == {"hosts_plain_promoted_to_abp": 2}
+        assert summaries["index"]["reasons"] == {"duplicate": 1}
+        assert summaries["prune"]["reasons"] == {"abp_subdomain": 1}
+        for forbidden in ("sample", "fingerprint", "records", "raw_rule", "rules"):
+            assert forbidden not in serialized
 
     def test_proof_record_append_does_not_materialize_ledger_records(self):
         """Proof appends should stay O(1) at production ledger sizes."""

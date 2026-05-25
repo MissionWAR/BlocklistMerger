@@ -49,12 +49,17 @@ from scripts.pruning_proof import (
     render_capped_report,
     write_report_json,
 )
+from scripts.stage_diagnostics import (
+    StageSummaries,
+    cleaner_stage_summaries_from_stats,
+    compiler_stage_summaries_from_stats,
+)
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
 # =============================================================================
 
-PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 3
+PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 4
 
 # =============================================================================
 # DATA STRUCTURES
@@ -122,6 +127,13 @@ class SemanticsDiagnostics(TypedDict):
 
     rule_effect_counts: RuleEffectCounts
     compression_policy: CompressionPolicyDiagnostics
+
+
+class StageDiagnostics(TypedDict):
+    """Nested inspect-only stage summaries for the versioned stats report."""
+
+    cleaner: StageSummaries
+    compiler: StageSummaries
 
 
 class StageDurations(TypedDict):
@@ -418,6 +430,21 @@ def _semantics_diagnostics(stats: PipelineStats) -> SemanticsDiagnostics:
     }
 
 
+def _stage_summaries(
+    stats: PipelineStats,
+    runtime_profile: RuntimeProfile | None = None,
+) -> StageDiagnostics:
+    """Return inspect-only stage summaries derived from aggregate counters."""
+    compiler_stats: dict[str, object] = dict(stats)
+    if runtime_profile is not None:
+        compiler_stats.update(runtime_profile["compiler_cardinalities"])
+
+    return {
+        "cleaner": cleaner_stage_summaries_from_stats(stats),
+        "compiler": compiler_stage_summaries_from_stats(compiler_stats),
+    }
+
+
 # =============================================================================
 # PIPELINE FUNCTIONS
 # =============================================================================
@@ -685,6 +712,7 @@ def save_stats_json(
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "execution_time_seconds": round(total_time, 2),
         "statistics": dict(stats),
+        "stage_summaries": _stage_summaries(stats, runtime_profile),
         "semantics": _semantics_diagnostics(stats),
         "runtime_profile": runtime_profile or _empty_runtime_profile(),
     }
