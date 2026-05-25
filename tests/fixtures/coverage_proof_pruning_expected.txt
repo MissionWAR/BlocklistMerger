@@ -1,0 +1,8 @@
+||*.autos^
+||parent-proof.example.com^
+||*.wild-proof.example.com^
+||duplicate-proof.example.com^$client=10.0.0.1,dnstype=a
+||uncertain-proof.example.com^
+||hosts-proof.example.com^
+||plain-proof.example.com^
+/^regex-proof\.example\.com$/
