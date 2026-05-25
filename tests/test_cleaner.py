@@ -7,14 +7,25 @@ Edge case tests for the cleaner module.
 import pytest
 
 from scripts.cleaner import (
+    DISCARD_REASON_COMMENT,
+    DISCARD_REASON_COSMETIC,
+    DISCARD_REASON_EMPTY,
     DISCARD_REASON_INVALID,
     DISCARD_REASON_UNSUPPORTED_MODIFIER,
     DISCARD_REASON_URL_PATH,
+    CleanResult,
+    CleanStats,
     clean_line,
     extract_modifiers,
     has_unsupported_modifiers,
     is_cosmetic_rule,
     is_url_path_rule,
+)
+from scripts.stage_diagnostics import (
+    CLEANER_STAGE_COMPATIBILITY,
+    CLEANER_STAGE_PREFILTER,
+    CLEANER_STAGE_SYNTAX,
+    cleaner_stage_for_reason,
 )
 
 
@@ -174,6 +185,24 @@ class TestCleanLine:
         assert result.line == "||example.com^"
         assert was_trimmed
 
+    def test_public_tuple_shapes_remain_compatible(self):
+        result, was_trimmed = clean_line("  ||example.com^  ")
+
+        assert tuple(result) == ("||example.com^", False, None)
+        assert was_trimmed is True
+        assert CleanResult._fields == ("line", "discarded", "reason")
+        assert CleanStats._fields == (
+            "total_lines",
+            "kept_lines",
+            "comments_removed",
+            "cosmetic_removed",
+            "unsupported_modifier_removed",
+            "empty_removed",
+            "url_path_removed",
+            "invalid_removed",
+            "trimmed",
+        )
+
 
 class TestUrlPathRules:
     """Test URL path rule detection logic."""
@@ -208,6 +237,29 @@ class TestUrlPathRules:
 
     def test_abp_rule_supported_modifier_with_slash(self):
         assert not is_url_path_rule("||example.org^$client=192.168.0.0/24")
+
+
+class TestCleanerStageProjection:
+    """Test cleaner reason projection without changing reason strings."""
+
+    @pytest.mark.parametrize(
+        ("reason", "stage"),
+        [
+            (DISCARD_REASON_COMMENT, CLEANER_STAGE_PREFILTER),
+            (DISCARD_REASON_EMPTY, CLEANER_STAGE_PREFILTER),
+            (DISCARD_REASON_COSMETIC, CLEANER_STAGE_COMPATIBILITY),
+            (DISCARD_REASON_UNSUPPORTED_MODIFIER, CLEANER_STAGE_COMPATIBILITY),
+            (DISCARD_REASON_URL_PATH, CLEANER_STAGE_COMPATIBILITY),
+            (DISCARD_REASON_INVALID, CLEANER_STAGE_SYNTAX),
+        ],
+    )
+    def test_terminal_reasons_map_to_stages(self, reason, stage):
+        assert cleaner_stage_for_reason(reason) == stage
+        assert reason not in {
+            CLEANER_STAGE_PREFILTER,
+            CLEANER_STAGE_COMPATIBILITY,
+            CLEANER_STAGE_SYNTAX,
+        }
 
 
 class TestEdgeCases:
