@@ -329,6 +329,14 @@ class TestCompilation:
         assert stats.other_kept == 1
         assert stats.regex_preserved_no_pruning == 1
 
+    def test_unclassified_other_rule_preserved_direct_input(self):
+        """Unclassified fallback syntax should be kept instead of dropped as nonblocking."""
+        rule = "ad*tracker"
+        rules, stats = self._compile([rule])
+        assert rules == [rule]
+        assert stats.other_kept == 1
+        assert stats.rule_effect_uncertain == 1
+
     def test_other_rules_written_deterministically(self):
         """Other-rule output should not depend on set iteration or input order."""
         lines = [
