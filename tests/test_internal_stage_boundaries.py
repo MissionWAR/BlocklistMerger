@@ -103,6 +103,30 @@ def test_scheduled_workflow_does_not_promote_stage_or_proof_gates() -> None:
         assert token not in text
 
 
+def test_dedicated_profile_wrapper_is_only_manual_profiling_surface() -> None:
+    wrapper = _non_comment_text("scripts/profile_pipeline.py")
+    normal_surfaces = [
+        "scripts/pipeline.py",
+        "scripts/release_validator.py",
+        ".github/workflows/update.yml",
+    ]
+    if Path("run.py").exists():
+        normal_surfaces.append("run.py")
+
+    assert "cprofile" in wrapper
+    assert "--py-spy-speedscope" in wrapper
+    assert "--pyperf-json" in wrapper
+    assert "--dns-diagnostics" in wrapper
+
+    for path in normal_surfaces:
+        text = _non_comment_text(path)
+        assert "scripts.profile_pipeline" not in text
+        assert "--py-spy-speedscope" not in text
+        assert "--py-spy-flamegraph" not in text
+        assert "--pyperf-json" not in text
+        assert "--dns-diagnostics" not in text
+
+
 def test_release_validator_has_no_stage_threshold_logic() -> None:
     code = _python_code_without_strings("scripts/release_validator.py")
     strings = _python_string_literals("scripts/release_validator.py")

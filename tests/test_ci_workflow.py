@@ -171,6 +171,26 @@ def test_release_install_uses_constraints_and_cache_dependency_path() -> None:
     assert 'pip install -q ".[dev]"' not in build_validate
 
 
+def test_scheduled_publish_path_excludes_manual_profile_tools() -> None:
+    """Scheduled release installs and steps must not include manual profiling tools."""
+    workflow = _workflow_text()
+    constraints = _constraints_text()
+    pyproject = _pyproject_text()
+    build_validate = _job_section(workflow, "build_validate")
+
+    for token in ("py-spy", "pyperf", "dnspython", "scripts.profile_pipeline"):
+        assert token not in workflow
+        assert token not in constraints
+
+    assert ".[profile]" not in workflow
+    assert "[project.optional-dependencies]" in pyproject
+    assert "profile = [" in pyproject
+    assert "py-spy" in pyproject
+    assert "dnspython" in pyproject
+    assert "pyperf" not in pyproject
+    assert RELEASE_INSTALL in build_validate
+
+
 def test_python_compatibility_audit_matrix_is_read_only_and_separate() -> None:
     """The Python support audit should not publish or weaken release-job permissions."""
     text = _workflow_text()

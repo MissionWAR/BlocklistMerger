@@ -10,6 +10,9 @@ import pytest
 
 from scripts import profile_pipeline
 
+ROOT = Path(__file__).resolve().parents[1]
+PROFILING_DOC = ROOT / "docs" / "PROFILING.md"
+
 
 def _write_tiny_input(root: Path) -> Path:
     input_dir = root / "input"
@@ -93,6 +96,39 @@ def test_profile_cli_stdlib_path_does_not_require_optional_profiler_tools(
 
 
 @pytest.mark.parametrize(
+    ("flag", "tool", "artifact"),
+    [
+        ("--py-spy-speedscope", "py-spy", "speedscope"),
+        ("--py-spy-flamegraph", "py-spy", "flamegraph"),
+        ("--pyperf-json", "pyperf", "pyperf JSON"),
+        ("--dns-diagnostics", "dnspython", "DNS diagnostics"),
+    ],
+)
+def test_requested_optional_tools_fail_loudly_when_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+    tool: str,
+    artifact: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_dir = _write_tiny_input(tmp_path)
+    monkeypatch.setattr(profile_pipeline.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(profile_pipeline, "_module_available", lambda _name: False)
+
+    assert _run_cli(monkeypatch, [str(input_dir), "--run-id", "missing-tool", flag]) != 0
+
+    captured = capsys.readouterr()
+    diagnostic = captured.err
+    assert tool in diagnostic
+    assert artifact in diagnostic
+    assert "manual/profiling-only" in diagnostic
+    assert "scheduled publish dependencies" in diagnostic
+    assert not (tmp_path / "reports" / "profiles" / "missing-tool" / "pipeline.cprofile").exists()
+
+
+@pytest.mark.parametrize(
     "args",
     [
         ["--run-id", "bad/run"],
@@ -170,3 +206,26 @@ def test_profile_cli_uses_pipeline_writer_for_stats_json(
         "writer": "save_stats_json",
         "runtime_profile": {"stage_durations_seconds": {"clean_seconds": 0.0}},
     }
+
+
+def test_profiling_docs_capture_artifacts_boundaries_and_checkpoint() -> None:
+    text = PROFILING_DOC.read_text(encoding="utf-8")
+
+    for snippet in (
+        "pipeline.cprofile",
+        "pstats-cumulative.txt",
+        "pstats-total-time.txt",
+        "pipeline-stats.json",
+        "merged.txt",
+        "reports/profiles/<run-id>/",
+        "manual/profiling-only",
+        "does not invoke `scripts.profile_pipeline`",
+        "local source paths",
+        "function names",
+        "pyperf",
+        "not approved for tracked dependency metadata or install documentation",
+    ):
+        assert snippet in text
+
+    assert "pip install pyperf" not in text
+    assert "pyperf>=" not in text
