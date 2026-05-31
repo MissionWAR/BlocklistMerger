@@ -15,7 +15,6 @@ from typing import Final, NamedTuple, TypedDict
 
 from scripts import __version__
 
-
 BENCHMARK_SCHEMA_VERSION: Final[int] = 1
 BENCHMARK_ROOT: Final[Path] = Path("reports/benchmarks")
 FROZEN_ROOT: Final[Path] = BENCHMARK_ROOT / "frozen"
@@ -271,7 +270,9 @@ def _validate_filename(filename: str) -> None:
 def _validate_dataset_id(dataset_id: str) -> str:
     """Return a safe dataset id for a benchmark artifact path."""
     if not _DATASET_ID_PATTERN.fullmatch(dataset_id):
-        raise ValueError("dataset_id must contain only letters, numbers, dots, dashes, or underscores")
+        raise ValueError(
+            "dataset_id must contain only letters, numbers, dots, dashes, or underscores"
+        )
     return dataset_id
 
 
@@ -513,10 +514,11 @@ def _benchmark_summary(durations: list[float]) -> dict[str, float]:
         return {"min_seconds": 0.0, "max_seconds": 0.0, "p50_seconds": 0.0, "p95_seconds": 0.0}
     ordered = sorted(durations)
     midpoint = len(ordered) // 2
-    if len(ordered) % 2:
-        p50 = ordered[midpoint]
-    else:
-        p50 = (ordered[midpoint - 1] + ordered[midpoint]) / 2
+    p50 = (
+        ordered[midpoint]
+        if len(ordered) % 2
+        else (ordered[midpoint - 1] + ordered[midpoint]) / 2
+    )
     return {
         "min_seconds": round(min(durations), 6),
         "max_seconds": round(max(durations), 6),
@@ -604,7 +606,11 @@ def run_frozen_benchmark(
         raise ValueError("iterations must be at least 1")
     report = _run_report_path(report_path)
     validation = validate_manifest(manifest_path)
-    iterations_data = _run_pipeline_iterations(validation, iterations=iterations, report_path=report)
+    iterations_data = _run_pipeline_iterations(
+        validation,
+        iterations=iterations,
+        report_path=report,
+    )
     _atomic_write_json(
         report,
         _benchmark_report(
@@ -700,7 +706,11 @@ def run_synthetic_benchmark(
         ),
     )
     validation = validate_manifest(manifest_path)
-    iterations_data = _run_pipeline_iterations(validation, iterations=iterations, report_path=report)
+    iterations_data = _run_pipeline_iterations(
+        validation,
+        iterations=iterations,
+        report_path=report,
+    )
     _atomic_write_json(
         report,
         _benchmark_report(
@@ -762,7 +772,11 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     freeze = subparsers.add_parser("freeze", help="Freeze local raw inputs into reports/benchmarks")
-    freeze.add_argument("--input-dir", required=True, help="Directory containing local raw .txt files")
+    freeze.add_argument(
+        "--input-dir",
+        required=True,
+        help="Directory containing local raw .txt files",
+    )
     freeze.add_argument(
         "--source-health-report",
         required=True,

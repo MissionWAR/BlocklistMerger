@@ -24,7 +24,11 @@ def _write_json(path: Path, data: dict[str, object]) -> None:
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _source_entry(raw_file: Path, *, url: str = "https://example.com/list.txt") -> dict[str, object]:
+def _source_entry(
+    raw_file: Path,
+    *,
+    url: str = "https://example.com/list.txt",
+) -> dict[str, object]:
     return {
         "url": url,
         "filename": raw_file.name,
