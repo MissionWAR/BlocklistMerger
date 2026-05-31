@@ -3,8 +3,12 @@
 
 import argparse
 import cProfile
+import importlib.util
+import json
 import pstats
 import re
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -78,6 +82,152 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _module_available(name: str) -> bool:
+    """Return True when an optional Python module can be imported."""
+    return importlib.util.find_spec(name) is not None
+
+
+def _missing_optional_tool(tool: str, artifact: str, flag: str) -> RuntimeError:
+    """Build an actionable error for an explicitly requested optional artifact."""
+    detail = (
+        f"{tool} is unavailable for requested {artifact} ({flag}); "
+        f"{tool} is manual/profiling-only and is not installed by scheduled "
+        "publish dependencies."
+    )
+    if tool == "pyperf":
+        detail += (
+            " pyperf is intentionally omitted from tracked dependency and install "
+            "documentation until a human package-legitimacy check approves it."
+        )
+    detail += " Install or expose the verified tool in a manual profiling environment, then rerun."
+    return RuntimeError(detail)
+
+
+def _validate_optional_tools(args: argparse.Namespace) -> None:
+    """Fail before writing artifacts when a requested optional tool is unavailable."""
+    if (args.py_spy_speedscope or args.py_spy_flamegraph) and shutil.which("py-spy") is None:
+        artifact = "py-spy speedscope/flamegraph artifact"
+        raise _missing_optional_tool("py-spy", artifact, "--py-spy-*")
+
+    if args.pyperf_json and not (_module_available("pyperf") or shutil.which("pyperf")):
+        raise _missing_optional_tool("pyperf", "pyperf JSON artifact", "--pyperf-json")
+
+    if args.dns_diagnostics and not _module_available("dns"):
+        raise _missing_optional_tool(
+            "dnspython",
+            "DNS diagnostics artifact",
+            "--dns-diagnostics",
+        )
+
+
+def _pipeline_command(input_dir: Path, output_path: Path, stats_path: Path) -> list[str]:
+    """Return a production-shaped pipeline command for optional external tools."""
+    return [
+        sys.executable,
+        "-m",
+        "scripts.pipeline",
+        str(input_dir),
+        str(output_path),
+        "--json-stats",
+        str(stats_path),
+    ]
+
+
+def _run_checked(command: list[str], artifact: str) -> None:
+    """Run an optional external artifact command and surface failures clearly."""
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        msg = f"{artifact} generation failed with exit code {exc.returncode}"
+        raise RuntimeError(msg) from exc
+
+
+def _run_py_spy(
+    input_dir: Path,
+    run_dir: Path,
+    *,
+    output_name: str,
+    format_name: str,
+) -> None:
+    """Generate one optional py-spy artifact through an explicit manual request."""
+    py_spy = shutil.which("py-spy")
+    if py_spy is None:
+        raise _missing_optional_tool("py-spy", f"py-spy {format_name} artifact", "--py-spy-*")
+
+    output_path = run_dir / output_name
+    pipeline_output = run_dir / f"py-spy-{format_name}-merged.txt"
+    stats_path = run_dir / f"py-spy-{format_name}-pipeline-stats.json"
+    command = [
+        py_spy,
+        "record",
+        "--format",
+        format_name,
+        "-o",
+        str(output_path),
+        "--",
+        *_pipeline_command(input_dir, pipeline_output, stats_path),
+    ]
+    _run_checked(command, f"py-spy {format_name}")
+
+
+def _run_pyperf(input_dir: Path, run_dir: Path) -> None:
+    """Generate optional pyperf JSON through an explicit manual request."""
+    if _module_available("pyperf"):
+        pyperf_command = [sys.executable, "-m", "pyperf"]
+    else:
+        pyperf_path = shutil.which("pyperf")
+        if pyperf_path is None:
+            raise _missing_optional_tool("pyperf", "pyperf JSON artifact", "--pyperf-json")
+        pyperf_command = [pyperf_path]
+
+    command = [
+        *pyperf_command,
+        "command",
+        "-o",
+        str(run_dir / "pipeline.pyperf.json"),
+        "--",
+        *_pipeline_command(
+            input_dir,
+            run_dir / "pyperf-merged.txt",
+            run_dir / "pyperf-pipeline-stats.json",
+        ),
+    ]
+    _run_checked(command, "pyperf JSON")
+
+
+def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
+    """Write JSON through an atomic sibling temp file."""
+    temp_path = path.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as stream:
+        json.dump(data, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    temp_path.replace(path)
+
+
+def _write_dns_diagnostics(input_dir: Path, run_dir: Path, merged_path: Path) -> None:
+    """Write a local dnspython availability diagnostic artifact."""
+    try:
+        import dns.version
+    except ModuleNotFoundError as exc:
+        raise _missing_optional_tool(
+            "dnspython",
+            "DNS diagnostics artifact",
+            "--dns-diagnostics",
+        ) from exc
+
+    _write_json_atomic(
+        run_dir / "dns-diagnostics.json",
+        {
+            "artifact": "dns-diagnostics.json",
+            "dnspython_version": dns.version.version,
+            "input_dir": str(input_dir),
+            "manual_profiling_only": True,
+            "profile_output": str(merged_path),
+            "tool": "dnspython",
+        },
+    )
+
+
 def _write_pstats_summary(
     profile_path: Path,
     output_path: Path,
@@ -115,6 +265,26 @@ def _build_parser() -> argparse.ArgumentParser:
         default=40,
         help="Maximum rows to include in each pstats summary (default: 40)",
     )
+    parser.add_argument(
+        "--py-spy-speedscope",
+        action="store_true",
+        help="Request an optional manual py-spy speedscope artifact.",
+    )
+    parser.add_argument(
+        "--py-spy-flamegraph",
+        action="store_true",
+        help="Request an optional manual py-spy flamegraph artifact.",
+    )
+    parser.add_argument(
+        "--pyperf-json",
+        action="store_true",
+        help="Request an optional manual pyperf JSON artifact.",
+    )
+    parser.add_argument(
+        "--dns-diagnostics",
+        action="store_true",
+        help="Request an optional manual dnspython diagnostics artifact.",
+    )
     return parser
 
 
@@ -129,6 +299,7 @@ def main() -> int:
             raise FileNotFoundError(f"input_dir not found: {args.input_dir}")
 
         run_dir = _resolve_run_dir(args.run_id, args.report_dir)
+        _validate_optional_tools(args)
         run_dir.mkdir(parents=True, exist_ok=True)
 
         profile_path = run_dir / "pipeline.cprofile"
@@ -161,6 +332,24 @@ def main() -> int:
             elapsed,
             runtime_profile=result.runtime_profile,
         )
+        if args.py_spy_speedscope:
+            _run_py_spy(
+                input_dir,
+                run_dir,
+                output_name="py-spy-speedscope.json",
+                format_name="speedscope",
+            )
+        if args.py_spy_flamegraph:
+            _run_py_spy(
+                input_dir,
+                run_dir,
+                output_name="py-spy-flamegraph.svg",
+                format_name="flamegraph",
+            )
+        if args.pyperf_json:
+            _run_pyperf(input_dir, run_dir)
+        if args.dns_diagnostics:
+            _write_dns_diagnostics(input_dir, run_dir, merged_path)
 
         print(f"Profile report: {run_dir.as_posix()}")
         return 0

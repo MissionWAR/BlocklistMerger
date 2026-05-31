@@ -21,6 +21,10 @@ dev = [
     "pytest>=9.0.3",
     "ruff>=0.15.10",
 ]
+profile = [
+    "py-spy>=0.4.2",
+    "dnspython>=2.8.0",
+]
 
 [project.scripts]
 blocklist-merge = "scripts.pipeline:main"
