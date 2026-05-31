@@ -43,6 +43,7 @@ from scripts.cleaner import (
     clean_line,
 )
 from scripts.compiler import CompileStats, compile_rules
+from scripts.downloader import SourceHealthRuntimeSummary, source_health_runtime_summary
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
     CappedProofLedger,
@@ -168,6 +169,20 @@ class MemoryProfile(TypedDict):
     resource_ru_maxrss: int | None
 
 
+class ChildResourceUsage(TypedDict):
+    """Best-effort aggregate resource usage for completed child processes."""
+
+    available: bool
+    platform: str
+    user_cpu_seconds: float | None
+    system_cpu_seconds: float | None
+    resource_ru_maxrss: int | None
+    minor_page_faults: int | None
+    major_page_faults: int | None
+    voluntary_context_switches: int | None
+    involuntary_context_switches: int | None
+
+
 class RuntimeProfile(TypedDict):
     """Inspect-only runtime profile stored in the pipeline stats report."""
 
@@ -176,6 +191,8 @@ class RuntimeProfile(TypedDict):
     byte_sizes: ByteSizes
     compiler_cardinalities: CompilerCardinalities
     memory: MemoryProfile
+    child_resources: ChildResourceUsage
+    source_health: SourceHealthRuntimeSummary
 
 
 class CleanWorkerResult(NamedTuple):
@@ -390,6 +407,91 @@ def _memory_profile() -> MemoryProfile:
     }
 
 
+def _empty_child_resource_usage() -> ChildResourceUsage:
+    """Return a stable unavailable child resource shape."""
+    return {
+        "available": False,
+        "platform": sys.platform,
+        "user_cpu_seconds": None,
+        "system_cpu_seconds": None,
+        "resource_ru_maxrss": None,
+        "minor_page_faults": None,
+        "major_page_faults": None,
+        "voluntary_context_switches": None,
+        "involuntary_context_switches": None,
+    }
+
+
+def _child_resource_usage_snapshot() -> object | None:
+    """Return a best-effort child resource usage snapshot when supported."""
+    try:
+        import resource
+    except ImportError:
+        return None
+
+    try:
+        return resource.getrusage(resource.RUSAGE_CHILDREN)
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _resource_float_delta(before: object, after: object, field: str) -> float | None:
+    """Return a rounded non-negative float delta from two resource snapshots."""
+    try:
+        return round(max(0.0, float(getattr(after, field)) - float(getattr(before, field))), 6)
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _resource_int_delta(before: object, after: object, field: str) -> int | None:
+    """Return a non-negative integer delta from two resource snapshots."""
+    try:
+        return max(0, int(getattr(after, field)) - int(getattr(before, field)))
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def _child_resource_usage_delta(
+    before: object | None,
+    after: object | None,
+) -> ChildResourceUsage:
+    """Return aggregate resource deltas for child processes, or unavailable data."""
+    if before is None or after is None:
+        return _empty_child_resource_usage()
+
+    return {
+        "available": True,
+        "platform": sys.platform,
+        "user_cpu_seconds": _resource_float_delta(before, after, "ru_utime"),
+        "system_cpu_seconds": _resource_float_delta(before, after, "ru_stime"),
+        "resource_ru_maxrss": _resource_int_delta(before, after, "ru_maxrss"),
+        "minor_page_faults": _resource_int_delta(before, after, "ru_minflt"),
+        "major_page_faults": _resource_int_delta(before, after, "ru_majflt"),
+        "voluntary_context_switches": _resource_int_delta(before, after, "ru_nvcsw"),
+        "involuntary_context_switches": _resource_int_delta(before, after, "ru_nivcsw"),
+    }
+
+
+def _source_health_summary_from_report(
+    report_path: str | Path | None,
+) -> SourceHealthRuntimeSummary:
+    """Load compact source-health runtime evidence from an optional report path."""
+    unavailable = source_health_runtime_summary(None, report_path)
+    if report_path is None:
+        return unavailable
+
+    try:
+        with open(report_path, encoding="utf-8") as f:
+            report = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return unavailable
+
+    if not isinstance(report, dict):
+        return unavailable
+
+    return source_health_runtime_summary(report, report_path)
+
+
 def _empty_runtime_profile() -> RuntimeProfile:
     """Return a runtime profile shape for callers that do not collect one."""
     return {
@@ -408,6 +510,8 @@ def _empty_runtime_profile() -> RuntimeProfile:
             "tracemalloc_peak_bytes": None,
             "resource_ru_maxrss": None,
         },
+        "child_resources": _empty_child_resource_usage(),
+        "source_health": source_health_runtime_summary(None),
     }
 
 
@@ -495,6 +599,7 @@ def process_files_with_profile(
     *,
     coverage_proof_report: str | Path | None = None,
     coverage_proof_sample_cap: int = DEFAULT_SAMPLE_CAP,
+    source_health_report: str | Path | None = None,
 ) -> PipelineRunResult:
     """
     Run the full pipeline and return stats plus inspect-only runtime profile data.
@@ -533,7 +638,13 @@ def process_files_with_profile(
         with TemporaryDirectory(prefix="blocklist-merger-clean-") as spool_dir_name:
             spool_dir = Path(spool_dir_name)
             clean_start = time.time()
+            child_resources_before = _child_resource_usage_snapshot()
             results = _clean_files_to_spools(files, spool_dir)
+            child_resources_after = _child_resource_usage_snapshot()
+            child_resources = _child_resource_usage_delta(
+                child_resources_before,
+                child_resources_after,
+            )
             clean_seconds = time.time() - clean_start
 
             def _get_cleaned_lines() -> Iterator[str]:
@@ -604,6 +715,8 @@ def process_files_with_profile(
         },
         "compiler_cardinalities": _compiler_cardinalities(compile_stats),
         "memory": memory,
+        "child_resources": child_resources,
+        "source_health": _source_health_summary_from_report(source_health_report),
     }
 
     if coverage_proof_report is not None and proof_ledger is not None:
@@ -754,12 +867,19 @@ def main() -> int:
         metavar="PATH",
         help="Save a capped coverage proof report to an explicit JSON path",
     )
+    parser.add_argument(
+        "--source-health-report",
+        dest="source_health_report",
+        metavar="PATH",
+        help="Read source-health JSON and store compact cache evidence in runtime stats",
+    )
 
     parsed = parser.parse_args()
     input_dir = parsed.input_dir
     output_file = parsed.output_file
     json_stats_path = parsed.json_stats
     coverage_proof_path = parsed.coverage_proof
+    source_health_report_path = parsed.source_health_report
 
     try:
         print("🚀 Starting blocklist pipeline...")
@@ -770,6 +890,7 @@ def main() -> int:
             input_dir,
             output_file,
             coverage_proof_report=coverage_proof_path,
+            source_health_report=source_health_report_path,
         )
         stats = result.stats
         total_time = time.time() - start_time

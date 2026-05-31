@@ -2,9 +2,11 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import scripts.pipeline as pipeline_module
 from scripts.downloader import (
     SourceHealth,
     build_source_health_report,
@@ -154,3 +156,94 @@ def test_source_health_runtime_summary_unavailable_shape_is_stable() -> None:
         "failed_sources": 0,
         "total_byte_size": 0,
     }
+
+
+def test_pipeline_source_health_report_loader_returns_compact_runtime_summary(
+    tmp_path: Path,
+) -> None:
+    report = _source_health_report()
+    report_path = tmp_path / "reports" / "source-health.json"
+    report_path.parent.mkdir()
+    report_path.write_text(
+        json.dumps(
+            {
+                "schema_version": report.schema_version,
+                "source_count": report.source_count,
+                "totals_by_status": report.totals_by_status,
+                "sources": [source._asdict() for source in report.sources],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = pipeline_module._source_health_summary_from_report(report_path)
+
+    assert summary["available"] is True
+    assert summary["report_path"] == "reports/source-health.json"
+    assert summary["source_count"] == 5
+    assert summary["cache_backed_sources"] == 3
+    assert summary["failed_sources"] == 1
+    serialized = json.dumps(summary, sort_keys=True)
+    for forbidden_key in ("url", "filename", "sha256", "failure_reason", "sources"):
+        assert f'"{forbidden_key}"' not in serialized
+
+
+def test_pipeline_source_health_report_loader_missing_report_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    summary = pipeline_module._source_health_summary_from_report(
+        tmp_path / "reports" / "source-health.json"
+    )
+
+    assert summary["available"] is False
+    assert summary["report_path"] == "reports/source-health.json"
+    assert summary["source_count"] == 0
+
+
+def test_child_resource_usage_delta_unavailable_shape_is_stable() -> None:
+    usage = pipeline_module._child_resource_usage_delta(None, None)
+
+    assert usage == {
+        "available": False,
+        "platform": pipeline_module.sys.platform,
+        "user_cpu_seconds": None,
+        "system_cpu_seconds": None,
+        "resource_ru_maxrss": None,
+        "minor_page_faults": None,
+        "major_page_faults": None,
+        "voluntary_context_switches": None,
+        "involuntary_context_switches": None,
+    }
+
+
+def test_child_resource_usage_delta_reports_aggregate_child_fields() -> None:
+    before = SimpleNamespace(
+        ru_utime=1.0,
+        ru_stime=2.0,
+        ru_maxrss=100,
+        ru_minflt=10,
+        ru_majflt=1,
+        ru_nvcsw=3,
+        ru_nivcsw=4,
+    )
+    after = SimpleNamespace(
+        ru_utime=2.25,
+        ru_stime=2.5,
+        ru_maxrss=175,
+        ru_minflt=15,
+        ru_majflt=2,
+        ru_nvcsw=8,
+        ru_nivcsw=6,
+    )
+
+    usage = pipeline_module._child_resource_usage_delta(before, after)
+
+    assert usage["available"] is True
+    assert usage["platform"] == pipeline_module.sys.platform
+    assert usage["user_cpu_seconds"] == 1.25
+    assert usage["system_cpu_seconds"] == 0.5
+    assert usage["resource_ru_maxrss"] == 75
+    assert usage["minor_page_faults"] == 5
+    assert usage["major_page_faults"] == 1
+    assert usage["voluntary_context_switches"] == 5
+    assert usage["involuntary_context_switches"] == 2
