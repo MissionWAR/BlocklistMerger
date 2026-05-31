@@ -350,13 +350,21 @@ def _validate_manifest_raw_files(raw_dir: Path, sources: list[ManifestSource]) -
 
     for source in sources:
         raw_file = raw_dir / source["filename"]
-        actual_size = raw_file.stat().st_size
+        resolved_raw_file = raw_file.resolve(strict=True)
+        try:
+            resolved_raw_file.relative_to(raw_dir.resolve(strict=True))
+        except ValueError as exc:
+            raise ValueError(
+                f"raw file must stay inside frozen raw directory: {source['filename']}"
+            ) from exc
+
+        actual_size = resolved_raw_file.stat().st_size
         if actual_size != source["byte_size"]:
             raise ValueError(
                 f"raw file byte size mismatch for {source['filename']}: "
                 f"expected {source['byte_size']}, got {actual_size}"
             )
-        actual_sha256 = _sha256(raw_file)
+        actual_sha256 = _sha256(resolved_raw_file)
         if actual_sha256 != source["sha256"]:
             raise ValueError(f"raw file SHA-256 mismatch for {source['filename']}")
 

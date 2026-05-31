@@ -176,6 +176,26 @@ def test_validate_manifest_rejects_symlink_escape(tmp_path: Path, monkeypatch) -
         benchmark_pipeline.validate_manifest(manifest_path)
 
 
+def test_validate_manifest_rejects_raw_file_symlink_escape(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest_path = _valid_manifest(tmp_path)
+    raw_dir = manifest_path.parent / "raw"
+    outside = tmp_path / "outside.txt"
+    original = raw_dir / "example.txt"
+    outside.write_text(original.read_text(encoding="utf-8"), encoding="utf-8")
+    original.unlink()
+    try:
+        original.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable in this environment: {exc}")
+
+    with pytest.raises(ValueError, match="frozen raw directory"):
+        benchmark_pipeline.validate_manifest(manifest_path)
+
+
 @pytest.mark.parametrize(
     "remove_key",
     [
