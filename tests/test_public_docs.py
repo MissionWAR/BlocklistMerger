@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 README = ROOT / "README.md"
 AGH_SEMANTICS = ROOT / "docs" / "AGH_SEMANTICS.md"
 SCOPE_DOC = ROOT / "docs" / "SCOPE.md"
+RUNTIME_LANGUAGE_GATE = ROOT / "docs" / "RUNTIME_LANGUAGE_GATE.md"
 WORKFLOW = ROOT / ".github" / "workflows" / "update.yml"
 
 MAINTAINER_RELEASE_URL = (
@@ -151,3 +152,50 @@ def test_agh_semantics_matrix_is_publicly_discoverable() -> None:
     ]
     for term in required_vocabulary:
         assert term in semantics
+
+
+def test_runtime_language_gate_is_publicly_discoverable() -> None:
+    """README should link the Python-first runtime/language decision gate."""
+    readme = _read_text(README)
+
+    assert RUNTIME_LANGUAGE_GATE.exists()
+    assert "docs/RUNTIME_LANGUAGE_GATE.md" in readme
+    assert _position(readme, "## 📥 Usage") < _position(readme, "## Scope and Non-Goals")
+    assert _position(readme, "docs/SCOPE.md") < _position(
+        readme,
+        "docs/RUNTIME_LANGUAGE_GATE.md",
+    )
+
+
+def test_runtime_language_gate_records_required_evidence() -> None:
+    """RUN-04 gate should keep Python first and require proof before rewrites."""
+    text = _read_text(RUNTIME_LANGUAGE_GATE)
+
+    required_vocabulary = [
+        "Python remains the default",
+        "2x",
+        "p95",
+        "build_validate",
+        "30-minute",
+        "15 minutes",
+        "memory",
+        "disk",
+        "algorithmic fixes",
+        "cProfile",
+        "pstats",
+        "reports/benchmarks",
+        "reports/profiles",
+        "Go",
+        "Rust",
+        "JavaScript",
+        "TypeScript",
+        "no lost/changed coverage",
+        "proof-ledger",
+        "inspect-only",
+    ]
+    for term in required_vocabulary:
+        assert term in text
+
+    assert "release findings" in text
+    assert "not a rewrite plan" in text
+    assert "tracked rewrite artifacts" in text
