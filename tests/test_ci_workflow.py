@@ -219,6 +219,7 @@ def test_runtime_profile_summary_mirrors_only_compact_fields() -> None:
     """Step summary should show a small runtime excerpt, not full diagnostic detail."""
     text = _workflow_text()
     build_validate = _job_section(text, "build_validate")
+    compile_step = _step_section(build_validate, "Compile Sources")
     runtime_summary = _step_section(build_validate, "Append Runtime Profile Summary")
 
     compile_sources = _position(build_validate, "- name: Compile Sources")
@@ -226,15 +227,33 @@ def test_runtime_profile_summary_mirrors_only_compact_fields() -> None:
     validate = _position(build_validate, "- name: Validate Release Candidate")
 
     assert compile_sources < append_runtime < validate
+    assert "--json-stats reports/pipeline-stats.json" in compile_step
+    assert "--source-health-report reports/source-health.json" in compile_step
     assert "reports/pipeline-stats.json" in runtime_summary
     assert "$GITHUB_STEP_SUMMARY" in runtime_summary
     assert "runtime_profile" in runtime_summary
     assert "worker_count" in runtime_summary
+    assert "stage_durations_seconds" in runtime_summary
+    assert "clean_seconds" in runtime_summary
+    assert "compile_seconds" in runtime_summary
     assert "raw_input_bytes" in runtime_summary
     assert "output_bytes" in runtime_summary
+    assert "tracemalloc_current_bytes" in runtime_summary
+    assert "tracemalloc_peak_bytes" in runtime_summary
     assert "resource_ru_maxrss" in runtime_summary
-    assert "stage_durations_seconds" not in runtime_summary
+    assert "child_resources" in runtime_summary
+    assert "user_cpu_seconds" in runtime_summary
+    assert "system_cpu_seconds" in runtime_summary
+    assert "source_health" in runtime_summary
+    assert "source_count" in runtime_summary
+    assert "cache_backed_sources" in runtime_summary
+    assert "failed_sources" in runtime_summary
+    assert "reports/source-health.json" in runtime_summary
+    assert "stage_summaries" not in runtime_summary
     assert "compiler_cardinalities" not in runtime_summary
+    assert "totals_by_status" not in runtime_summary
+    for rich_key in ("url", "filename", "sha256", "failure_reason", '"sources"'):
+        assert rich_key not in runtime_summary
 
 
 def test_no_non_pip_dependency_manager_is_introduced() -> None:
@@ -251,6 +270,7 @@ def test_release_validation_reports_and_artifacts_are_wired() -> None:
 
     assert "--health-report reports/source-health.json" in text
     assert "--json-stats reports/pipeline-stats.json" in text
+    assert "--source-health-report reports/source-health.json" in text
     assert "python -m scripts.release_validator" in text
     assert "reports/validation-summary.json" in text
     assert "reports/validation-summary.md" in text

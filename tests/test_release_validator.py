@@ -186,6 +186,33 @@ def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
                 "tracemalloc_peak_bytes": 128,
                 "resource_ru_maxrss": 256,
             },
+            "child_resources": {
+                "available": True,
+                "platform": "linux",
+                "user_cpu_seconds": 0.1,
+                "system_cpu_seconds": 0.2,
+                "resource_ru_maxrss": 512,
+                "minor_page_faults": 4,
+                "major_page_faults": 0,
+                "voluntary_context_switches": 2,
+                "involuntary_context_switches": 1,
+            },
+            "source_health": {
+                "available": True,
+                "report_path": "reports/source-health.json",
+                "schema_version": 1,
+                "source_count": 10,
+                "totals_by_status": {
+                    "fresh_fetch": 10,
+                    "validated_cache": 0,
+                    "fallback_cache": 0,
+                    "stale_cache": 0,
+                    "failed": 0,
+                },
+                "cache_backed_sources": 0,
+                "failed_sources": 0,
+                "total_byte_size": 1024,
+            },
         },
     }
 
@@ -566,6 +593,40 @@ def test_runtime_profile_is_inspect_only_for_release_validation(tmp_path: Path) 
         "tracemalloc_peak_bytes": 999_999_999,
         "resource_ru_maxrss": 999_999_999,
     }
+    runtime_profile["compiler_cardinalities"] = {
+        "abp_rule_keys": 999_999,
+        "abp_wildcard_keys": 999_999,
+        "exception_rule_keys": 999_999,
+        "duplicate_index_size": 999_999,
+        "other_rule_count": 999_999,
+    }
+    runtime_profile["child_resources"] = {
+        "available": True,
+        "platform": "linux",
+        "user_cpu_seconds": 999_999.0,
+        "system_cpu_seconds": 999_999.0,
+        "resource_ru_maxrss": 999_999_999,
+        "minor_page_faults": 999_999,
+        "major_page_faults": 999_999,
+        "voluntary_context_switches": 999_999,
+        "involuntary_context_switches": 999_999,
+    }
+    runtime_profile["source_health"] = {
+        "available": True,
+        "report_path": "reports/source-health.json",
+        "schema_version": 1,
+        "source_count": 999_999,
+        "totals_by_status": {
+            "fresh_fetch": 0,
+            "validated_cache": 999_999,
+            "fallback_cache": 999_999,
+            "stale_cache": 999_999,
+            "failed": 999_999,
+        },
+        "cache_backed_sources": 2_999_997,
+        "failed_sources": 999_999,
+        "total_byte_size": 999_999_999,
+    }
 
     summary = _validate(
         tmp_path,
@@ -579,6 +640,9 @@ def test_runtime_profile_is_inspect_only_for_release_validation(tmp_path: Path) 
         if "runtime" in str(finding.get("code", ""))
         or "memory" in str(finding.get("code", ""))
         or "cardinality" in str(finding.get("code", ""))
+        or "cache" in str(finding.get("code", ""))
+        or "child" in str(finding.get("code", ""))
+        or "source_health" in str(finding.get("code", ""))
     ]
     assert runtime_findings == []
 
