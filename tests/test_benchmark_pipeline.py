@@ -424,3 +424,108 @@ def test_benchmark_cli_freeze_and_run_frozen(
 
     assert benchmark_pipeline.main() == 0
     assert json.loads(report_path.read_text(encoding="utf-8"))["report_type"] == "frozen"
+
+
+def test_run_synthetic_writes_deterministic_manifest_and_report_under_benchmark_roots(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    calls: list[Path] = []
+
+    def fake_process_files_with_profile(input_dir, output_file, **kwargs):
+        calls.append(Path(input_dir))
+        Path(output_file).write_text("||synthetic.example^\n", encoding="utf-8")
+        return SimpleNamespace(
+            stats={"lines_output": 1},
+            runtime_profile={"stage_durations_seconds": {"clean_seconds": 0.0}},
+        )
+
+    monkeypatch.setattr(
+        benchmark_pipeline,
+        "process_files_with_profile",
+        fake_process_files_with_profile,
+    )
+    report_path = tmp_path / "reports" / "benchmarks" / "runs" / "synthetic" / "benchmark.json"
+
+    written = benchmark_pipeline.run_synthetic_benchmark(
+        dataset_id="synthetic-ci",
+        file_count=2,
+        rules_per_file=3,
+        iterations=1,
+        report_path=report_path,
+    )
+
+    manifest_path = (
+        tmp_path / "reports" / "benchmarks" / "frozen" / "synthetic-ci" / "manifest.json"
+    )
+    assert written == report_path.resolve()
+    assert manifest_path.exists()
+    assert benchmark_pipeline.validate_manifest(manifest_path).source_count == 2
+    synthetic_files = sorted((manifest_path.parent / "raw").glob("*.txt"))
+    assert synthetic_files[0].read_text(encoding="utf-8").splitlines() == [
+        "||synthetic-000-00000-000-000.example^",
+        "||synthetic-000-00001-017-029.example^",
+        "||synthetic-000-00002-034-058.example^",
+    ]
+    assert calls == [manifest_path.parent / "raw"]
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    assert data["report_type"] == "synthetic"
+    assert data["synthetic_parameters"] == {
+        "file_count": 2,
+        "generator": "fixed arithmetic",
+        "rules_per_file": 3,
+    }
+
+
+def test_benchmark_pipeline_static_scope_excludes_network_and_pyperf() -> None:
+    text = Path("scripts/benchmark_pipeline.py").read_text(encoding="utf-8")
+
+    for forbidden in (
+        "aiohttp",
+        "requests",
+        "urllib",
+        "scripts.downloader",
+        "fetch_url",
+        "fetch_all",
+        "pyperf",
+    ):
+        assert forbidden not in text
+
+
+def test_benchmark_outputs_are_ignored_and_tests_do_not_use_mutable_raw_fixtures() -> None:
+    gitignore = Path(".gitignore").read_text(encoding="utf-8")
+
+    assert "reports/" in gitignore or "reports/benchmarks/" in gitignore
+
+    mutable_raw_literal = "lists" + "/_raw"
+    forbidden_fixture_patterns = (
+        f'Path("{mutable_raw_literal}")',
+        f"Path('{mutable_raw_literal}')",
+        f'open("{mutable_raw_literal}',
+        f"open('{mutable_raw_literal}",
+        f'read_text("{mutable_raw_literal}',
+        f"read_text('{mutable_raw_literal}",
+    )
+    for test_path in Path("tests").glob("test_*.py"):
+        text = test_path.read_text(encoding="utf-8")
+        for forbidden in forbidden_fixture_patterns:
+            assert forbidden not in text, f"{test_path} reads mutable raw fixture data"
+
+
+def test_benchmark_docs_explain_frozen_and_synthetic_artifact_boundaries() -> None:
+    text = Path("docs/BENCHMARKS.md").read_text(encoding="utf-8")
+
+    required_snippets = [
+        "python -m scripts.downloader",
+        "python -m scripts.benchmark_pipeline freeze",
+        "reports/benchmarks/frozen/<dataset-id>/",
+        "python -m scripts.benchmark_pipeline run-frozen --manifest",
+        "python -m scripts.benchmark_pipeline run-synthetic",
+        "lists" + "/_raw",
+        "mutable smoke input",
+        "ignored runtime evidence",
+        "do not commit",
+    ]
+    for snippet in required_snippets:
+        assert snippet in text
