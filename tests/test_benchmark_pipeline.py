@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,6 +60,37 @@ def _valid_manifest(tmp_path: Path, dataset_id: str = "tiny") -> Path:
         },
     )
     return manifest_path
+
+
+def _source_health_report(path: Path, raw_files: list[Path]) -> Path:
+    _write_json(
+        path,
+        {
+            "schema_version": 1,
+            "source_count": len(raw_files),
+            "totals_by_status": {
+                "fresh_fetch": len(raw_files),
+                "validated_cache": 0,
+                "fallback_cache": 0,
+                "stale_cache": 0,
+                "failed": 0,
+            },
+            "sources": [
+                {
+                    "url": f"https://example.com/{raw_file.name}",
+                    "filename": raw_file.name,
+                    "status": "fresh_fetch",
+                    "changed": True,
+                    "byte_size": raw_file.stat().st_size,
+                    "sha256": _sha256(raw_file),
+                    "cache_age_seconds": None,
+                    "failure_reason": None,
+                }
+                for raw_file in raw_files
+            ],
+        },
+    )
+    return path
 
 
 def test_validate_manifest_accepts_exact_frozen_raw_set(tmp_path: Path, monkeypatch) -> None:
@@ -192,3 +225,202 @@ def test_validate_manifest_requires_source_d07_identity_fields(
 
     with pytest.raises(ValueError, match=remove_key):
         benchmark_pipeline.validate_manifest(manifest_path)
+
+
+def test_freeze_copies_local_raw_files_and_writes_manifest_under_frozen_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "lists" / "_raw"
+    input_dir.mkdir(parents=True)
+    raw_a = input_dir / "a.txt"
+    raw_b = input_dir / "b.txt"
+    raw_a.write_text("||a.example^\n", encoding="utf-8")
+    raw_b.write_text("||b.example^\n", encoding="utf-8")
+    (input_dir / "ignored.md").write_text("not copied\n", encoding="utf-8")
+    health_report = _source_health_report(
+        tmp_path / "reports" / "source-health.json",
+        [raw_a, raw_b],
+    )
+
+    manifest_path = benchmark_pipeline.freeze_dataset(
+        input_dir=input_dir,
+        source_health_report=health_report,
+        dataset_id="local-smoke",
+    )
+
+    assert manifest_path == (
+        tmp_path / "reports" / "benchmarks" / "frozen" / "local-smoke" / "manifest.json"
+    )
+    frozen_raw = manifest_path.parent / "raw"
+    assert sorted(path.name for path in frozen_raw.iterdir()) == ["a.txt", "b.txt"]
+    assert (frozen_raw / "a.txt").read_text(encoding="utf-8") == "||a.example^\n"
+    result = benchmark_pipeline.validate_manifest(manifest_path)
+    assert result.dataset_id == "local-smoke"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert [source["url"] for source in data["sources"]] == [
+        "https://example.com/a.txt",
+        "https://example.com/b.txt",
+    ]
+    assert {source["source_health_status"] for source in data["sources"]} == {"fresh_fetch"}
+    assert not (tmp_path / "reports" / "benchmarks" / "a.txt").exists()
+
+
+def test_freeze_fails_when_source_health_metadata_is_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "lists" / "_raw"
+    input_dir.mkdir(parents=True)
+    raw_file = input_dir / "a.txt"
+    raw_file.write_text("||a.example^\n", encoding="utf-8")
+    health_report = tmp_path / "reports" / "source-health.json"
+    _write_json(
+        health_report,
+        {
+            "schema_version": 1,
+            "source_count": 1,
+            "totals_by_status": {},
+            "sources": [{"filename": "a.txt", "status": "fresh_fetch"}],
+        },
+    )
+
+    with pytest.raises(ValueError, match="metadata"):
+        benchmark_pipeline.freeze_dataset(input_dir, health_report, "missing-meta")
+
+
+def test_run_frozen_validates_manifest_calls_pipeline_and_writes_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest_path = _valid_manifest(tmp_path)
+    report_path = tmp_path / "reports" / "benchmarks" / "runs" / "tiny-run" / "benchmark.json"
+    calls: list[tuple[Path, Path]] = []
+
+    def fake_process_files_with_profile(input_dir, output_file, **kwargs):
+        calls.append((Path(input_dir), Path(output_file)))
+        Path(output_file).write_text("||example.com^\n", encoding="utf-8")
+        return SimpleNamespace(
+            stats={
+                "files_processed": 1,
+                "lines_raw": 1,
+                "lines_clean": 1,
+                "lines_output": 1,
+            },
+            runtime_profile={
+                "stage_durations_seconds": {"clean_seconds": 0.01, "compile_seconds": 0.02},
+                "compiler_cardinalities": {"abp_rule_keys": 1},
+            },
+        )
+
+    monkeypatch.setattr(
+        benchmark_pipeline,
+        "process_files_with_profile",
+        fake_process_files_with_profile,
+    )
+
+    written_report = benchmark_pipeline.run_frozen_benchmark(
+        manifest_path=manifest_path,
+        iterations=2,
+        report_path=report_path,
+    )
+
+    assert written_report == report_path.resolve()
+    assert len(calls) == 2
+    assert calls[0][0] == (tmp_path / "reports" / "benchmarks" / "frozen" / "tiny" / "raw")
+    assert all(output.parent.parent == report_path.parent for _, output in calls)
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    assert data["schema_version"] == 1
+    assert data["report_type"] == "frozen"
+    assert data["manifest"]["dataset_id"] == "tiny"
+    assert data["manifest"]["sha256"] == _sha256(manifest_path)
+    assert data["iterations_requested"] == 2
+    assert len(data["iterations"]) == 2
+    assert data["summary"]["p50_seconds"] >= 0
+    assert data["summary"]["p95_seconds"] >= 0
+    serialized = json.dumps(data, sort_keys=True)
+    assert str(tmp_path) not in serialized
+
+
+def test_run_frozen_rejects_mutable_raw_inputs_without_manifest(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    mutable_raw = tmp_path / "lists" / "_raw"
+    mutable_raw.mkdir(parents=True)
+    mutable_raw.joinpath("a.txt").write_text("||a.example^\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="frozen"):
+        benchmark_pipeline.run_frozen_benchmark(
+            manifest_path=mutable_raw,
+            iterations=1,
+            report_path=tmp_path / "reports" / "benchmarks" / "runs" / "bad.json",
+        )
+
+
+def test_benchmark_cli_freeze_and_run_frozen(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "lists" / "_raw"
+    input_dir.mkdir(parents=True)
+    raw_file = input_dir / "a.txt"
+    raw_file.write_text("||a.example^\n", encoding="utf-8")
+    health_report = _source_health_report(tmp_path / "reports" / "source-health.json", [raw_file])
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "scripts.benchmark_pipeline",
+            "freeze",
+            "--input-dir",
+            str(input_dir),
+            "--source-health-report",
+            str(health_report),
+            "--dataset-id",
+            "cli-smoke",
+        ],
+    )
+
+    assert benchmark_pipeline.main() == 0
+    manifest_path = (
+        tmp_path / "reports" / "benchmarks" / "frozen" / "cli-smoke" / "manifest.json"
+    )
+    assert manifest_path.exists()
+
+    def fake_process_files_with_profile(input_dir, output_file, **kwargs):
+        Path(output_file).write_text("||a.example^\n", encoding="utf-8")
+        return SimpleNamespace(
+            stats={"lines_output": 1},
+            runtime_profile={"stage_durations_seconds": {"clean_seconds": 0.0}},
+        )
+
+    monkeypatch.setattr(
+        benchmark_pipeline,
+        "process_files_with_profile",
+        fake_process_files_with_profile,
+    )
+    report_path = tmp_path / "reports" / "benchmarks" / "runs" / "cli" / "benchmark.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "scripts.benchmark_pipeline",
+            "run-frozen",
+            "--manifest",
+            str(manifest_path),
+            "--iterations",
+            "1",
+            "--report",
+            str(report_path),
+        ],
+    )
+
+    assert benchmark_pipeline.main() == 0
+    assert json.loads(report_path.read_text(encoding="utf-8"))["report_type"] == "frozen"
