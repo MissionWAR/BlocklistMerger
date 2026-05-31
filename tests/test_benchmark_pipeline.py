@@ -86,7 +86,8 @@ def test_validate_manifest_rejects_missing_changed_and_unexpected_raw_files(
         benchmark_pipeline.validate_manifest(manifest_path)
 
     (raw_dir / "extra.txt").unlink()
-    (raw_dir / "example.txt").write_text("||changed.example^\n", encoding="utf-8")
+    raw_file = raw_dir / "example.txt"
+    raw_file.write_bytes(b"x" * raw_file.stat().st_size)
     with pytest.raises(ValueError, match="SHA-256"):
         benchmark_pipeline.validate_manifest(manifest_path)
 
@@ -129,7 +130,10 @@ def test_validate_manifest_rejects_symlink_escape(tmp_path: Path, monkeypatch) -
     for path in raw_dir.glob("*.txt"):
         path.unlink()
     raw_dir.rmdir()
-    raw_dir.symlink_to(outside, target_is_directory=True)
+    try:
+        raw_dir.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable in this environment: {exc}")
 
     with pytest.raises(ValueError, match="outside"):
         benchmark_pipeline.validate_manifest(manifest_path)
