@@ -26,6 +26,7 @@ from scripts.downloader import (
     save_source_health_report,
     save_state,
     source_health_from_fetch_result,
+    source_health_runtime_summary,
     url_to_filename,
 )
 
@@ -379,6 +380,55 @@ class TestSourceHealthReport:
                 "failure_reason",
             } <= set(data["sources"][0])
             assert not output_path.with_suffix(".tmp").exists()
+
+    def test_runtime_summary_projects_build_source_health_report_compactly(self):
+        sources = [
+            SourceHealth(
+                url="https://example.com/fresh.txt",
+                filename="fresh.txt",
+                status="fresh_fetch",
+                changed=True,
+                byte_size=12,
+                sha256="abc",
+                cache_age_seconds=None,
+                failure_reason=None,
+            ),
+            SourceHealth(
+                url="https://example.com/cache.txt",
+                filename="cache.txt",
+                status="validated_cache",
+                changed=False,
+                byte_size=34,
+                sha256="def",
+                cache_age_seconds=60,
+                failure_reason=None,
+            ),
+            SourceHealth(
+                url="https://example.com/failed.txt",
+                filename="failed.txt",
+                status="failed",
+                changed=False,
+                byte_size=0,
+                sha256=None,
+                cache_age_seconds=None,
+                failure_reason="HTTP 500",
+            ),
+        ]
+        report = build_source_health_report(sources)
+
+        summary = source_health_runtime_summary(report, "reports/source-health.json")
+
+        assert summary["available"] is True
+        assert summary["report_path"] == "reports/source-health.json"
+        assert summary["schema_version"] == 1
+        assert summary["source_count"] == 3
+        assert summary["totals_by_status"]["fresh_fetch"] == 1
+        assert summary["cache_backed_sources"] == 1
+        assert summary["failed_sources"] == 1
+        assert summary["total_byte_size"] == 46
+        serialized = json.dumps(summary, sort_keys=True)
+        for forbidden_key in ("url", "filename", "sha256", "failure_reason", "sources"):
+            assert f'"{forbidden_key}"' not in serialized
 
     def test_cli_health_report_mode_writes_report_without_legacy_failure_gate(
         self, monkeypatch, tmp_path
