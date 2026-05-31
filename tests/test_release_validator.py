@@ -647,6 +647,75 @@ def test_runtime_profile_is_inspect_only_for_release_validation(tmp_path: Path) 
     assert runtime_findings == []
 
 
+def test_runtime_language_evidence_fields_are_inspect_only_for_release_validation(
+    tmp_path: Path,
+) -> None:
+    pipeline_stats = _pipeline_stats(2)
+    runtime_profile = pipeline_stats["runtime_profile"]
+    assert isinstance(runtime_profile, dict)
+    runtime_profile.update(
+        {
+            "stage_durations_seconds": {
+                "clean_seconds": 999_999.0,
+                "compile_seconds": 999_999.0,
+            },
+            "memory": {
+                "tracemalloc_current_bytes": 999_999_999,
+                "tracemalloc_peak_bytes": 999_999_999,
+                "resource_ru_maxrss": 999_999_999,
+            },
+            "compiler_cardinalities": {
+                "abp_rule_keys": 999_999,
+                "abp_wildcard_keys": 999_999,
+                "exception_rule_keys": 999_999,
+                "duplicate_index_size": 999_999,
+                "other_rule_count": 999_999,
+            },
+            "benchmark_evidence": {
+                "p95_seconds": 999_999.0,
+                "headroom": "failed",
+                "reports": ["reports/benchmarks/runs/extreme/benchmark.json"],
+            },
+            "profile_evidence": {
+                "reports": ["reports/profiles/extreme/pipeline.cprofile"],
+                "hot_path": "compiler string/set loop",
+            },
+            "language_gate": {
+                "rewrite": "requested",
+                "language_candidates": ["Go", "Rust", "JavaScript", "TypeScript"],
+                "headroom": "failed",
+            },
+        }
+    )
+
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||tracker.example.com^"],
+        pipeline_stats=pipeline_stats,
+    )
+
+    forbidden_tokens = (
+        "runtime",
+        "memory",
+        "cardinality",
+        "benchmark",
+        "profile",
+        "p95",
+        "headroom",
+        "language",
+        "rewrite",
+        "go",
+        "rust",
+        "javascript",
+        "typescript",
+    )
+    findings_text = "\n".join(
+        str(finding).lower() for finding in [*summary.errors, *summary.warnings]
+    )
+    for token in forbidden_tokens:
+        assert token not in findings_text
+
+
 def test_semantic_diagnostics_are_inspect_only_for_release_validation(tmp_path: Path) -> None:
     pipeline_stats = _pipeline_stats(2)
     statistics = pipeline_stats["statistics"]

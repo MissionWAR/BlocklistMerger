@@ -199,3 +199,43 @@ def test_runtime_language_gate_records_required_evidence() -> None:
     assert "release findings" in text
     assert "not a rewrite plan" in text
     assert "tracked rewrite artifacts" in text
+
+
+def test_runtime_docs_do_not_move_optional_tools_into_build_validate() -> None:
+    """Runtime docs should keep optional profiler installs out of scheduled CI."""
+    doc_paths = [
+        RUNTIME_LANGUAGE_GATE,
+        ROOT / "docs" / "BENCHMARKS.md",
+        ROOT / "docs" / "PROFILING.md",
+    ]
+    optional_tool_tokens = (
+        "py-spy",
+        "pyperf",
+        "dnspython",
+        ".[profile]",
+        "scripts.profile_pipeline",
+    )
+
+    for path in doc_paths:
+        if not path.exists():
+            continue
+        text = _read_text(path)
+        lines = text.splitlines()
+        for index, line in enumerate(lines):
+            lowered = line.lower()
+            scheduled_context = "build_validate" in lowered or "scheduled" in lowered
+            if not scheduled_context:
+                continue
+            assert "pip install" not in lowered
+            for token in optional_tool_tokens:
+                assert token not in lowered, f"{path} line {index + 1}: {line}"
+
+        install_blocks = [
+            line.lower()
+            for line in lines
+            if "pip install" in line.lower() or "python -m pip install" in line.lower()
+        ]
+        for install_line in install_blocks:
+            assert "build_validate" not in install_line
+            assert ".[dev,profile]" not in install_line
+            assert "pyperf" not in install_line
