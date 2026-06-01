@@ -532,6 +532,34 @@ class TestProcessFiles:
             "tracemalloc_peak_bytes",
             "resource_ru_maxrss",
         }
+        assert set(runtime_profile["child_resources"]) == {
+            "available",
+            "platform",
+            "user_cpu_seconds",
+            "system_cpu_seconds",
+            "resource_ru_maxrss",
+            "minor_page_faults",
+            "major_page_faults",
+            "voluntary_context_switches",
+            "involuntary_context_switches",
+        }
+        assert runtime_profile["child_resources"]["available"] in {True, False}
+        assert runtime_profile["source_health"] == {
+            "available": False,
+            "report_path": None,
+            "schema_version": None,
+            "source_count": 0,
+            "totals_by_status": {
+                "fresh_fetch": 0,
+                "validated_cache": 0,
+                "fallback_cache": 0,
+                "stale_cache": 0,
+                "failed": 0,
+            },
+            "cache_backed_sources": 0,
+            "failed_sources": 0,
+            "total_byte_size": 0,
+        }
 
     def test_print_summary_includes_new_cleaner_categories(self, capsys):
         """Pipeline summary should make URL-path and invalid drops visible."""
@@ -635,6 +663,33 @@ class TestSaveStatsJson:
                 "tracemalloc_current_bytes": 10,
                 "tracemalloc_peak_bytes": 20,
                 "resource_ru_maxrss": None,
+            },
+            "child_resources": {
+                "available": True,
+                "platform": "linux",
+                "user_cpu_seconds": 1.0,
+                "system_cpu_seconds": 0.5,
+                "resource_ru_maxrss": 2048,
+                "minor_page_faults": 10,
+                "major_page_faults": 0,
+                "voluntary_context_switches": 3,
+                "involuntary_context_switches": 1,
+            },
+            "source_health": {
+                "available": True,
+                "report_path": "reports/source-health.json",
+                "schema_version": 1,
+                "source_count": 3,
+                "totals_by_status": {
+                    "fresh_fetch": 1,
+                    "validated_cache": 1,
+                    "fallback_cache": 0,
+                    "stale_cache": 0,
+                    "failed": 1,
+                },
+                "cache_backed_sources": 1,
+                "failed_sources": 1,
+                "total_byte_size": 3072,
             },
         }
         save_stats_json(stats, json_path, total_time=5.5, runtime_profile=runtime_profile)
@@ -777,6 +832,95 @@ class TestPipelineCli:
 
         assert stats_report.exists()
         assert not proof_report.exists()
+
+    def test_cli_source_health_report_adds_compact_runtime_reference(
+        self,
+        make_input_dir,
+        monkeypatch,
+        tmp_path: Path,
+    ) -> None:
+        """The CLI should read source-health sidecars without copying rich fields."""
+        input_dir, output_file = make_input_dir({
+            "list1.txt": "||example.com^\n",
+        })
+        source_health_report = tmp_path / "reports" / "source-health.json"
+        stats_report = tmp_path / "reports" / "pipeline-stats.json"
+        source_health_report.parent.mkdir(parents=True, exist_ok=True)
+        source_health_report.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "source_count": 2,
+                    "totals_by_status": {
+                        "fresh_fetch": 1,
+                        "validated_cache": 1,
+                        "fallback_cache": 0,
+                        "stale_cache": 0,
+                        "failed": 0,
+                    },
+                    "sources": [
+                        {
+                            "url": "https://example.com/fresh.txt",
+                            "filename": "fresh.txt",
+                            "status": "fresh_fetch",
+                            "changed": True,
+                            "byte_size": 10,
+                            "sha256": "abc",
+                            "cache_age_seconds": None,
+                            "failure_reason": None,
+                        },
+                        {
+                            "url": "https://example.com/cache.txt",
+                            "filename": "cache.txt",
+                            "status": "validated_cache",
+                            "changed": False,
+                            "byte_size": 20,
+                            "sha256": "def",
+                            "cache_age_seconds": 10,
+                            "failure_reason": None,
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "scripts.pipeline",
+                input_dir,
+                output_file,
+                "--json-stats",
+                str(stats_report),
+                "--source-health-report",
+                str(source_health_report),
+            ],
+        )
+
+        assert pipeline_module.main() == 0
+
+        stats_data = json.loads(stats_report.read_text(encoding="utf-8"))
+        source_health = stats_data["runtime_profile"]["source_health"]
+        assert source_health == {
+            "available": True,
+            "report_path": "reports/source-health.json",
+            "schema_version": 1,
+            "source_count": 2,
+            "totals_by_status": {
+                "fresh_fetch": 1,
+                "validated_cache": 1,
+                "fallback_cache": 0,
+                "stale_cache": 0,
+                "failed": 0,
+            },
+            "cache_backed_sources": 1,
+            "failed_sources": 0,
+            "total_byte_size": 30,
+        }
+        serialized = json.dumps(source_health, sort_keys=True)
+        for forbidden_key in ("url", "filename", "sha256", "failure_reason", "sources"):
+            assert f'"{forbidden_key}"' not in serialized
 
 
 @pytest.mark.parametrize(

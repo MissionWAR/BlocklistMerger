@@ -83,7 +83,8 @@ jobs:
         run: |
           START=$(date +%s)
           python -m scripts.pipeline "$RAW_DIR" "$OUTPUT" \
-            --json-stats reports/pipeline-stats.json
+            --json-stats reports/pipeline-stats.json \
+            --source-health-report reports/source-health.json
           echo "time=$(($(date +%s) - START))s" >> $GITHUB_OUTPUT
 
       - name: Append Runtime Profile Summary
@@ -99,17 +100,32 @@ jobs:
 
           data = json.loads(stats_path.read_text(encoding="utf-8"))
           profile = data.get("runtime_profile", {})
+          stage = profile.get("stage_durations_seconds", {})
           sizes = profile.get("byte_sizes", {})
           memory = profile.get("memory", {})
+          child = profile.get("child_resources", {})
+          source_health = profile.get("source_health", {})
           lines = [
               "## Runtime Profile",
               "",
               "| Metric | Value |",
               "| ------ | ----- |",
               f"| Worker count | {profile.get('worker_count', 'unknown')} |",
+              f"| Clean seconds | {stage.get('clean_seconds', 'unknown')} |",
+              f"| Compile seconds | {stage.get('compile_seconds', 'unknown')} |",
               f"| Raw input bytes | {sizes.get('raw_input_bytes', 'unknown')} |",
               f"| Output bytes | {sizes.get('output_bytes', 'unknown')} |",
-              f"| Peak memory (ru_maxrss) | {memory.get('resource_ru_maxrss', 'unknown')} |",
+              f"| Tracemalloc current bytes | {memory.get('tracemalloc_current_bytes', 'unknown')} |",
+              f"| Tracemalloc peak bytes | {memory.get('tracemalloc_peak_bytes', 'unknown')} |",
+              f"| Current process ru_maxrss | {memory.get('resource_ru_maxrss', 'unknown')} |",
+              f"| Child resources available | {child.get('available', 'unknown')} |",
+              f"| Child user CPU seconds | {child.get('user_cpu_seconds', 'unknown')} |",
+              f"| Child system CPU seconds | {child.get('system_cpu_seconds', 'unknown')} |",
+              f"| Child ru_maxrss | {child.get('resource_ru_maxrss', 'unknown')} |",
+              f"| Source count | {source_health.get('source_count', 'unknown')} |",
+              f"| Cache-backed sources | {source_health.get('cache_backed_sources', 'unknown')} |",
+              f"| Failed sources | {source_health.get('failed_sources', 'unknown')} |",
+              f"| Source-health report | {source_health.get('report_path', 'reports/source-health.json')} |",
               "",
           ]
 

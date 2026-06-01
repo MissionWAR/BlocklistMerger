@@ -186,6 +186,33 @@ def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
                 "tracemalloc_peak_bytes": 128,
                 "resource_ru_maxrss": 256,
             },
+            "child_resources": {
+                "available": True,
+                "platform": "linux",
+                "user_cpu_seconds": 0.1,
+                "system_cpu_seconds": 0.2,
+                "resource_ru_maxrss": 512,
+                "minor_page_faults": 4,
+                "major_page_faults": 0,
+                "voluntary_context_switches": 2,
+                "involuntary_context_switches": 1,
+            },
+            "source_health": {
+                "available": True,
+                "report_path": "reports/source-health.json",
+                "schema_version": 1,
+                "source_count": 10,
+                "totals_by_status": {
+                    "fresh_fetch": 10,
+                    "validated_cache": 0,
+                    "fallback_cache": 0,
+                    "stale_cache": 0,
+                    "failed": 0,
+                },
+                "cache_backed_sources": 0,
+                "failed_sources": 0,
+                "total_byte_size": 1024,
+            },
         },
     }
 
@@ -566,6 +593,40 @@ def test_runtime_profile_is_inspect_only_for_release_validation(tmp_path: Path) 
         "tracemalloc_peak_bytes": 999_999_999,
         "resource_ru_maxrss": 999_999_999,
     }
+    runtime_profile["compiler_cardinalities"] = {
+        "abp_rule_keys": 999_999,
+        "abp_wildcard_keys": 999_999,
+        "exception_rule_keys": 999_999,
+        "duplicate_index_size": 999_999,
+        "other_rule_count": 999_999,
+    }
+    runtime_profile["child_resources"] = {
+        "available": True,
+        "platform": "linux",
+        "user_cpu_seconds": 999_999.0,
+        "system_cpu_seconds": 999_999.0,
+        "resource_ru_maxrss": 999_999_999,
+        "minor_page_faults": 999_999,
+        "major_page_faults": 999_999,
+        "voluntary_context_switches": 999_999,
+        "involuntary_context_switches": 999_999,
+    }
+    runtime_profile["source_health"] = {
+        "available": True,
+        "report_path": "reports/source-health.json",
+        "schema_version": 1,
+        "source_count": 999_999,
+        "totals_by_status": {
+            "fresh_fetch": 0,
+            "validated_cache": 999_999,
+            "fallback_cache": 999_999,
+            "stale_cache": 999_999,
+            "failed": 999_999,
+        },
+        "cache_backed_sources": 2_999_997,
+        "failed_sources": 999_999,
+        "total_byte_size": 999_999_999,
+    }
 
     summary = _validate(
         tmp_path,
@@ -579,8 +640,80 @@ def test_runtime_profile_is_inspect_only_for_release_validation(tmp_path: Path) 
         if "runtime" in str(finding.get("code", ""))
         or "memory" in str(finding.get("code", ""))
         or "cardinality" in str(finding.get("code", ""))
+        or "cache" in str(finding.get("code", ""))
+        or "child" in str(finding.get("code", ""))
+        or "source_health" in str(finding.get("code", ""))
     ]
     assert runtime_findings == []
+
+
+def test_runtime_language_evidence_fields_are_inspect_only_for_release_validation(
+    tmp_path: Path,
+) -> None:
+    pipeline_stats = _pipeline_stats(2)
+    runtime_profile = pipeline_stats["runtime_profile"]
+    assert isinstance(runtime_profile, dict)
+    runtime_profile.update(
+        {
+            "stage_durations_seconds": {
+                "clean_seconds": 999_999.0,
+                "compile_seconds": 999_999.0,
+            },
+            "memory": {
+                "tracemalloc_current_bytes": 999_999_999,
+                "tracemalloc_peak_bytes": 999_999_999,
+                "resource_ru_maxrss": 999_999_999,
+            },
+            "compiler_cardinalities": {
+                "abp_rule_keys": 999_999,
+                "abp_wildcard_keys": 999_999,
+                "exception_rule_keys": 999_999,
+                "duplicate_index_size": 999_999,
+                "other_rule_count": 999_999,
+            },
+            "benchmark_evidence": {
+                "p95_seconds": 999_999.0,
+                "headroom": "failed",
+                "reports": ["reports/benchmarks/runs/extreme/benchmark.json"],
+            },
+            "profile_evidence": {
+                "reports": ["reports/profiles/extreme/pipeline.cprofile"],
+                "hot_path": "compiler string/set loop",
+            },
+            "language_gate": {
+                "rewrite": "requested",
+                "language_candidates": ["Go", "Rust", "JavaScript", "TypeScript"],
+                "headroom": "failed",
+            },
+        }
+    )
+
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||tracker.example.com^"],
+        pipeline_stats=pipeline_stats,
+    )
+
+    forbidden_tokens = (
+        "runtime",
+        "memory",
+        "cardinality",
+        "benchmark",
+        "profile",
+        "p95",
+        "headroom",
+        "language",
+        "rewrite",
+        "go",
+        "rust",
+        "javascript",
+        "typescript",
+    )
+    findings_text = "\n".join(
+        str(finding).lower() for finding in [*summary.errors, *summary.warnings]
+    )
+    for token in forbidden_tokens:
+        assert token not in findings_text
 
 
 def test_semantic_diagnostics_are_inspect_only_for_release_validation(tmp_path: Path) -> None:

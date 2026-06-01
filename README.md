@@ -39,6 +39,8 @@ URLs in `config/sources.txt`. Broader configuration-platform ideas are deferred;
 [`docs/SCOPE.md`](docs/SCOPE.md).
 The AdGuard Home DNS semantics baseline is documented in
 [`docs/AGH_SEMANTICS.md`](docs/AGH_SEMANTICS.md).
+The Python-first runtime and language decision gate is documented in
+[`docs/RUNTIME_LANGUAGE_GATE.md`](docs/RUNTIME_LANGUAGE_GATE.md).
 
 ---
 

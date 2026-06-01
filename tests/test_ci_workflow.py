@@ -171,6 +171,26 @@ def test_release_install_uses_constraints_and_cache_dependency_path() -> None:
     assert 'pip install -q ".[dev]"' not in build_validate
 
 
+def test_scheduled_publish_path_excludes_manual_profile_tools() -> None:
+    """Scheduled release installs and steps must not include manual profiling tools."""
+    workflow = _workflow_text()
+    constraints = _constraints_text()
+    pyproject = _pyproject_text()
+    build_validate = _job_section(workflow, "build_validate")
+
+    for token in ("py-spy", "pyperf", "dnspython", "scripts.profile_pipeline"):
+        assert token not in workflow
+        assert token not in constraints
+
+    assert ".[profile]" not in workflow
+    assert "[project.optional-dependencies]" in pyproject
+    assert "profile = [" in pyproject
+    assert "py-spy" in pyproject
+    assert "dnspython" in pyproject
+    assert "pyperf" not in pyproject
+    assert RELEASE_INSTALL in build_validate
+
+
 def test_python_compatibility_audit_matrix_is_read_only_and_separate() -> None:
     """The Python support audit should not publish or weaken release-job permissions."""
     text = _workflow_text()
@@ -219,6 +239,7 @@ def test_runtime_profile_summary_mirrors_only_compact_fields() -> None:
     """Step summary should show a small runtime excerpt, not full diagnostic detail."""
     text = _workflow_text()
     build_validate = _job_section(text, "build_validate")
+    compile_step = _step_section(build_validate, "Compile Sources")
     runtime_summary = _step_section(build_validate, "Append Runtime Profile Summary")
 
     compile_sources = _position(build_validate, "- name: Compile Sources")
@@ -226,15 +247,33 @@ def test_runtime_profile_summary_mirrors_only_compact_fields() -> None:
     validate = _position(build_validate, "- name: Validate Release Candidate")
 
     assert compile_sources < append_runtime < validate
+    assert "--json-stats reports/pipeline-stats.json" in compile_step
+    assert "--source-health-report reports/source-health.json" in compile_step
     assert "reports/pipeline-stats.json" in runtime_summary
     assert "$GITHUB_STEP_SUMMARY" in runtime_summary
     assert "runtime_profile" in runtime_summary
     assert "worker_count" in runtime_summary
+    assert "stage_durations_seconds" in runtime_summary
+    assert "clean_seconds" in runtime_summary
+    assert "compile_seconds" in runtime_summary
     assert "raw_input_bytes" in runtime_summary
     assert "output_bytes" in runtime_summary
+    assert "tracemalloc_current_bytes" in runtime_summary
+    assert "tracemalloc_peak_bytes" in runtime_summary
     assert "resource_ru_maxrss" in runtime_summary
-    assert "stage_durations_seconds" not in runtime_summary
+    assert "child_resources" in runtime_summary
+    assert "user_cpu_seconds" in runtime_summary
+    assert "system_cpu_seconds" in runtime_summary
+    assert "source_health" in runtime_summary
+    assert "source_count" in runtime_summary
+    assert "cache_backed_sources" in runtime_summary
+    assert "failed_sources" in runtime_summary
+    assert "reports/source-health.json" in runtime_summary
+    assert "stage_summaries" not in runtime_summary
     assert "compiler_cardinalities" not in runtime_summary
+    assert "totals_by_status" not in runtime_summary
+    for rich_key in ("url", "filename", "sha256", "failure_reason", '"sources"'):
+        assert rich_key not in runtime_summary
 
 
 def test_no_non_pip_dependency_manager_is_introduced() -> None:
@@ -251,6 +290,7 @@ def test_release_validation_reports_and_artifacts_are_wired() -> None:
 
     assert "--health-report reports/source-health.json" in text
     assert "--json-stats reports/pipeline-stats.json" in text
+    assert "--source-health-report reports/source-health.json" in text
     assert "python -m scripts.release_validator" in text
     assert "reports/validation-summary.json" in text
     assert "reports/validation-summary.md" in text

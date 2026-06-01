@@ -29,9 +29,10 @@ import hashlib
 import json
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
-from typing import Final, NamedTuple
+from typing import Final, NamedTuple, TypedDict
 from urllib.parse import urlparse
 
 import aiofiles
@@ -132,6 +133,19 @@ class SourceHealthReport(NamedTuple):
     source_count: int
     totals_by_status: dict[str, int]
     sources: list[SourceHealth]
+
+
+class SourceHealthRuntimeSummary(TypedDict):
+    """Compact source-health/cache projection for default runtime evidence."""
+
+    available: bool
+    report_path: str | None
+    schema_version: int | None
+    source_count: int
+    totals_by_status: dict[str, int]
+    cache_backed_sources: int
+    failed_sources: int
+    total_byte_size: int
 
 
 # =============================================================================
@@ -420,6 +434,156 @@ def build_source_health_report(
         totals_by_status=totals,
         sources=sources,
     )
+
+
+def _safe_non_negative_int(value: object) -> int:
+    """Return a non-negative integer from trusted JSON-style numeric values."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+def _zero_source_health_totals() -> dict[str, int]:
+    """Return a stable zero-filled source-health status dictionary."""
+    return {status: 0 for status in SOURCE_HEALTH_STATUSES}
+
+
+def _compact_source_health_report_path(
+    report_path: str | Path | None,
+    *,
+    base_dir: str | Path | None = None,
+) -> str | None:
+    """Return a compact report reference that never serializes absolute or parent paths."""
+    if report_path is None:
+        return None
+
+    report_path_text = str(report_path).strip()
+    if not report_path_text:
+        return None
+
+    path = Path(report_path_text)
+    if ".." in path.parts:
+        msg = "source-health report path must not contain '..' segments"
+        raise ValueError(msg)
+
+    if path.is_absolute():
+        root = Path.cwd() if base_dir is None else Path(base_dir)
+        try:
+            relative = path.resolve(strict=False).relative_to(root.resolve(strict=False))
+        except ValueError:
+            if "reports" in path.parts:
+                reports_index = path.parts.index("reports")
+                return Path(*path.parts[reports_index:]).as_posix()
+            return path.name
+        if ".." in relative.parts:
+            msg = "source-health report path must not resolve outside the base directory"
+            raise ValueError(msg)
+        return relative.as_posix()
+
+    return path.as_posix()
+
+
+def _report_schema_version(
+    report: SourceHealthReport | Mapping[str, object],
+) -> int | None:
+    """Return a report schema version when the source-health object exposes one."""
+    if isinstance(report, SourceHealthReport):
+        return report.schema_version
+
+    schema_version = report.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        return None
+    return schema_version
+
+
+def _report_source_count(report: SourceHealthReport | Mapping[str, object]) -> int:
+    """Return source_count from a SourceHealthReport or JSON report dictionary."""
+    if isinstance(report, SourceHealthReport):
+        return max(0, report.source_count)
+
+    source_count = _safe_non_negative_int(report.get("source_count"))
+    if source_count:
+        return source_count
+
+    sources = report.get("sources")
+    return len(sources) if isinstance(sources, list) else 0
+
+
+def _report_totals_by_status(
+    report: SourceHealthReport | Mapping[str, object],
+) -> dict[str, int]:
+    """Return status totals without exposing any per-source diagnostics."""
+    raw_totals: Mapping[str, object]
+    if isinstance(report, SourceHealthReport):
+        raw_totals = report.totals_by_status
+    else:
+        totals = report.get("totals_by_status")
+        raw_totals = totals if isinstance(totals, Mapping) else {}
+
+    return {
+        status: _safe_non_negative_int(raw_totals.get(status, 0))
+        for status in SOURCE_HEALTH_STATUSES
+    }
+
+
+def _report_total_byte_size(report: SourceHealthReport | Mapping[str, object]) -> int:
+    """Return aggregate byte size from rich source records without copying them."""
+    if isinstance(report, SourceHealthReport):
+        return sum(max(0, source.byte_size) for source in report.sources)
+
+    sources = report.get("sources")
+    if not isinstance(sources, list):
+        return 0
+
+    total = 0
+    for source in sources:
+        if isinstance(source, Mapping):
+            total += _safe_non_negative_int(source.get("byte_size"))
+    return total
+
+
+def source_health_runtime_summary(
+    report: SourceHealthReport | Mapping[str, object] | None,
+    report_path: str | Path | None = None,
+    *,
+    base_dir: str | Path | None = None,
+) -> SourceHealthRuntimeSummary:
+    """
+    Return compact source-health/cache evidence for default runtime stats.
+
+    The rich ``SourceHealthReport.sources`` records remain in the source-health
+    sidecar. This summary intentionally exposes only aggregate counts and a safe
+    report reference.
+    """
+    compact_report_path = _compact_source_health_report_path(
+        report_path,
+        base_dir=base_dir,
+    )
+    if report is None:
+        return {
+            "available": False,
+            "report_path": compact_report_path,
+            "schema_version": None,
+            "source_count": 0,
+            "totals_by_status": _zero_source_health_totals(),
+            "cache_backed_sources": 0,
+            "failed_sources": 0,
+            "total_byte_size": 0,
+        }
+
+    totals = _report_totals_by_status(report)
+    return {
+        "available": True,
+        "report_path": compact_report_path,
+        "schema_version": _report_schema_version(report),
+        "source_count": _report_source_count(report),
+        "totals_by_status": totals,
+        "cache_backed_sources": (
+            totals["validated_cache"] + totals["fallback_cache"] + totals["stale_cache"]
+        ),
+        "failed_sources": totals["failed"],
+        "total_byte_size": _report_total_byte_size(report),
+    }
 
 
 def _source_health_report_to_dict(report: SourceHealthReport) -> dict[str, object]:

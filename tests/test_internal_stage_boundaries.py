@@ -1,8 +1,11 @@
 """Static guards for Phase 9 internal diagnostics boundaries."""
 
 import io
+import subprocess
 import tokenize
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
 
 FORBIDDEN_PUBLIC_SCOPE_TOKENS = (
     "--profile",
@@ -28,7 +31,19 @@ ALLOWED_DIAGNOSTIC_TOKENS = (
 
 
 def _read(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8")
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def _git_ls_files() -> list[str]:
+    result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    return [line.replace("\\", "/") for line in result.stdout.splitlines() if line]
 
 
 def _non_comment_text(path: str) -> str:
@@ -101,6 +116,96 @@ def test_scheduled_workflow_does_not_promote_stage_or_proof_gates() -> None:
     )
     for token in forbidden_workflow_tokens:
         assert token not in text
+
+
+def test_source_tree_has_no_non_python_rewrite_artifacts() -> None:
+    """RUN-04 is a language gate only, not a tracked rewrite prototype."""
+    tracked_files = _git_ls_files()
+
+    forbidden_project_files = {
+        "go.mod",
+        "cargo.toml",
+        "package.json",
+        "tsconfig.json",
+    }
+    forbidden_source_suffixes = (".go", ".rs", ".ts", ".tsx")
+    illegal_files: list[str] = []
+
+    for tracked_file in tracked_files:
+        parts = Path(tracked_file).parts
+        lower_parts = tuple(part.lower() for part in parts)
+        lower_path = tracked_file.lower()
+        name = lower_parts[-1]
+
+        if name in forbidden_project_files:
+            illegal_files.append(tracked_file)
+            continue
+
+        if lower_path.endswith(forbidden_source_suffixes) and lower_parts[0] not in {
+            "docs",
+            "tests",
+        }:
+            illegal_files.append(tracked_file)
+            continue
+
+        if lower_parts[0] == "scripts" and any(
+            marker in name for marker in ("rewrite", "prototype")
+        ):
+            illegal_files.append(tracked_file)
+
+    assert illegal_files == []
+
+
+def test_scheduled_workflow_has_no_runtime_language_hard_gates() -> None:
+    """Scheduled CI may summarize runtime_profile but must not enforce RUN-04 gates."""
+    text = _non_comment_text(".github/workflows/update.yml")
+
+    assert "runtime_profile" in text
+    forbidden_workflow_tokens = (
+        "scripts.benchmark_pipeline",
+        "scripts.profile_pipeline",
+        "py-spy",
+        "pyperf",
+        "dnspython",
+        "go build",
+        "cargo",
+        "npm",
+        "pnpm",
+        "node",
+        "tsc",
+        "p95",
+        "headroom",
+        "runtime threshold",
+        "runtime-threshold",
+        "language gate",
+        "language-gate",
+    )
+    for token in forbidden_workflow_tokens:
+        assert token not in text
+
+
+def test_dedicated_profile_wrapper_is_only_manual_profiling_surface() -> None:
+    wrapper = _non_comment_text("scripts/profile_pipeline.py")
+    normal_surfaces = [
+        "scripts/pipeline.py",
+        "scripts/release_validator.py",
+        ".github/workflows/update.yml",
+    ]
+    if Path("run.py").exists():
+        normal_surfaces.append("run.py")
+
+    assert "cprofile" in wrapper
+    assert "--py-spy-speedscope" in wrapper
+    assert "--pyperf-json" in wrapper
+    assert "--dns-diagnostics" in wrapper
+
+    for path in normal_surfaces:
+        text = _non_comment_text(path)
+        assert "scripts.profile_pipeline" not in text
+        assert "--py-spy-speedscope" not in text
+        assert "--py-spy-flamegraph" not in text
+        assert "--pyperf-json" not in text
+        assert "--dns-diagnostics" not in text
 
 
 def test_release_validator_has_no_stage_threshold_logic() -> None:
