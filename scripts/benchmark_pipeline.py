@@ -151,13 +151,13 @@ def _reject_artifact_symlink_segments(path: Path, root: Path, label: str) -> Non
 def _safe_artifact_dir(path: Path, root: Path, label: str) -> Path:
     """Create and return a non-symlink artifact directory below root."""
     candidate = _rooted(path)
+    _reject_artifact_symlink_segments(candidate, root, label)
     try:
         candidate.resolve(strict=False).relative_to(root)
     except ValueError as exc:
         msg = f"{label} must be under {root.as_posix()}"
         raise ValueError(msg) from exc
 
-    _reject_artifact_symlink_segments(candidate, root, label)
     candidate.mkdir(parents=True, exist_ok=True)
     _reject_artifact_symlink_segments(candidate, root, label)
 
@@ -226,7 +226,7 @@ def _resolve_manifest_raw_dir(manifest_path: Path, raw_dir_value: object) -> Pat
     try:
         raw_dir.relative_to(manifest_path.parent.resolve(strict=True))
     except ValueError as exc:
-        msg = "raw_dir must resolve inside the frozen dataset directory"
+        msg = "raw_dir must not resolve outside the frozen dataset directory"
         raise ValueError(msg) from exc
     if not raw_dir.is_dir():
         raise ValueError("raw_dir must exist and be a directory")
