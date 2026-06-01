@@ -12,11 +12,13 @@ import pytest
 
 import scripts.release_validator as release_validator
 from scripts.release_evidence import (
+    RELEASE_EVIDENCE_SCHEMA_VERSION,
     SCOPE_APEX,
     SCOPE_EXACT_HOST,
     SCOPE_UNSCOPED_GLOBAL,
     SCOPE_WILDCARD_APEX_ALLOWED,
     SCOPE_WILDCARD_CHILD,
+    fingerprint_membership,
 )
 
 
@@ -259,6 +261,7 @@ def _write_release_inputs(
         "summary_json": tmp_path / "reports" / "validation-summary.json",
         "summary_md": tmp_path / "reports" / "validation-summary.md",
         "previous_output": tmp_path / "previous" / "merged.txt",
+        "evidence_json": tmp_path / "reports" / "release-evidence.json",
     }
     _write_json(paths["source_health"], source_health or _source_health(["fresh_fetch"] * 10))
     _write_json(paths["pipeline_stats"], pipeline_stats or _pipeline_stats(len(output_lines)))
@@ -592,6 +595,163 @@ def test_malformed_scoped_canary_fails_closed_with_field_diagnostics(
     assert error["details"]["field"] == "scoped_canaries[0].expect"
     assert error["details"]["expected"] == ["allowed", "blocked"]
     assert error["details"]["canaries_path"].endswith("release_canaries.json")
+
+
+def test_release_evidence_reports_churn_fingerprints_and_source_health(
+    tmp_path: Path,
+) -> None:
+    current_lines = ["||ads.example.com^", "||new.example.com^"]
+    previous_lines = ["||ads.example.com^", "||old.example.com^"]
+    paths = _write_release_inputs(
+        tmp_path,
+        output_lines=current_lines,
+        previous_lines=previous_lines,
+        canaries=_canaries(must_block=["ads.example.com"], must_allow=["github.com"]),
+        pipeline_stats=_pipeline_stats(2),
+        source_health=_source_health(["fresh_fetch"] * 9 + ["validated_cache"]),
+    )
+
+    summary = release_validator.validate_release(
+        source_health_path=paths["source_health"],
+        pipeline_stats_path=paths["pipeline_stats"],
+        output_path=paths["output"],
+        canaries_path=paths["canaries"],
+        previous_output_path=paths["previous_output"],
+        summary_json_path=paths["summary_json"],
+        summary_md_path=paths["summary_md"],
+        thresholds=release_validator.ReleaseThresholds(minimum_output_rules=1),
+    )
+
+    data = _read_json(paths["summary_json"])
+    evidence = summary.release_evidence
+    assert data["release_evidence"] == evidence
+    assert evidence["schema_version"] == RELEASE_EVIDENCE_SCHEMA_VERSION
+    assert evidence["membership_churn"]["available"] is True
+    assert evidence["membership_churn"]["added_count"] == 1
+    assert evidence["membership_churn"]["removed_count"] == 1
+    assert evidence["membership_churn"]["added_samples"] == ["||new.example.com^"]
+    assert evidence["membership_churn"]["removed_samples"] == ["||old.example.com^"]
+    assert evidence["output_fingerprints"] == {
+        "current": fingerprint_membership(current_lines),
+        "previous": fingerprint_membership(previous_lines),
+        "added": fingerprint_membership(["||new.example.com^"]),
+        "removed": fingerprint_membership(["||old.example.com^"]),
+    }
+    assert evidence["source_health_context"] == {
+        "available": True,
+        "source_count": 10,
+        "totals_by_status": {
+            "failed": 0,
+            "fallback_cache": 0,
+            "fresh_fetch": 9,
+            "stale_cache": 0,
+            "validated_cache": 1,
+        },
+        "degraded_sources": 0,
+    }
+
+
+def test_release_evidence_marks_missing_previous_output_without_churn_gate(
+    tmp_path: Path,
+) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||tracker.example.com^"],
+        pipeline_stats=_pipeline_stats(2),
+    )
+
+    assert "previous_output_unavailable" in _codes(summary.warnings)
+    assert summary.release_evidence["membership_churn"] == {
+        "available": False,
+        "current_count": 2,
+        "previous_count": None,
+        "added_count": None,
+        "removed_count": None,
+    }
+    assert summary.release_evidence["output_fingerprints"]["current"] == fingerprint_membership(
+        ["||ads.example.com^", "||tracker.example.com^"]
+    )
+    assert summary.release_evidence["output_fingerprints"]["previous"] is None
+
+
+def test_membership_churn_and_fingerprints_are_inspect_only(
+    tmp_path: Path,
+) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||new.example.com^"],
+        previous_lines=["||ads.example.com^", "||old.example.com^"],
+        canaries=_canaries(must_block=["ads.example.com"], must_allow=["github.com"]),
+        pipeline_stats=_pipeline_stats(2),
+    )
+
+    findings_text = "\n".join(
+        str(finding).lower() for finding in [*summary.errors, *summary.warnings]
+    )
+    for token in ("membership", "churn", "fingerprint", "added", "removed"):
+        assert token not in findings_text
+
+
+def test_cli_writes_optional_release_evidence_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _write_release_inputs(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||tracker.example.com^"],
+        pipeline_stats=_pipeline_stats(2),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "scripts.release_validator",
+            "--source-health",
+            str(paths["source_health"]),
+            "--pipeline-stats",
+            str(paths["pipeline_stats"]),
+            "--output",
+            str(paths["output"]),
+            "--canaries",
+            str(paths["canaries"]),
+            "--summary-json",
+            str(paths["summary_json"]),
+            "--summary-md",
+            str(paths["summary_md"]),
+            "--evidence-json",
+            str(paths["evidence_json"]),
+            "--minimum-output-rules",
+            "1",
+        ],
+    )
+
+    assert release_validator.main() == 0
+    sidecar = _read_json(paths["evidence_json"])
+    summary_json = _read_json(paths["summary_json"])
+    assert sidecar["schema_version"] == RELEASE_EVIDENCE_SCHEMA_VERSION
+    assert sidecar["coverage_summary"]["total_records"] == 2
+    assert summary_json["release_evidence"]["sidecar"] == {
+        "available": True,
+        "path": str(paths["evidence_json"]),
+    }
+
+
+def test_markdown_release_evidence_stays_compact(tmp_path: Path) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||new.example.com^"],
+        previous_lines=["||ads.example.com^", "||old.example.com^"],
+        canaries=_canaries(must_block=["ads.example.com"], must_allow=["github.com"]),
+        pipeline_stats=_pipeline_stats(2),
+    )
+
+    markdown = release_validator.render_markdown_summary(summary)
+
+    assert "### Release Evidence" in markdown
+    assert "- Membership churn: 1 added, 1 removed" in markdown
+    assert "- Current fingerprint:" in markdown
+    assert "||new.example.com^" not in markdown
+    assert "||old.example.com^" not in markdown
 
 
 @pytest.mark.parametrize(
