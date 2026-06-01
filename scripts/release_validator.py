@@ -27,6 +27,7 @@ from scripts.compiler import (
 )
 from scripts.release_evidence import (
     COVERAGE_EFFECT_BLOCK,
+    RELEASE_EVIDENCE_SCHEMA_VERSION,
     SCOPE_APEX,
     SCOPE_APEX_AND_SUBDOMAINS,
     SCOPE_EXACT_HOST,
@@ -35,8 +36,14 @@ from scripts.release_evidence import (
     SCOPE_WILDCARD_APEX_ALLOWED,
     SCOPE_WILDCARD_CHILD,
     CoverageRecord,
+    compact_source_health_context,
+    compare_membership,
     coverage_records_from_rules,
+    fingerprint_membership,
+    membership_churn_to_dict,
     record_covers_canary_scope,
+    render_diagnostic_sidecar,
+    write_report_json,
 )
 from scripts.rule_syntax import classify_rule_syntax
 
@@ -973,6 +980,70 @@ def validate_canaries(
     return errors, details
 
 
+def _release_evidence_payload(
+    *,
+    current_rules: tuple[str, ...],
+    previous_rules: tuple[str, ...] | None,
+    source_health: dict[str, object],
+    scoped_canaries: object,
+    coverage_records: tuple[CoverageRecord, ...],
+    evidence_json_path: Path | None = None,
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    """Build diagnostic-only release evidence and optional sidecar payload."""
+    source_health_context = compact_source_health_context(source_health)
+    sidecar_payload: dict[str, object] | None = None
+
+    if previous_rules is not None:
+        churn = compare_membership(current_rules, previous_rules)
+        churn_details = membership_churn_to_dict(churn)
+        membership_churn: dict[str, object] = {
+            "available": True,
+            **churn_details,
+        }
+        output_fingerprints: dict[str, object] = {
+            "current": churn.current_fingerprint,
+            "previous": churn.previous_fingerprint,
+            "added": churn.added_fingerprint,
+            "removed": churn.removed_fingerprint,
+        }
+    else:
+        churn = None
+        membership_churn = {
+            "available": False,
+            "current_count": len(current_rules),
+            "previous_count": None,
+            "added_count": None,
+            "removed_count": None,
+        }
+        output_fingerprints = {
+            "current": fingerprint_membership(current_rules),
+            "previous": None,
+            "added": None,
+            "removed": None,
+        }
+
+    sidecar: dict[str, object] = {"available": False, "path": None}
+    if evidence_json_path is not None:
+        sidecar = {"available": True, "path": str(evidence_json_path)}
+        sidecar_payload = render_diagnostic_sidecar(
+            membership_churn=churn,
+            source_health_context=source_health_context,
+            coverage_records=coverage_records,
+        )
+
+    return (
+        {
+            "schema_version": RELEASE_EVIDENCE_SCHEMA_VERSION,
+            "membership_churn": membership_churn,
+            "output_fingerprints": output_fingerprints,
+            "source_health_context": source_health_context,
+            "scoped_canaries": scoped_canaries if isinstance(scoped_canaries, list) else [],
+            "sidecar": sidecar,
+        },
+        sidecar_payload,
+    )
+
+
 # =============================================================================
 # PREVIOUS RELEASE VALIDATION
 # =============================================================================
@@ -1109,6 +1180,42 @@ def render_markdown_summary(summary: ValidationSummary) -> str:
     for key, value in summary.thresholds.items():
         lines.append(f"- `{key}`: {value}")
 
+    evidence = summary.release_evidence
+    if evidence:
+        churn = evidence.get("membership_churn")
+        fingerprints = evidence.get("output_fingerprints")
+        source_context = evidence.get("source_health_context")
+        scoped_canaries = evidence.get("scoped_canaries")
+        sidecar = evidence.get("sidecar")
+
+        lines.append("")
+        lines.append("### Release Evidence")
+        if isinstance(churn, dict) and churn.get("available") is True:
+            lines.append(
+                f"- Membership churn: {churn.get('added_count', 0)} added, "
+                f"{churn.get('removed_count', 0)} removed"
+            )
+        else:
+            lines.append("- Membership churn: unavailable")
+
+        if isinstance(fingerprints, dict):
+            current_fingerprint = str(fingerprints.get("current") or "unavailable")
+            previous_fingerprint = str(fingerprints.get("previous") or "unavailable")
+            lines.append(f"- Current fingerprint: {current_fingerprint[:12]}")
+            lines.append(f"- Previous fingerprint: {previous_fingerprint[:12]}")
+
+        if isinstance(source_context, dict):
+            lines.append(
+                f"- Source health context: {source_context.get('source_count', 0)} sources, "
+                f"{source_context.get('degraded_sources', 0)} degraded"
+            )
+
+        if isinstance(scoped_canaries, list):
+            lines.append(f"- Scoped canaries: {len(scoped_canaries)}")
+
+        if isinstance(sidecar, dict) and sidecar.get("available") is True:
+            lines.append(f"- Evidence sidecar: {sidecar.get('path')}")
+
     lines.append("")
     return "\n".join(lines)
 
@@ -1117,8 +1224,12 @@ def save_validation_reports(
     summary: ValidationSummary,
     summary_json_path: Path,
     summary_md_path: Path,
+    evidence_json_path: Path | None = None,
+    evidence_sidecar: dict[str, object] | None = None,
 ) -> None:
     """Write JSON and Markdown validation summaries atomically."""
+    if evidence_json_path is not None and evidence_sidecar is not None:
+        write_report_json(evidence_json_path, evidence_sidecar)
     _atomic_write_json(summary_json_path, summary.to_dict())
     _atomic_write_text(summary_md_path, render_markdown_summary(summary))
 
@@ -1137,6 +1248,7 @@ def validate_release(
     previous_output_path: Path | None = None,
     summary_json_path: Path | None = None,
     summary_md_path: Path | None = None,
+    evidence_json_path: Path | None = None,
     thresholds: ReleaseThresholds = DEFAULT_THRESHOLDS,
 ) -> ValidationSummary:
     """Validate a release candidate and optionally write summary reports."""
@@ -1205,8 +1317,10 @@ def validate_release(
         "absolute_delta": None,
         "relative_delta": None,
     }
+    previous_rules: tuple[str, ...] | None = None
     if previous_output_path and previous_output_path.exists():
-        previous_count = _non_empty_line_count(previous_output_path)
+        previous_rules = _read_non_empty_lines(previous_output_path)
+        previous_count = len(previous_rules)
         previous_summary = validate_previous_output_delta(current_count, previous_count, thresholds)
         errors.extend(previous_summary.errors)
         warnings.extend(previous_summary.warnings)
@@ -1221,6 +1335,15 @@ def validate_release(
     if pipeline_count is not None:
         counts["pipeline_reported_output_rules"] = pipeline_count
 
+    release_evidence, evidence_sidecar = _release_evidence_payload(
+        current_rules=output_scan.rules,
+        previous_rules=previous_rules,
+        source_health=source_health,
+        scoped_canaries=canary_details.get("scoped", []),
+        coverage_records=output_scan.coverage_records,
+        evidence_json_path=evidence_json_path,
+    )
+
     summary = ValidationSummary(
         errors=errors,
         warnings=warnings,
@@ -1231,13 +1354,17 @@ def validate_release(
         syntax=output_scan.syntax,
         canaries=canary_details,
         previous_release=previous_release,
-        release_evidence={
-            "scoped_canaries": canary_details.get("scoped", []),
-        },
+        release_evidence=release_evidence,
     )
 
     if summary_json_path and summary_md_path:
-        save_validation_reports(summary, summary_json_path, summary_md_path)
+        save_validation_reports(
+            summary,
+            summary_json_path,
+            summary_md_path,
+            evidence_json_path=evidence_json_path,
+            evidence_sidecar=evidence_sidecar,
+        )
 
     return summary
 
@@ -1251,6 +1378,7 @@ def run_validation(
     previous_output_path: Path | None,
     summary_json_path: Path,
     summary_md_path: Path,
+    evidence_json_path: Path | None = None,
     thresholds: ReleaseThresholds = DEFAULT_THRESHOLDS,
 ) -> ValidationRunResult:
     """Validate and return a CLI-style exit code."""
@@ -1262,6 +1390,7 @@ def run_validation(
         previous_output_path=previous_output_path,
         summary_json_path=summary_json_path,
         summary_md_path=summary_md_path,
+        evidence_json_path=evidence_json_path,
         thresholds=thresholds,
     )
     return ValidationRunResult(summary=summary, exit_code=1 if summary.errors else 0)
@@ -1285,6 +1414,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--previous-output", help="Optional previous release output")
     parser.add_argument("--summary-json", required=True, help="Path for validation JSON summary")
     parser.add_argument("--summary-md", required=True, help="Path for validation Markdown summary")
+    parser.add_argument("--evidence-json", help="Optional path for detailed release evidence JSON")
     parser.add_argument(
         "--minimum-output-rules",
         type=int,
@@ -1298,6 +1428,7 @@ def main() -> int:
     """CLI entry point."""
     args = _parse_args()
     previous_output = Path(args.previous_output) if args.previous_output else None
+    evidence_json = Path(args.evidence_json) if args.evidence_json else None
     thresholds = ReleaseThresholds(minimum_output_rules=args.minimum_output_rules)
 
     try:
@@ -1309,6 +1440,7 @@ def main() -> int:
             previous_output_path=previous_output,
             summary_json_path=Path(args.summary_json),
             summary_md_path=Path(args.summary_md),
+            evidence_json_path=evidence_json,
             thresholds=thresholds,
         )
         if result.exit_code:
