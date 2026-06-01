@@ -315,6 +315,53 @@ def test_freeze_fails_when_source_health_metadata_is_missing(
         benchmark_pipeline.freeze_dataset(input_dir, health_report, "missing-meta")
 
 
+def test_freeze_rejects_symlinked_raw_directory_before_copying(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "lists" / "_raw"
+    input_dir.mkdir(parents=True)
+    raw_file = input_dir / "a.txt"
+    raw_file.write_text("||a.example^\n", encoding="utf-8")
+    health_report = _source_health_report(tmp_path / "reports" / "source-health.json", [raw_file])
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    dataset_dir = tmp_path / "reports" / "benchmarks" / "frozen" / "symlinked"
+    dataset_dir.mkdir(parents=True)
+    try:
+        (dataset_dir / "raw").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable in this environment: {exc}")
+
+    with pytest.raises(ValueError, match="symlink"):
+        benchmark_pipeline.freeze_dataset(input_dir, health_report, "symlinked")
+
+    assert not (outside / "a.txt").exists()
+
+
+def test_freeze_rejects_broken_reports_root_symlink(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "lists" / "_raw"
+    input_dir.mkdir(parents=True)
+    raw_file = input_dir / "a.txt"
+    raw_file.write_text("||a.example^\n", encoding="utf-8")
+    health_report = _source_health_report(tmp_path / "source-health.json", [raw_file])
+    outside = tmp_path / "outside-missing"
+    try:
+        (tmp_path / "reports").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable in this environment: {exc}")
+
+    with pytest.raises(ValueError, match="symlink"):
+        benchmark_pipeline.freeze_dataset(input_dir, health_report, "broken-root")
+
+    assert not outside.exists()
+
+
 def test_run_frozen_validates_manifest_calls_pipeline_and_writes_report(
     tmp_path: Path,
     monkeypatch,
@@ -367,6 +414,38 @@ def test_run_frozen_validates_manifest_calls_pipeline_and_writes_report(
     assert data["summary"]["p95_seconds"] >= 0
     serialized = json.dumps(data, sort_keys=True)
     assert str(tmp_path) not in serialized
+
+
+def test_run_frozen_rejects_symlinked_iteration_directory_before_pipeline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    manifest_path = _valid_manifest(tmp_path)
+    report_path = tmp_path / "reports" / "benchmarks" / "runs" / "tiny-run" / "benchmark.json"
+    report_path.parent.mkdir(parents=True)
+    outside = tmp_path / "outside-iteration"
+    outside.mkdir()
+    try:
+        (report_path.parent / "iteration-0001").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable in this environment: {exc}")
+
+    def fail_process_files_with_profile(input_dir, output_file, **kwargs):
+        pytest.fail("pipeline should not run when iteration directory is symlinked")
+
+    monkeypatch.setattr(
+        benchmark_pipeline,
+        "process_files_with_profile",
+        fail_process_files_with_profile,
+    )
+
+    with pytest.raises(ValueError, match="symlink"):
+        benchmark_pipeline.run_frozen_benchmark(
+            manifest_path=manifest_path,
+            iterations=1,
+            report_path=report_path,
+        )
 
 
 def test_run_frozen_rejects_mutable_raw_inputs_without_manifest(
@@ -500,6 +579,39 @@ def test_run_synthetic_writes_deterministic_manifest_and_report_under_benchmark_
         "generator": "fixed arithmetic",
         "rules_per_file": 3,
     }
+
+
+def test_run_synthetic_rejects_symlinked_raw_directory_before_unlinking(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    dataset_dir = tmp_path / "reports" / "benchmarks" / "frozen" / "synthetic-link"
+    dataset_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-raw"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("do not remove\n", encoding="utf-8")
+    try:
+        (dataset_dir / "raw").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable in this environment: {exc}")
+
+    with pytest.raises(ValueError, match="symlink"):
+        benchmark_pipeline.run_synthetic_benchmark(
+            dataset_id="synthetic-link",
+            file_count=1,
+            rules_per_file=1,
+            iterations=1,
+            report_path=tmp_path
+            / "reports"
+            / "benchmarks"
+            / "runs"
+            / "synthetic-link"
+            / "benchmark.json",
+        )
+
+    assert sentinel.exists()
 
 
 def test_benchmark_pipeline_static_scope_excludes_network_and_pyperf() -> None:

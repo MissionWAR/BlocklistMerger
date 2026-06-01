@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Final, NamedTuple, TypedDict
@@ -88,8 +89,24 @@ def _rooted(path: Path) -> Path:
     return path if path.is_absolute() else Path.cwd() / path
 
 
+def _reject_root_symlink_segments(path: Path, label: str) -> None:
+    """Reject existing symlink components below the workspace root."""
+    candidate = _rooted(path)
+    try:
+        relative = candidate.relative_to(Path.cwd().resolve(strict=False))
+    except ValueError:
+        return
+
+    probe = Path.cwd().resolve(strict=False)
+    for part in relative.parts:
+        probe = probe / part
+        if probe.is_symlink():
+            raise ValueError(f"{label} must not contain symlink path segments")
+
+
 def _resolved_root(path: Path) -> Path:
     """Return the resolved absolute path for a configured benchmark root."""
+    _reject_root_symlink_segments(path, "benchmark root")
     return _rooted(path).resolve(strict=False)
 
 
@@ -113,6 +130,63 @@ def _relative_to_root_existing_or_parent(path: Path, root: Path, label: str) -> 
         msg = f"{label} must be under {root.as_posix()}"
         raise ValueError(msg) from exc
     return candidate
+
+
+def _reject_artifact_symlink_segments(path: Path, root: Path, label: str) -> None:
+    """Reject existing symlink components in an artifact path below root."""
+    candidate = _rooted(path)
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        msg = f"{label} must be under {root.as_posix()}"
+        raise ValueError(msg) from exc
+
+    probe = root
+    for part in relative.parts:
+        probe = probe / part
+        if probe.is_symlink():
+            raise ValueError(f"{label} must not contain symlink path segments")
+
+
+def _safe_artifact_dir(path: Path, root: Path, label: str) -> Path:
+    """Create and return a non-symlink artifact directory below root."""
+    candidate = _rooted(path)
+    try:
+        candidate.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        msg = f"{label} must be under {root.as_posix()}"
+        raise ValueError(msg) from exc
+
+    _reject_artifact_symlink_segments(candidate, root, label)
+    candidate.mkdir(parents=True, exist_ok=True)
+    _reject_artifact_symlink_segments(candidate, root, label)
+
+    resolved = candidate.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        msg = f"{label} must stay under {root.as_posix()}"
+        raise ValueError(msg) from exc
+    if not resolved.is_dir():
+        raise ValueError(f"{label} must be a directory")
+    return resolved
+
+
+def _safe_artifact_file(path: Path, root: Path, label: str) -> Path:
+    """Return a non-symlink artifact file path below root, creating its parent."""
+    candidate = _rooted(path)
+    parent = _safe_artifact_dir(candidate.parent, root, f"{label} parent")
+    target = parent / candidate.name
+
+    _reject_artifact_symlink_segments(target, root, label)
+    if target.exists() and not target.is_file():
+        raise ValueError(f"{label} must be a file")
+    try:
+        target.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        msg = f"{label} must stay under {root.as_posix()}"
+        raise ValueError(msg) from exc
+    return target
 
 
 def _manifest_path(path: str | Path) -> Path:
@@ -183,12 +257,27 @@ def _sha256(path: Path) -> str:
 
 def _atomic_write_json(path: Path, data: dict[str, object]) -> None:
     """Write JSON atomically with deterministic formatting."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_suffix(".tmp")
-    with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(data, f, indent=2, sort_keys=True)
-        f.write("\n")
-    temp_path.replace(path)
+    root = _resolved_root(BENCHMARK_ROOT)
+    target = _safe_artifact_file(path, root, "JSON artifact")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as f:
+            temp_path = Path(f.name)
+            json.dump(data, f, indent=2, sort_keys=True)
+            f.write("\n")
+        _safe_artifact_file(temp_path, root, "temporary JSON artifact").replace(target)
+    except Exception:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
 def _utc_timestamp() -> str:
@@ -400,13 +489,23 @@ def _manifest_document(
 
 def _copy_raw_file(source: Path, destination: Path) -> None:
     """Copy one raw file through a sibling temp path."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = destination.with_suffix(".tmp")
+    target = _safe_artifact_file(destination, _resolved_root(FROZEN_ROOT), "frozen raw file")
+    temp_path: Path | None = None
     try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temp_path = Path(stream.name)
         shutil.copyfile(source, temp_path)
-        temp_path.replace(destination)
+        _safe_artifact_file(temp_path, _resolved_root(FROZEN_ROOT), "temporary frozen raw file")
+        temp_path.replace(target)
     except Exception:
-        temp_path.unlink(missing_ok=True)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
         raise
 
 
@@ -464,9 +563,12 @@ def freeze_dataset(
 
     health_path = Path(source_health_report).resolve(strict=True)
     health_sources = _load_source_health_sources(health_path)
-    dataset_path = _dataset_dir(dataset_id)
-    raw_dir = dataset_path / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    dataset_path = _safe_artifact_dir(
+        _dataset_dir(dataset_id),
+        _resolved_root(FROZEN_ROOT),
+        "frozen dataset directory",
+    )
+    raw_dir = _safe_artifact_dir(dataset_path / "raw", dataset_path, "frozen raw directory")
 
     manifest_sources: list[ManifestSource] = []
     for raw_file in raw_files:
@@ -545,13 +647,35 @@ def _run_pipeline_iterations(
     observed: list[BenchmarkIteration] = []
     for index in range(1, iterations + 1):
         validate_manifest(validation.manifest_path)
-        iteration_dir = report_path.parent / f"iteration-{index:04d}"
-        iteration_dir.mkdir(parents=True, exist_ok=True)
-        output_file = iteration_dir / "merged.txt"
+        run_dir = _safe_artifact_dir(
+            report_path.parent,
+            _resolved_root(RUNS_ROOT),
+            "benchmark run directory",
+        )
+        iteration_dir = _safe_artifact_dir(
+            run_dir / f"iteration-{index:04d}",
+            run_dir,
+            "benchmark iteration directory",
+        )
+        output_file = _safe_artifact_file(
+            iteration_dir / "merged.txt",
+            _resolved_root(RUNS_ROOT),
+            "benchmark iteration output",
+        )
+        _safe_artifact_file(
+            output_file.with_suffix(".tmp"),
+            _resolved_root(RUNS_ROOT),
+            "benchmark iteration temp output",
+        )
 
         start = time.perf_counter()
         result = process_files_with_profile(validation.raw_dir, output_file)
         elapsed = time.perf_counter() - start
+        output_file = _safe_artifact_file(
+            output_file,
+            _resolved_root(RUNS_ROOT),
+            "benchmark iteration output",
+        )
 
         observed.append(
             {
@@ -651,10 +775,14 @@ def write_synthetic_raw_inputs(
         raise ValueError("rules_per_file must be at least 1")
 
     output_dir = Path(raw_dir)
+    if output_dir.exists() and output_dir.is_symlink():
+        raise ValueError("raw_dir must not be a symlink")
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for file_index in range(file_count):
         path = output_dir / f"synthetic-{file_index:03d}.txt"
+        if path.exists() and path.is_symlink():
+            raise ValueError("synthetic raw file must not be a symlink")
         lines = [synthetic_rule(file_index, rule_index) for rule_index in range(rules_per_file)]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         paths.append(path)
@@ -688,9 +816,12 @@ def run_synthetic_benchmark(
     if iterations < 1:
         raise ValueError("iterations must be at least 1")
     report = _run_report_path(report_path)
-    dataset_path = _dataset_dir(dataset_id)
-    raw_dir = dataset_path / "raw"
-    raw_dir.mkdir(parents=True, exist_ok=True)
+    dataset_path = _safe_artifact_dir(
+        _dataset_dir(dataset_id),
+        _resolved_root(FROZEN_ROOT),
+        "synthetic dataset directory",
+    )
+    raw_dir = _safe_artifact_dir(dataset_path / "raw", dataset_path, "synthetic raw directory")
     for old_raw in raw_dir.glob("*.txt"):
         old_raw.unlink()
 

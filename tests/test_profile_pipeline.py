@@ -208,6 +208,90 @@ def test_profile_cli_uses_pipeline_writer_for_stats_json(
     }
 
 
+def test_profile_cli_rejects_symlinked_output_leaf_before_pipeline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_dir = _write_tiny_input(tmp_path)
+    run_dir = tmp_path / "reports" / "profiles" / "leaf-link"
+    run_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-merged.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    try:
+        (run_dir / "merged.txt").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable in this environment: {exc}")
+
+    def fail_process_files_with_profile(input_dir_arg, output_file_arg):
+        pytest.fail("pipeline should not run when a profile output leaf is symlinked")
+
+    monkeypatch.setattr(
+        profile_pipeline,
+        "process_files_with_profile",
+        fail_process_files_with_profile,
+    )
+
+    assert _run_cli(monkeypatch, [str(input_dir), "--run-id", "leaf-link"]) != 0
+
+    captured = capsys.readouterr()
+    assert "symlink" in captured.err
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_profile_cli_rejects_broken_reports_root_symlink(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_dir = _write_tiny_input(tmp_path)
+    outside = tmp_path / "outside-missing"
+    try:
+        (tmp_path / "reports").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable in this environment: {exc}")
+
+    assert _run_cli(monkeypatch, [str(input_dir), "--run-id", "broken-root"]) != 0
+
+    captured = capsys.readouterr()
+    assert "symlink" in captured.err
+    assert not outside.exists()
+
+
+def test_profile_cli_rejects_symlinked_stats_temp_before_pipeline_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    input_dir = _write_tiny_input(tmp_path)
+    run_dir = tmp_path / "reports" / "profiles" / "temp-link"
+    run_dir.mkdir(parents=True)
+    outside = tmp_path / "outside-stats.json"
+    outside.write_text("{}\n", encoding="utf-8")
+    try:
+        (run_dir / "pipeline-stats.tmp").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable in this environment: {exc}")
+
+    def fail_process_files_with_profile(input_dir_arg, output_file_arg):
+        pytest.fail("pipeline should not run when profile stats temp output is symlinked")
+
+    monkeypatch.setattr(
+        profile_pipeline,
+        "process_files_with_profile",
+        fail_process_files_with_profile,
+    )
+
+    assert _run_cli(monkeypatch, [str(input_dir), "--run-id", "temp-link"]) != 0
+
+    captured = capsys.readouterr()
+    assert "symlink" in captured.err
+    assert outside.read_text(encoding="utf-8") == "{}\n"
+
+
 def test_profiling_docs_capture_artifacts_boundaries_and_checkpoint() -> None:
     text = PROFILING_DOC.read_text(encoding="utf-8")
 

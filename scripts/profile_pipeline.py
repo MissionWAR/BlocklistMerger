@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Final
@@ -25,8 +26,24 @@ def _rooted(path: Path) -> Path:
     return path if path.is_absolute() else Path.cwd() / path
 
 
+def _reject_root_symlink_segments(path: Path, label: str) -> None:
+    """Reject existing symlink components below the workspace root."""
+    candidate = _rooted(path)
+    try:
+        relative = candidate.relative_to(Path.cwd().resolve(strict=False))
+    except ValueError:
+        return
+
+    probe = Path.cwd().resolve(strict=False)
+    for part in relative.parts:
+        probe = probe / part
+        if probe.is_symlink():
+            raise ValueError(f"{label} must not contain symlink path segments")
+
+
 def _profile_root() -> Path:
     """Return the resolved profile report root."""
+    _reject_root_symlink_segments(PROFILE_ROOT, "profile root")
     return _rooted(PROFILE_ROOT).resolve(strict=False)
 
 
@@ -47,7 +64,11 @@ def _resolve_report_root(report_dir: str | None) -> Path:
     if report_dir is None:
         return root
 
-    candidate = _rooted(Path(report_dir)).resolve(strict=False)
+    requested = _rooted(Path(report_dir))
+    if requested.exists() and requested.is_symlink():
+        raise ValueError("report-dir must not be a symlink")
+
+    candidate = requested.resolve(strict=False)
     try:
         candidate.relative_to(root)
     except ValueError as exc:
@@ -62,13 +83,75 @@ def _resolve_run_dir(run_id: str, report_dir: str | None) -> Path:
     """Return the validated profile run directory."""
     safe_run_id = _validate_run_id(run_id)
     report_root = _resolve_report_root(report_dir)
-    run_dir = (report_root / safe_run_id).resolve(strict=False)
+    run_dir = report_root / safe_run_id
+    if run_dir.exists() and run_dir.is_symlink():
+        raise ValueError("profile run directory must not be a symlink")
     try:
-        run_dir.relative_to(_profile_root())
+        run_dir.resolve(strict=False).relative_to(_profile_root())
     except ValueError as exc:
         msg = f"profile run directory must stay under {PROFILE_ROOT.as_posix()}"
         raise ValueError(msg) from exc
     return run_dir
+
+
+def _reject_profile_symlink_segments(path: Path, label: str) -> None:
+    """Reject existing symlink components in a profile artifact path."""
+    root = _profile_root()
+    candidate = _rooted(path)
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError as exc:
+        msg = f"{label} must be under {PROFILE_ROOT.as_posix()}"
+        raise ValueError(msg) from exc
+
+    probe = root
+    for part in relative.parts:
+        probe = probe / part
+        if probe.is_symlink():
+            raise ValueError(f"{label} must not contain symlink path segments")
+
+
+def _safe_profile_dir(path: Path, label: str) -> Path:
+    """Create and return a non-symlink profile artifact directory."""
+    root = _profile_root()
+    candidate = _rooted(path)
+    try:
+        candidate.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        msg = f"{label} must stay under {PROFILE_ROOT.as_posix()}"
+        raise ValueError(msg) from exc
+
+    _reject_profile_symlink_segments(candidate, label)
+    candidate.mkdir(parents=True, exist_ok=True)
+    _reject_profile_symlink_segments(candidate, label)
+
+    resolved = candidate.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        msg = f"{label} must stay under {PROFILE_ROOT.as_posix()}"
+        raise ValueError(msg) from exc
+    if not resolved.is_dir():
+        raise ValueError(f"{label} must be a directory")
+    return resolved
+
+
+def _safe_profile_artifact(path: Path, label: str) -> Path:
+    """Return a non-symlink profile artifact path, creating its parent."""
+    root = _profile_root()
+    candidate = _rooted(path)
+    parent = _safe_profile_dir(candidate.parent, f"{label} parent")
+    target = parent / candidate.name
+
+    _reject_profile_symlink_segments(target, label)
+    if target.exists() and not target.is_file():
+        raise ValueError(f"{label} must be a file")
+    try:
+        target.resolve(strict=False).relative_to(root)
+    except ValueError as exc:
+        msg = f"{label} must stay under {PROFILE_ROOT.as_posix()}"
+        raise ValueError(msg) from exc
+    return target
 
 
 def _positive_int(value: str) -> int:
@@ -157,6 +240,20 @@ def _run_py_spy(
     output_path = run_dir / output_name
     pipeline_output = run_dir / f"py-spy-{format_name}-merged.txt"
     stats_path = run_dir / f"py-spy-{format_name}-pipeline-stats.json"
+    output_path = _safe_profile_artifact(output_path, f"py-spy {format_name} artifact")
+    pipeline_output = _safe_profile_artifact(
+        pipeline_output,
+        f"py-spy {format_name} merged output",
+    )
+    _safe_profile_artifact(
+        pipeline_output.with_suffix(".tmp"),
+        f"py-spy {format_name} merged temp output",
+    )
+    stats_path = _safe_profile_artifact(stats_path, f"py-spy {format_name} stats")
+    _safe_profile_artifact(
+        stats_path.with_suffix(".tmp"),
+        f"py-spy {format_name} stats temp output",
+    )
     command = [
         py_spy,
         "record",
@@ -180,16 +277,30 @@ def _run_pyperf(input_dir: Path, run_dir: Path) -> None:
             raise _missing_optional_tool("pyperf", "pyperf JSON artifact", "--pyperf-json")
         pyperf_command = [pyperf_path]
 
+    pyperf_output = _safe_profile_artifact(run_dir / "pipeline.pyperf.json", "pyperf JSON")
+    pipeline_output = _safe_profile_artifact(run_dir / "pyperf-merged.txt", "pyperf merged output")
+    _safe_profile_artifact(
+        pipeline_output.with_suffix(".tmp"),
+        "pyperf merged temp output",
+    )
+    stats_path = _safe_profile_artifact(
+        run_dir / "pyperf-pipeline-stats.json",
+        "pyperf pipeline stats",
+    )
+    _safe_profile_artifact(
+        stats_path.with_suffix(".tmp"),
+        "pyperf pipeline stats temp output",
+    )
     command = [
         *pyperf_command,
         "command",
         "-o",
-        str(run_dir / "pipeline.pyperf.json"),
+        str(pyperf_output),
         "--",
         *_pipeline_command(
             input_dir,
-            run_dir / "pyperf-merged.txt",
-            run_dir / "pyperf-pipeline-stats.json",
+            pipeline_output,
+            stats_path,
         ),
     ]
     _run_checked(command, "pyperf JSON")
@@ -197,11 +308,26 @@ def _run_pyperf(input_dir: Path, run_dir: Path) -> None:
 
 def _write_json_atomic(path: Path, data: dict[str, object]) -> None:
     """Write JSON through an atomic sibling temp file."""
-    temp_path = path.with_suffix(".tmp")
-    with open(temp_path, "w", encoding="utf-8", newline="\n") as stream:
-        json.dump(data, stream, indent=2, sort_keys=True)
-        stream.write("\n")
-    temp_path.replace(path)
+    target = _safe_profile_artifact(path, "JSON artifact")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temp_path = Path(stream.name)
+            json.dump(data, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        _safe_profile_artifact(temp_path, "temporary JSON artifact").replace(target)
+    except Exception:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
 def _write_dns_diagnostics(input_dir: Path, run_dir: Path, merged_path: Path) -> None:
@@ -236,11 +362,26 @@ def _write_pstats_summary(
     limit: int,
 ) -> None:
     """Write one capped pstats text summary from a cProfile data file."""
-    temp_path = output_path.with_suffix(".tmp")
-    with open(temp_path, "w", encoding="utf-8", newline="\n") as stream:
-        stats = pstats.Stats(str(profile_path), stream=stream)
-        stats.strip_dirs().sort_stats(sort_by).print_stats(limit)
-    temp_path.replace(output_path)
+    target = _safe_profile_artifact(output_path, "pstats summary")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="\n",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temp_path = Path(stream.name)
+            stats = pstats.Stats(str(profile_path), stream=stream)
+            stats.strip_dirs().sort_stats(sort_by).print_stats(limit)
+        _safe_profile_artifact(temp_path, "temporary pstats summary").replace(target)
+    except Exception:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -300,19 +441,35 @@ def main() -> int:
 
         run_dir = _resolve_run_dir(args.run_id, args.report_dir)
         _validate_optional_tools(args)
-        run_dir.mkdir(parents=True, exist_ok=True)
+        run_dir = _safe_profile_dir(run_dir, "profile run directory")
 
-        profile_path = run_dir / "pipeline.cprofile"
-        cumulative_path = run_dir / "pstats-cumulative.txt"
-        total_time_path = run_dir / "pstats-total-time.txt"
-        stats_path = run_dir / "pipeline-stats.json"
-        merged_path = run_dir / "merged.txt"
+        profile_path = _safe_profile_artifact(run_dir / "pipeline.cprofile", "cProfile artifact")
+        cumulative_path = _safe_profile_artifact(
+            run_dir / "pstats-cumulative.txt",
+            "cumulative pstats artifact",
+        )
+        total_time_path = _safe_profile_artifact(
+            run_dir / "pstats-total-time.txt",
+            "total-time pstats artifact",
+        )
+        stats_path = _safe_profile_artifact(run_dir / "pipeline-stats.json", "pipeline stats")
+        _safe_profile_artifact(
+            stats_path.with_suffix(".tmp"),
+            "pipeline stats temp output",
+        )
+        merged_path = _safe_profile_artifact(run_dir / "merged.txt", "merged output")
+        _safe_profile_artifact(
+            merged_path.with_suffix(".tmp"),
+            "merged temp output",
+        )
 
         profiler = cProfile.Profile()
         start = time.perf_counter()
         result = profiler.runcall(process_files_with_profile, input_dir, merged_path)
         elapsed = time.perf_counter() - start
+        merged_path = _safe_profile_artifact(merged_path, "merged output")
         profiler.dump_stats(profile_path)
+        profile_path = _safe_profile_artifact(profile_path, "cProfile artifact")
 
         _write_pstats_summary(
             profile_path,
