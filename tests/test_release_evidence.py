@@ -258,7 +258,11 @@ def test_hosts_and_plain_domain_records_are_exact_host_only() -> None:
     assert plain_record.scope == SCOPE_EXACT_HOST
     assert record_covers_canary_scope(hosts_records[0], "example.com", SCOPE_EXACT_HOST)
     assert not record_covers_canary_scope(hosts_records[0], "sub.example.com", SCOPE_SUBDOMAIN)
-    assert not record_covers_canary_scope(plain_record, "child.tracker.example.com", SCOPE_UNSCOPED_GLOBAL)
+    assert not record_covers_canary_scope(
+        plain_record,
+        "child.tracker.example.com",
+        SCOPE_UNSCOPED_GLOBAL,
+    )
 
 
 def test_exception_records_are_allow_evidence_and_never_global() -> None:
