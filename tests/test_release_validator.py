@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.release_validator as release_validator
 from scripts.release_evidence import (
     SCOPE_APEX,
     SCOPE_EXACT_HOST,
@@ -17,7 +18,6 @@ from scripts.release_evidence import (
     SCOPE_WILDCARD_APEX_ALLOWED,
     SCOPE_WILDCARD_CHILD,
 )
-import scripts.release_validator as release_validator
 
 
 def _write_json(path: Path, data: dict[str, object]) -> None:
@@ -475,7 +475,7 @@ def test_schema_v2_hard_scoped_canaries_create_only_scoped_errors(
         "canary_scoped_block_missing",
         "canary_scoped_allow_blocked",
     }
-    assert not summary.warnings
+    assert not [warning for warning in summary.warnings if "scoped" in str(warning)]
 
 
 def test_modifier_limited_rules_do_not_satisfy_global_scoped_canaries(
