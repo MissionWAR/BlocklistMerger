@@ -10,6 +10,13 @@ from pathlib import Path
 
 import pytest
 
+from scripts.release_evidence import (
+    SCOPE_APEX,
+    SCOPE_EXACT_HOST,
+    SCOPE_UNSCOPED_GLOBAL,
+    SCOPE_WILDCARD_APEX_ALLOWED,
+    SCOPE_WILDCARD_CHILD,
+)
 import scripts.release_validator as release_validator
 
 
@@ -220,12 +227,18 @@ def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
 def _canaries(
     must_block: list[str] | None = None,
     must_allow: list[str] | None = None,
+    *,
+    schema_version: int = 1,
+    scoped_canaries: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    return {
-        "schema_version": 1,
-        "must_block": must_block or ["ads.example.com"],
-        "must_allow": must_allow or ["github.com"],
+    canaries: dict[str, object] = {
+        "schema_version": schema_version,
+        "must_block": must_block if must_block is not None else ["ads.example.com"],
+        "must_allow": must_allow if must_allow is not None else ["github.com"],
     }
+    if scoped_canaries is not None:
+        canaries["scoped_canaries"] = scoped_canaries
+    return canaries
 
 
 def _write_release_inputs(
@@ -359,6 +372,7 @@ def test_canaries_match_wildcard_dns_scope(tmp_path: Path) -> None:
 
     assert not summary.errors
     assert summary.canaries == {
+        "schema_version": 1,
         "must_block": [
             {"domain": "sub.example.com", "blocked": True},
             {"domain": "spam.autos", "blocked": True},
@@ -368,6 +382,216 @@ def test_canaries_match_wildcard_dns_scope(tmp_path: Path) -> None:
             {"domain": "autos", "blocked": False},
         ],
     }
+
+
+def test_schema_v2_simple_canaries_keep_hard_gate_semantics(tmp_path: Path) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^", "||github.com^"],
+        canaries=_canaries(
+            schema_version=2,
+            must_block=["missing.example.com"],
+            must_allow=["github.com"],
+        ),
+        pipeline_stats=_pipeline_stats(2),
+    )
+
+    assert _codes(summary.errors) >= {
+        "canary_must_block_missing",
+        "canary_must_allow_blocked",
+    }
+    assert summary.canaries["schema_version"] == 2
+    assert summary.canaries["must_block"] == [
+        {"domain": "missing.example.com", "blocked": False}
+    ]
+    assert summary.canaries["must_allow"] == [{"domain": "github.com", "blocked": True}]
+
+
+def test_schema_v2_scoped_canaries_default_to_diagnostic_evidence(
+    tmp_path: Path,
+) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||other.example.com^"],
+        canaries={
+            "schema_version": 2,
+            "scoped_canaries": [
+                {
+                    "name": "missing scoped block",
+                    "domain": "ads.example.com",
+                    "expect": "blocked",
+                    "scope": SCOPE_UNSCOPED_GLOBAL,
+                }
+            ],
+        },
+        pipeline_stats=_pipeline_stats(1),
+    )
+
+    assert not summary.errors
+    assert summary.canaries["scoped"] == [
+        {
+            "name": "missing scoped block",
+            "domain": "ads.example.com",
+            "expect": "blocked",
+            "scope": SCOPE_UNSCOPED_GLOBAL,
+            "gate": "diagnostic",
+            "matched": False,
+            "blocked": False,
+            "status": "failed",
+        }
+    ]
+    assert summary.release_evidence["scoped_canaries"] == summary.canaries["scoped"]
+
+
+def test_schema_v2_hard_scoped_canaries_create_only_scoped_errors(
+    tmp_path: Path,
+) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||blocked.example.com^"],
+        canaries={
+            "schema_version": 2,
+            "scoped_canaries": [
+                {
+                    "name": "missing hard block",
+                    "domain": "missing.example.com",
+                    "expect": "blocked",
+                    "scope": SCOPE_UNSCOPED_GLOBAL,
+                    "gate": "hard",
+                },
+                {
+                    "name": "hard allow blocked",
+                    "domain": "blocked.example.com",
+                    "expect": "allowed",
+                    "scope": SCOPE_UNSCOPED_GLOBAL,
+                    "gate": "hard",
+                },
+            ],
+        },
+        pipeline_stats=_pipeline_stats(1),
+    )
+
+    assert _codes(summary.errors) == {
+        "canary_scoped_block_missing",
+        "canary_scoped_allow_blocked",
+    }
+    assert not summary.warnings
+
+
+def test_modifier_limited_rules_do_not_satisfy_global_scoped_canaries(
+    tmp_path: Path,
+) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^$client=10.0.0.1"],
+        canaries={
+            "schema_version": 2,
+            "scoped_canaries": [
+                {
+                    "domain": "ads.example.com",
+                    "expect": "blocked",
+                    "scope": SCOPE_UNSCOPED_GLOBAL,
+                    "gate": "hard",
+                }
+            ],
+        },
+        pipeline_stats=_pipeline_stats(1),
+    )
+
+    assert _codes(summary.errors) == {"canary_scoped_block_missing"}
+    assert summary.canaries["scoped"][0]["matched"] is False
+
+
+def test_scoped_canaries_distinguish_wildcard_child_apex_and_exact_host(
+    tmp_path: Path,
+) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||*.example.com^", "0.0.0.0 exact.example.com"],
+        canaries={
+            "schema_version": 2,
+            "scoped_canaries": [
+                {
+                    "name": "wildcard child",
+                    "domain": "ads.example.com",
+                    "expect": "blocked",
+                    "scope": SCOPE_WILDCARD_CHILD,
+                    "gate": "hard",
+                },
+                {
+                    "name": "wildcard apex allowed",
+                    "domain": "example.com",
+                    "expect": "allowed",
+                    "scope": SCOPE_WILDCARD_APEX_ALLOWED,
+                    "gate": "hard",
+                },
+                {
+                    "name": "exact host",
+                    "domain": "exact.example.com",
+                    "expect": "blocked",
+                    "scope": SCOPE_EXACT_HOST,
+                    "gate": "hard",
+                },
+            ],
+        },
+        pipeline_stats=_pipeline_stats(2),
+    )
+
+    assert not summary.errors
+    assert [item["status"] for item in summary.canaries["scoped"]] == [
+        "passed",
+        "passed",
+        "passed",
+    ]
+
+
+def test_scoped_canaries_treat_exceptions_as_allow_evidence() -> None:
+    records = release_validator.coverage_records_from_rules(["@@||allowed.example.com^"])
+
+    errors, details = release_validator.validate_canaries(
+        {
+            "schema_version": 2,
+            "scoped_canaries": [
+                {
+                    "domain": "allowed.example.com",
+                    "expect": "allowed",
+                    "scope": SCOPE_APEX,
+                    "gate": "hard",
+                }
+            ],
+        },
+        blocked_domains=set(),
+        wildcard_domains=set(),
+        coverage_records=records,
+    )
+
+    assert errors == []
+    assert details["scoped"][0]["status"] == "passed"
+
+
+def test_malformed_scoped_canary_fails_closed_with_field_diagnostics(
+    tmp_path: Path,
+) -> None:
+    summary = _validate(
+        tmp_path,
+        output_lines=["||ads.example.com^"],
+        canaries={
+            "schema_version": 2,
+            "scoped_canaries": [
+                {
+                    "domain": "ads.example.com",
+                    "expect": "maybe",
+                    "scope": SCOPE_UNSCOPED_GLOBAL,
+                }
+            ],
+        },
+        pipeline_stats=_pipeline_stats(1),
+    )
+
+    error = _finding_by_code(summary.errors, "canary_scoped_config_invalid")
+    assert error["details"]["field"] == "scoped_canaries[0].expect"
+    assert error["details"]["expected"] == ["allowed", "blocked"]
+    assert error["details"]["canaries_path"].endswith("release_canaries.json")
 
 
 @pytest.mark.parametrize(
