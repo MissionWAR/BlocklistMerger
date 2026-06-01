@@ -488,7 +488,7 @@ def _validate_scoped_canary_record(
     index: int,
     canaries_path: Path | None = None,
 ) -> tuple[dict[str, object] | None, list[Finding]]:
-    """Validate and normalize one schema v2 scoped canary record."""
+    """Validate and canonicalize one schema v2 scoped canary record."""
     field_prefix = f"scoped_canaries[{index}]"
     if not isinstance(record, dict):
         return None, [
@@ -601,7 +601,7 @@ def _validate_scoped_canaries(
     canaries: dict[str, object],
     canaries_path: Path | None = None,
 ) -> tuple[list[dict[str, object]], list[Finding]]:
-    """Validate and normalize all schema v2 scoped canaries."""
+    """Validate and canonicalize all schema v2 scoped canaries."""
     scoped_canaries = canaries.get("scoped_canaries", [])
     if not scoped_canaries:
         return [], []
