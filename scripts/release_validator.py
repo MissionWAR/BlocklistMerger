@@ -27,6 +27,7 @@ from scripts.compiler import (
 )
 from scripts.release_evidence import (
     COVERAGE_EFFECT_BLOCK,
+    DEFAULT_SAMPLE_CAP,
     RELEASE_EVIDENCE_SCHEMA_VERSION,
     SCOPE_APEX,
     SCOPE_APEX_AND_SUBDOMAINS,
@@ -38,7 +39,7 @@ from scripts.release_evidence import (
     CoverageRecord,
     compact_source_health_context,
     compare_membership,
-    coverage_records_from_rules,
+    coverage_records_for_rule,
     fingerprint_membership,
     membership_churn_to_dict,
     record_covers_canary_scope,
@@ -197,6 +198,7 @@ class OutputScan:
     wildcard_domains: set[str]
     rules: tuple[str, ...]
     coverage_records: tuple[CoverageRecord, ...]
+    coverage_sample_records: tuple[CoverageRecord, ...]
     syntax: dict[str, object]
 
 
@@ -726,12 +728,24 @@ def _add_blocked_domain(
             blocked_domains.add(domain)
 
 
-def scan_output(output_path: Path) -> OutputScan:
+def scan_output(
+    output_path: Path,
+    *,
+    collect_coverage_records: bool = False,
+    collect_coverage_sample: bool = False,
+    coverage_sample_cap: int = DEFAULT_SAMPLE_CAP,
+) -> OutputScan:
     """Scan emitted output for syntax errors and canary coverage indexes."""
+    if coverage_sample_cap < 1:
+        msg = "coverage_sample_cap must be >= 1"
+        raise ValueError(msg)
+
     errors: list[Finding] = []
     blocked_domains: set[str] = set()
     wildcard_domains: set[str] = set()
     rules: list[str] = []
+    coverage_records: list[CoverageRecord] = []
+    coverage_sample_records: list[CoverageRecord] = []
     line_count = 0
     invalid_count = 0
     url_path_count = 0
@@ -746,6 +760,20 @@ def scan_output(output_path: Path) -> OutputScan:
 
             line_count += 1
             rules.append(line)
+            should_sample_coverage = (
+                collect_coverage_sample
+                and not collect_coverage_records
+                and len(coverage_sample_records) < coverage_sample_cap
+            )
+            rule_coverage_records: tuple[CoverageRecord, ...] = ()
+            if collect_coverage_records or should_sample_coverage:
+                rule_coverage_records = coverage_records_for_rule(line)
+            if collect_coverage_records:
+                coverage_records.extend(rule_coverage_records)
+            elif should_sample_coverage:
+                remaining = coverage_sample_cap - len(coverage_sample_records)
+                coverage_sample_records.extend(rule_coverage_records[:remaining])
+
             syntax = classify_rule_syntax(line)
             if syntax.is_exception:
                 exception_count += 1
@@ -799,7 +827,10 @@ def scan_output(output_path: Path) -> OutputScan:
         blocked_domains=blocked_domains,
         wildcard_domains=wildcard_domains,
         rules=tuple(rules),
-        coverage_records=coverage_records_from_rules(rules),
+        coverage_records=_sorted_coverage_records(coverage_records),
+        coverage_sample_records=_sorted_coverage_records(
+            coverage_records if collect_coverage_records else coverage_sample_records
+        )[:coverage_sample_cap],
         syntax=syntax_details,
     )
 
@@ -822,6 +853,20 @@ def _domain_is_blocked(
         canonical_domain.endswith(f".{wildcard_domain}")
         for wildcard_domain in wildcard_domains
     )
+
+
+def _canary_config_needs_scoped_coverage(canaries: dict[str, object]) -> bool:
+    """Return True when canaries require full scope-aware output coverage."""
+    return (
+        canaries.get("schema_version") == CANARY_SCHEMA_V2
+        and isinstance(canaries.get("scoped_canaries"), list)
+        and bool(canaries.get("scoped_canaries"))
+    )
+
+
+def _sorted_coverage_records(records: list[CoverageRecord]) -> tuple[CoverageRecord, ...]:
+    """Return coverage records in deterministic report/evaluation order."""
+    return tuple(sorted(records, key=lambda record: (record.domain, record.raw_rule, record.scope)))
 
 
 def _record_blocks_scoped_domain(
@@ -1277,7 +1322,11 @@ def validate_release(
     errors.extend(source_errors)
     warnings.extend(source_warnings)
 
-    output_scan = scan_output(output_path)
+    output_scan = scan_output(
+        output_path,
+        collect_coverage_records=_canary_config_needs_scoped_coverage(canaries),
+        collect_coverage_sample=evidence_json_path is not None,
+    )
     errors.extend(output_scan.errors)
 
     current_count = output_scan.line_count
@@ -1340,7 +1389,7 @@ def validate_release(
         previous_rules=previous_rules,
         source_health=source_health,
         scoped_canaries=canary_details.get("scoped", []),
-        coverage_records=output_scan.coverage_records,
+        coverage_records=output_scan.coverage_sample_records,
         evidence_json_path=evidence_json_path,
     )
 

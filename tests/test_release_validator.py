@@ -12,12 +12,14 @@ import pytest
 
 import scripts.release_validator as release_validator
 from scripts.release_evidence import (
+    DEFAULT_SAMPLE_CAP,
     RELEASE_EVIDENCE_SCHEMA_VERSION,
     SCOPE_APEX,
     SCOPE_EXACT_HOST,
     SCOPE_UNSCOPED_GLOBAL,
     SCOPE_WILDCARD_APEX_ALLOWED,
     SCOPE_WILDCARD_CHILD,
+    coverage_records_from_rules,
     fingerprint_membership,
 )
 
@@ -549,7 +551,7 @@ def test_scoped_canaries_distinguish_wildcard_child_apex_and_exact_host(
 
 
 def test_scoped_canaries_treat_exceptions_as_allow_evidence() -> None:
-    records = release_validator.coverage_records_from_rules(["@@||allowed.example.com^"])
+    records = coverage_records_from_rules(["@@||allowed.example.com^"])
 
     errors, details = release_validator.validate_canaries(
         {
@@ -734,6 +736,92 @@ def test_cli_writes_optional_release_evidence_sidecar(
         "available": True,
         "path": str(paths["evidence_json"]),
     }
+
+
+def test_schema_v1_evidence_sidecar_caps_coverage_sampling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_lines = [
+        f"||ads{index}.example.com^"
+        for index in range(DEFAULT_SAMPLE_CAP + 10)
+    ]
+    paths = _write_release_inputs(
+        tmp_path,
+        output_lines=output_lines,
+        canaries=_canaries(must_block=["ads0.example.com"], must_allow=["github.com"]),
+        pipeline_stats=_pipeline_stats(len(output_lines)),
+    )
+    original = release_validator.coverage_records_for_rule
+    calls = 0
+
+    def counting_records(rule: str):
+        nonlocal calls
+        calls += 1
+        return original(rule)
+
+    monkeypatch.setattr(release_validator, "coverage_records_for_rule", counting_records)
+
+    summary = release_validator.validate_release(
+        source_health_path=paths["source_health"],
+        pipeline_stats_path=paths["pipeline_stats"],
+        output_path=paths["output"],
+        canaries_path=paths["canaries"],
+        previous_output_path=None,
+        summary_json_path=paths["summary_json"],
+        summary_md_path=paths["summary_md"],
+        evidence_json_path=paths["evidence_json"],
+        thresholds=release_validator.ReleaseThresholds(minimum_output_rules=1),
+    )
+
+    sidecar = _read_json(paths["evidence_json"])
+    assert not summary.errors
+    assert calls == DEFAULT_SAMPLE_CAP
+    assert sidecar["coverage_summary"]["total_records"] == DEFAULT_SAMPLE_CAP
+    assert sidecar["coverage_summary"]["sampled_records"] == DEFAULT_SAMPLE_CAP
+    assert len(sidecar["coverage_records"]) == DEFAULT_SAMPLE_CAP
+
+
+def test_scoped_canaries_collect_full_coverage_beyond_sidecar_sample(
+    tmp_path: Path,
+) -> None:
+    target_domain = "late.example.com"
+    output_lines = [
+        f"||noise{index}.example.com^"
+        for index in range(DEFAULT_SAMPLE_CAP + 5)
+    ]
+    output_lines.append(f"||{target_domain}^")
+
+    summary = _validate(
+        tmp_path,
+        output_lines=output_lines,
+        canaries={
+            "schema_version": 2,
+            "scoped_canaries": [
+                {
+                    "domain": target_domain,
+                    "expect": "blocked",
+                    "scope": SCOPE_UNSCOPED_GLOBAL,
+                    "gate": "hard",
+                }
+            ],
+        },
+        pipeline_stats=_pipeline_stats(len(output_lines)),
+    )
+
+    assert not summary.errors
+    assert summary.canaries["scoped"] == [
+        {
+            "name": None,
+            "domain": target_domain,
+            "expect": "blocked",
+            "scope": SCOPE_UNSCOPED_GLOBAL,
+            "gate": "hard",
+            "matched": True,
+            "blocked": True,
+            "status": "passed",
+        }
+    ]
 
 
 def test_markdown_release_evidence_stays_compact(tmp_path: Path) -> None:
