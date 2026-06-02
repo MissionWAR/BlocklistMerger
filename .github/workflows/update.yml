@@ -1,6 +1,9 @@
 name: Update Blocklist
 
 on:
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     - cron: "0 */12 * * *"
@@ -13,11 +16,12 @@ env:
 permissions: {}
 
 concurrency:
-  group: blocklist-update
+  group: blocklist-update-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build_validate:
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -230,6 +234,7 @@ jobs:
 
   publish:
     needs: build_validate
+    if: ${{ github.event_name != 'pull_request' && success() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -277,7 +282,7 @@ jobs:
 
   cache_cleanup:
     needs: build_validate
-    if: success()
+    if: ${{ github.event_name != 'pull_request' && success() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
