@@ -10,6 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "update.yml"
 HEAVY_EVIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "heavy-evidence.yml"
+RELEASE_GUARD_DOC = ROOT / "docs" / "RELEASE_GUARD_PROMOTION.md"
+README = ROOT / "README.md"
 PYPROJECT = ROOT / "pyproject.toml"
 RELEASE_CONSTRAINTS = ROOT / "constraints" / "release-py314.txt"
 RELEASE_INSTALL = 'python -m pip install -q -c constraints/release-py314.txt ".[dev]"'
@@ -42,6 +44,14 @@ def _workflow_text() -> str:
 
 def _heavy_workflow_text() -> str:
     return HEAVY_EVIDENCE_WORKFLOW.read_text(encoding="utf-8")
+
+
+def _release_guard_doc_text() -> str:
+    return RELEASE_GUARD_DOC.read_text(encoding="utf-8")
+
+
+def _readme_text() -> str:
+    return README.read_text(encoding="utf-8")
 
 
 def _pyproject_text() -> str:
@@ -318,6 +328,17 @@ def test_manual_heavy_evidence_workflow_collects_only_retained_diagnostics() -> 
         "git tag",
     ):
         assert token not in lower_text
+
+
+def test_readme_points_to_release_guard_promotion_documentation() -> None:
+    """Fork-facing docs should point maintainers to release evidence boundaries."""
+    readme = _readme_text()
+    doc = _release_guard_doc_text()
+
+    assert "[`docs/RELEASE_GUARD_PROMOTION.md`](docs/RELEASE_GUARD_PROMOTION.md)" in readme
+    assert "reports/release-evidence.json" in readme
+    assert "workflow_dispatch" in readme
+    assert "weekly heavy-evidence schedule is not active" in doc
 
 
 def test_python_compatibility_audit_matrix_is_read_only_and_separate() -> None:

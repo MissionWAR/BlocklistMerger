@@ -266,6 +266,63 @@ def test_manual_heavy_evidence_workflow_is_not_a_scheduled_publish_gate() -> Non
     assert "gh cache" not in text
 
 
+def test_release_guard_promotion_doc_preserves_inspect_only_boundaries() -> None:
+    """Promotion docs must match the deterministic-only release gate policy."""
+    text = _non_comment_text("docs/RELEASE_GUARD_PROMOTION.md")
+    update = _non_comment_text(".github/workflows/update.yml")
+    heavy = _non_comment_text(".github/workflows/heavy-evidence.yml")
+
+    assert "--evidence-json reports/release-evidence.json" in update
+    assert "release evidence sidecar" in text
+    assert "deterministic artifact safety" in text
+    assert "evidence-integrity failures" in text
+    assert "scoped hard canary failures" in text
+    assert "inspect-only" in text
+
+    for token in (
+        "membership churn",
+        "output fingerprints",
+        "runtime profiles",
+        "stage summaries",
+        "semantic diagnostics",
+        "heavy evidence",
+    ):
+        assert token in text
+
+    for phrase in (
+        "membership churn blocks scheduled publishing",
+        "output fingerprints block scheduled publishing",
+        "runtime profiles block scheduled publishing",
+        "stage summaries block scheduled publishing",
+        "semantic diagnostics block scheduled publishing",
+        "heavy evidence blocks scheduled publishing",
+    ):
+        assert phrase not in text
+
+    assert "workflow_dispatch" in text
+    assert "workflow_dispatch" in heavy
+    assert "weekly heavy-evidence schedule is not active" in text
+    assert "schedule:" not in heavy
+
+
+def test_release_guard_promotion_doc_lists_required_promotion_evidence() -> None:
+    """Docs should require explicit evidence before any diagnostic becomes a gate."""
+    text = _non_comment_text("docs/RELEASE_GUARD_PROMOTION.md")
+
+    for phrase in (
+        "deterministic fixture coverage",
+        "stable report schema",
+        "stable budgets from repeated manual runs",
+        "low-noise false-positive behavior",
+        "explicit threshold ownership",
+        "intentional source change",
+    ):
+        assert phrase in text
+
+    assert "weekly cron" not in text
+    assert "automatic promotion" not in text
+
+
 def test_dedicated_profile_wrapper_is_only_manual_profiling_surface() -> None:
     wrapper = _non_comment_text("scripts/profile_pipeline.py")
     normal_surfaces = [
