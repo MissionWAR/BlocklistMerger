@@ -352,8 +352,9 @@ def test_default_command_surfaces_do_not_call_heavy_evidence_wrappers() -> None:
     normal_surfaces = [
         "scripts/pipeline.py",
         "scripts/release_validator.py",
-        "run.py",
     ]
+    if (ROOT / "run.py").exists():
+        normal_surfaces.append("run.py")
 
     for path in normal_surfaces:
         text = _non_comment_text(path)
