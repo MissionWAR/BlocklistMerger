@@ -157,7 +157,8 @@ jobs:
             --canaries config/release_canaries.json \
             --previous-output previous/merged.txt \
             --summary-json reports/validation-summary.json \
-            --summary-md reports/validation-summary.md
+            --summary-md reports/validation-summary.md \
+            --evidence-json reports/release-evidence.json
 
       - name: Append Validation Summary
         if: always()
