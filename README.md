@@ -41,6 +41,8 @@ The AdGuard Home DNS semantics baseline is documented in
 [`docs/AGH_SEMANTICS.md`](docs/AGH_SEMANTICS.md).
 The Python-first runtime and language decision gate is documented in
 [`docs/RUNTIME_LANGUAGE_GATE.md`](docs/RUNTIME_LANGUAGE_GATE.md).
+Release evidence, inspect-only diagnostics, and guard promotion criteria are documented in
+[`docs/RELEASE_GUARD_PROMOTION.md`](docs/RELEASE_GUARD_PROMOTION.md).
 
 ---
 
@@ -84,8 +86,10 @@ https://github.com/<owner>/<repo>/releases/download/latest/merged.txt
 ```
 
 Diagnostics are written during workflow runs as `reports/source-health.json`,
-`reports/pipeline-stats.json`, and `reports/validation-summary.md`, then uploaded with the
-release-candidate artifact. The scheduled release install is pinned by
+`reports/pipeline-stats.json`, `reports/validation-summary.md`, and
+`reports/release-evidence.json`, then uploaded with the release-candidate artifact. The
+manual heavy-evidence workflow is `workflow_dispatch` only and does not publish releases.
+The scheduled release install is pinned by
 [`constraints/release-py314.txt`](constraints/release-py314.txt).
 
 | Setting | Existing surface | Notes |
