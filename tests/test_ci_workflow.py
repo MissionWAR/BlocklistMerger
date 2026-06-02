@@ -157,26 +157,31 @@ def test_workflow_uses_job_level_least_privilege_permissions() -> None:
     assert "contents: write" not in cache_cleanup
 
 
-def test_pull_requests_run_read_only_tests_without_release_side_effects() -> None:
-    """PR checks should run tests but never fetch, publish, or mutate caches/releases."""
+def test_source_change_events_run_read_only_tests_without_release_side_effects() -> None:
+    """PR/branch checks should run tests but never fetch, publish, or mutate releases."""
     text = _workflow_text()
     build_validate = _job_section(text, "build_validate")
     audit = _job_section(text, "python_compatibility_audit")
     publish = _job_section(text, "publish")
     cache_cleanup = _job_section(text, "cache_cleanup")
+    release_event_guard = (
+        "(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') "
+        "&& github.ref == 'refs/heads/main'"
+    )
 
     assert "\n  pull_request:\n    branches:\n      - main\n" in text
+    assert '\n  push:\n    branches:\n      - main\n      - "codex/**"\n' in text
     assert "blocklist-update-${{ github.event_name }}-${{ github.ref }}" in text
 
-    assert "github.event_name != 'pull_request'" in build_validate
-    assert "github.event_name != 'pull_request'" not in audit
+    assert release_event_guard in build_validate
+    assert release_event_guard not in audit
     assert "python -m ruff check ." in audit
     assert "python -m pytest" in audit
     assert "contents: write" not in audit
     assert "actions: write" not in audit
 
-    assert "github.event_name != 'pull_request' && success()" in publish
-    assert "github.event_name != 'pull_request' && success()" in cache_cleanup
+    assert f"{release_event_guard} && success()" in publish
+    assert f"{release_event_guard} && success()" in cache_cleanup
     assert "contents: write" in publish
     assert "actions: write" in cache_cleanup
 
