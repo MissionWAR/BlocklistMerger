@@ -25,6 +25,27 @@ from scripts.compiler import (
     extract_hosts_info,
     walk_parent_domains,
 )
+from scripts.release_evidence import (
+    COVERAGE_EFFECT_BLOCK,
+    DEFAULT_SAMPLE_CAP,
+    RELEASE_EVIDENCE_SCHEMA_VERSION,
+    SCOPE_APEX,
+    SCOPE_APEX_AND_SUBDOMAINS,
+    SCOPE_EXACT_HOST,
+    SCOPE_SUBDOMAIN,
+    SCOPE_UNSCOPED_GLOBAL,
+    SCOPE_WILDCARD_APEX_ALLOWED,
+    SCOPE_WILDCARD_CHILD,
+    CoverageRecord,
+    compact_source_health_context,
+    compare_membership,
+    coverage_records_for_rule,
+    fingerprint_membership,
+    membership_churn_to_dict,
+    record_covers_canary_scope,
+    render_diagnostic_sidecar,
+    write_report_json,
+)
 from scripts.rule_syntax import classify_rule_syntax
 
 # =============================================================================
@@ -34,6 +55,18 @@ from scripts.rule_syntax import classify_rule_syntax
 VALIDATION_SUMMARY_SCHEMA_VERSION: Final[int] = 1
 SOURCE_HEALTH_SCHEMA_VERSION: Final[int] = 1
 PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 4
+CANARY_SCHEMA_V1: Final[int] = 1
+CANARY_SCHEMA_V2: Final[int] = 2
+SUPPORTED_CANARY_SCHEMA_VERSIONS: Final[tuple[int, ...]] = (
+    CANARY_SCHEMA_V1,
+    CANARY_SCHEMA_V2,
+)
+SCOPED_CANARY_DEFAULT_GATE: Final[str] = "diagnostic"
+SCOPED_CANARY_HARD_GATE: Final[str] = "hard"
+SCOPED_CANARY_ALLOWED_GATES: Final[frozenset[str]] = frozenset({
+    SCOPED_CANARY_DEFAULT_GATE,
+    SCOPED_CANARY_HARD_GATE,
+})
 
 DEFAULT_MINIMUM_OUTPUT_RULES: Final[int] = 1_000_000
 DEFAULT_SOURCE_FAILED_STALE_MINIMUM: Final[int] = 3
@@ -57,6 +90,28 @@ PIPELINE_DETAIL_FINDING_CODES: Final[frozenset[str]] = frozenset({
     "pipeline_output_count_missing",
     "pipeline_output_count_invalid",
     "pipeline_output_count_mismatch",
+})
+SCOPED_CANARY_EXPECT_BLOCKED: Final[str] = "blocked"
+SCOPED_CANARY_EXPECT_ALLOWED: Final[str] = "allowed"
+SCOPED_CANARY_ALLOWED_EXPECTATIONS: Final[frozenset[str]] = frozenset({
+    SCOPED_CANARY_EXPECT_ALLOWED,
+    SCOPED_CANARY_EXPECT_BLOCKED,
+})
+SCOPED_CANARY_ALLOWED_SCOPES: Final[frozenset[str]] = frozenset({
+    SCOPE_APEX,
+    SCOPE_APEX_AND_SUBDOMAINS,
+    SCOPE_EXACT_HOST,
+    SCOPE_SUBDOMAIN,
+    SCOPE_UNSCOPED_GLOBAL,
+    SCOPE_WILDCARD_APEX_ALLOWED,
+    SCOPE_WILDCARD_CHILD,
+})
+SCOPED_CANARY_ALLOWED_FIELDS: Final[frozenset[str]] = frozenset({
+    "domain",
+    "expect",
+    "gate",
+    "name",
+    "scope",
 })
 
 Finding = dict[str, object]
@@ -99,6 +154,7 @@ class ValidationSummary:
     syntax: dict[str, object] = field(default_factory=dict)
     canaries: dict[str, object] = field(default_factory=dict)
     previous_release: dict[str, object] = field(default_factory=dict)
+    release_evidence: dict[str, object] = field(default_factory=dict)
 
     @property
     def status(self) -> str:
@@ -120,6 +176,7 @@ class ValidationSummary:
             "syntax": self.syntax,
             "canaries": self.canaries,
             "previous_release": self.previous_release,
+            "release_evidence": self.release_evidence,
         }
 
 
@@ -139,6 +196,9 @@ class OutputScan:
     errors: list[Finding]
     blocked_domains: set[str]
     wildcard_domains: set[str]
+    rules: tuple[str, ...]
+    coverage_records: tuple[CoverageRecord, ...]
+    coverage_sample_records: tuple[CoverageRecord, ...]
     syntax: dict[str, object]
 
 
@@ -231,10 +291,25 @@ def _atomic_write_json(path: Path, data: dict[str, object]) -> None:
     temp_path.replace(path)
 
 
+def _details_with_canaries_path(
+    canaries_path: Path | None,
+    **details: object,
+) -> dict[str, object]:
+    """Return finding details with an optional canary config path."""
+    if canaries_path is not None:
+        details["canaries_path"] = str(canaries_path)
+    return details
+
+
+def _read_non_empty_lines(path: Path) -> tuple[str, ...]:
+    """Read stripped, non-empty lines from a release output file."""
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        return tuple(line.strip() for line in f if line.strip())
+
+
 def _non_empty_line_count(path: Path) -> int:
     """Count non-empty lines in a rule output file."""
-    with open(path, encoding="utf-8-sig", errors="replace") as f:
-        return sum(1 for line in f if line.strip())
+    return len(_read_non_empty_lines(path))
 
 
 def _canonicalize_domain(domain: str) -> str:
@@ -278,7 +353,8 @@ def _validate_report_schema_versions(
     *,
     validate_pipeline_stats: bool = True,
 ) -> list[Finding]:
-    """Return hard errors for unsupported report schema versions."""
+    """Return hard errors for unsupported operational report schema versions."""
+    _ = canaries
     errors: list[Finding] = []
     if source_health.get("schema_version") != SOURCE_HEALTH_SCHEMA_VERSION:
         errors.append(_finding("source_health_schema_version", "Unsupported source-health schema"))
@@ -290,8 +366,6 @@ def _validate_report_schema_versions(
             "pipeline_stats_schema_version",
             "Unsupported pipeline-stats schema",
         ))
-    if canaries.get("schema_version") != 1:
-        errors.append(_finding("canary_schema_version", "Unsupported canary schema"))
     return errors
 
 
@@ -341,6 +415,225 @@ def _extract_pipeline_output_count(
         ]
 
     return value, []
+
+
+def _validate_canary_schema(
+    canaries: dict[str, object],
+    canaries_path: Path | None = None,
+) -> list[Finding]:
+    """Return hard errors for unsupported or malformed canary config schemas."""
+    schema_version = canaries.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version not in SUPPORTED_CANARY_SCHEMA_VERSIONS
+    ):
+        return [
+            _finding(
+                "canary_schema_version",
+                "Unsupported canary schema",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field="schema_version",
+                    schema_version=schema_version,
+                    expected_versions=list(SUPPORTED_CANARY_SCHEMA_VERSIONS),
+                ),
+            )
+        ]
+
+    errors: list[Finding] = []
+    if schema_version == CANARY_SCHEMA_V1:
+        for field_name in ("must_block", "must_allow"):
+            if not isinstance(canaries.get(field_name), list):
+                errors.append(_finding(
+                    "canary_config_invalid",
+                    "Canary config must define domain lists",
+                    **_details_with_canaries_path(
+                        canaries_path,
+                        field=field_name,
+                        schema_version=schema_version,
+                        expected="list",
+                    ),
+                ))
+        return errors
+
+    for field_name in ("must_block", "must_allow"):
+        if field_name in canaries and not isinstance(canaries.get(field_name), list):
+            errors.append(_finding(
+                "canary_config_invalid",
+                "Schema v2 canary domain field must be a list when present",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field=field_name,
+                    schema_version=schema_version,
+                    expected="list",
+                ),
+            ))
+
+    scoped_canaries = canaries.get("scoped_canaries", [])
+    if not isinstance(scoped_canaries, list):
+        errors.append(_finding(
+            "canary_config_invalid",
+            "Schema v2 scoped_canaries must be a list when present",
+            **_details_with_canaries_path(
+                canaries_path,
+                field="scoped_canaries",
+                schema_version=schema_version,
+                expected="list",
+            ),
+        ))
+    return errors
+
+
+def _validate_scoped_canary_record(
+    record: object,
+    index: int,
+    canaries_path: Path | None = None,
+) -> tuple[dict[str, object] | None, list[Finding]]:
+    """Validate and canonicalize one schema v2 scoped canary record."""
+    field_prefix = f"scoped_canaries[{index}]"
+    if not isinstance(record, dict):
+        return None, [
+            _finding(
+                "canary_scoped_config_invalid",
+                "Scoped canary record must be a JSON object",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field=field_prefix,
+                    expected="object",
+                ),
+            )
+        ]
+
+    unknown_fields = sorted(set(record) - SCOPED_CANARY_ALLOWED_FIELDS)
+    if unknown_fields:
+        return None, [
+            _finding(
+                "canary_scoped_config_invalid",
+                "Scoped canary record contains an unsupported field",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field=f"{field_prefix}.{unknown_fields[0]}",
+                    expected=sorted(SCOPED_CANARY_ALLOWED_FIELDS),
+                ),
+            )
+        ]
+
+    name = record.get("name")
+    if name is not None and not isinstance(name, str):
+        return None, [
+            _finding(
+                "canary_scoped_config_invalid",
+                "Scoped canary name must be a string when present",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field=f"{field_prefix}.name",
+                    expected="string",
+                ),
+            )
+        ]
+
+    domain = record.get("domain")
+    if not isinstance(domain, str) or not domain.strip():
+        return None, [
+            _finding(
+                "canary_scoped_config_invalid",
+                "Scoped canary domain must be a non-empty string",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field=f"{field_prefix}.domain",
+                    expected="non-empty string",
+                ),
+            )
+        ]
+
+    expect = record.get("expect")
+    if expect not in SCOPED_CANARY_ALLOWED_EXPECTATIONS:
+        return None, [
+            _finding(
+                "canary_scoped_config_invalid",
+                "Scoped canary expectation is unsupported",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field=f"{field_prefix}.expect",
+                    expected=sorted(SCOPED_CANARY_ALLOWED_EXPECTATIONS),
+                ),
+            )
+        ]
+
+    scope = record.get("scope")
+    if scope not in SCOPED_CANARY_ALLOWED_SCOPES:
+        return None, [
+            _finding(
+                "canary_scoped_config_invalid",
+                "Scoped canary scope is unsupported",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field=f"{field_prefix}.scope",
+                    expected=sorted(SCOPED_CANARY_ALLOWED_SCOPES),
+                ),
+            )
+        ]
+
+    gate = record.get("gate", SCOPED_CANARY_DEFAULT_GATE)
+    if gate not in SCOPED_CANARY_ALLOWED_GATES:
+        return None, [
+            _finding(
+                "canary_scoped_config_invalid",
+                "Scoped canary gate is unsupported",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field=f"{field_prefix}.gate",
+                    expected=sorted(SCOPED_CANARY_ALLOWED_GATES),
+                ),
+            )
+        ]
+
+    normalized: dict[str, object] = {
+        "name": name,
+        "domain": _canonicalize_domain(domain),
+        "expect": expect,
+        "scope": scope,
+        "gate": gate,
+    }
+    return normalized, []
+
+
+def _validate_scoped_canaries(
+    canaries: dict[str, object],
+    canaries_path: Path | None = None,
+) -> tuple[list[dict[str, object]], list[Finding]]:
+    """Validate and canonicalize all schema v2 scoped canaries."""
+    scoped_canaries = canaries.get("scoped_canaries", [])
+    if not scoped_canaries:
+        return [], []
+
+    normalized_records: list[dict[str, object]] = []
+    errors: list[Finding] = []
+    if not isinstance(scoped_canaries, list):
+        return normalized_records, [
+            _finding(
+                "canary_config_invalid",
+                "Schema v2 scoped_canaries must be a list when present",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field="scoped_canaries",
+                    expected="list",
+                ),
+            )
+        ]
+
+    for index, record in enumerate(scoped_canaries):
+        normalized, record_errors = _validate_scoped_canary_record(
+            record,
+            index,
+            canaries_path,
+        )
+        errors.extend(record_errors)
+        if normalized is not None:
+            normalized_records.append(normalized)
+
+    return normalized_records, errors
 
 
 # =============================================================================
@@ -435,11 +728,24 @@ def _add_blocked_domain(
             blocked_domains.add(domain)
 
 
-def scan_output(output_path: Path) -> OutputScan:
+def scan_output(
+    output_path: Path,
+    *,
+    collect_coverage_records: bool = False,
+    collect_coverage_sample: bool = False,
+    coverage_sample_cap: int = DEFAULT_SAMPLE_CAP,
+) -> OutputScan:
     """Scan emitted output for syntax errors and canary coverage indexes."""
+    if coverage_sample_cap < 1:
+        msg = "coverage_sample_cap must be >= 1"
+        raise ValueError(msg)
+
     errors: list[Finding] = []
     blocked_domains: set[str] = set()
     wildcard_domains: set[str] = set()
+    rules: list[str] = []
+    coverage_records: list[CoverageRecord] = []
+    coverage_sample_records: list[CoverageRecord] = []
     line_count = 0
     invalid_count = 0
     url_path_count = 0
@@ -453,6 +759,21 @@ def scan_output(output_path: Path) -> OutputScan:
                 continue
 
             line_count += 1
+            rules.append(line)
+            should_sample_coverage = (
+                collect_coverage_sample
+                and not collect_coverage_records
+                and len(coverage_sample_records) < coverage_sample_cap
+            )
+            rule_coverage_records: tuple[CoverageRecord, ...] = ()
+            if collect_coverage_records or should_sample_coverage:
+                rule_coverage_records = coverage_records_for_rule(line)
+            if collect_coverage_records:
+                coverage_records.extend(rule_coverage_records)
+            elif should_sample_coverage:
+                remaining = coverage_sample_cap - len(coverage_sample_records)
+                coverage_sample_records.extend(rule_coverage_records[:remaining])
+
             syntax = classify_rule_syntax(line)
             if syntax.is_exception:
                 exception_count += 1
@@ -505,6 +826,11 @@ def scan_output(output_path: Path) -> OutputScan:
         errors=errors,
         blocked_domains=blocked_domains,
         wildcard_domains=wildcard_domains,
+        rules=tuple(rules),
+        coverage_records=_sorted_coverage_records(coverage_records),
+        coverage_sample_records=_sorted_coverage_records(
+            coverage_records if collect_coverage_records else coverage_sample_records
+        )[:coverage_sample_cap],
         syntax=syntax_details,
     )
 
@@ -529,18 +855,130 @@ def _domain_is_blocked(
     )
 
 
+def _canary_config_needs_scoped_coverage(canaries: dict[str, object]) -> bool:
+    """Return True when canaries require full scope-aware output coverage."""
+    return (
+        canaries.get("schema_version") == CANARY_SCHEMA_V2
+        and isinstance(canaries.get("scoped_canaries"), list)
+        and bool(canaries.get("scoped_canaries"))
+    )
+
+
+def _sorted_coverage_records(records: list[CoverageRecord]) -> tuple[CoverageRecord, ...]:
+    """Return coverage records in deterministic report/evaluation order."""
+    return tuple(sorted(records, key=lambda record: (record.domain, record.raw_rule, record.scope)))
+
+
+def _record_blocks_scoped_domain(
+    record: CoverageRecord,
+    domain: str,
+    scope: str,
+) -> bool:
+    """Return True when a coverage record blocks a scoped canary target."""
+    if record.effect != COVERAGE_EFFECT_BLOCK:
+        return False
+    if scope == SCOPE_WILDCARD_APEX_ALLOWED:
+        return record_covers_canary_scope(record, domain, SCOPE_APEX)
+    return record_covers_canary_scope(record, domain, scope)
+
+
+def _record_matches_scoped_evidence(
+    record: CoverageRecord,
+    domain: str,
+    scope: str,
+) -> bool:
+    """Return True when a coverage record is useful evidence for a scoped canary."""
+    if scope == SCOPE_WILDCARD_APEX_ALLOWED:
+        return record_covers_canary_scope(record, domain, scope) or _record_blocks_scoped_domain(
+            record,
+            domain,
+            scope,
+        )
+    return record_covers_canary_scope(record, domain, scope)
+
+
+def _evaluate_scoped_canaries(
+    scoped_canaries: list[dict[str, object]],
+    coverage_records: tuple[CoverageRecord, ...],
+) -> tuple[list[Finding], list[dict[str, object]]]:
+    """Evaluate schema v2 scoped canaries against conservative coverage records."""
+    errors: list[Finding] = []
+    results: list[dict[str, object]] = []
+
+    for canary in scoped_canaries:
+        domain = str(canary["domain"])
+        expect = str(canary["expect"])
+        scope = str(canary["scope"])
+        gate = str(canary["gate"])
+        name = canary.get("name")
+        matched = any(
+            _record_matches_scoped_evidence(record, domain, scope)
+            for record in coverage_records
+        )
+        blocked = any(
+            _record_blocks_scoped_domain(record, domain, scope)
+            for record in coverage_records
+        )
+        passed = blocked if expect == SCOPED_CANARY_EXPECT_BLOCKED else not blocked
+        result: dict[str, object] = {
+            "name": name,
+            "domain": domain,
+            "expect": expect,
+            "scope": scope,
+            "gate": gate,
+            "matched": matched,
+            "blocked": blocked,
+            "status": "passed" if passed else "failed",
+        }
+        results.append(result)
+        if passed or gate != SCOPED_CANARY_HARD_GATE:
+            continue
+        if expect == SCOPED_CANARY_EXPECT_BLOCKED:
+            errors.append(_finding(
+                "canary_scoped_block_missing",
+                "Hard scoped must-block canary is not covered by emitted output",
+                domain=domain,
+                scope=scope,
+                gate=gate,
+                name=name,
+            ))
+        else:
+            errors.append(_finding(
+                "canary_scoped_allow_blocked",
+                "Hard scoped must-allow canary is blocked by emitted output",
+                domain=domain,
+                scope=scope,
+                gate=gate,
+                name=name,
+            ))
+
+    return errors, results
+
+
 def validate_canaries(
     canaries: dict[str, object],
     blocked_domains: set[str],
     wildcard_domains: set[str],
+    *,
+    coverage_records: tuple[CoverageRecord, ...] = (),
+    canaries_path: Path | None = None,
 ) -> tuple[list[Finding], dict[str, object]]:
-    """Validate must-block and must-allow canary domains."""
+    """Validate simple and scoped canary domains."""
+    schema_errors = _validate_canary_schema(canaries, canaries_path)
+    if schema_errors:
+        return schema_errors, {}
+
+    schema_version = int(canaries["schema_version"])
     errors: list[Finding] = []
-    must_block = canaries.get("must_block")
-    must_allow = canaries.get("must_allow")
+    must_block = canaries.get("must_block", [])
+    must_allow = canaries.get("must_allow", [])
     if not isinstance(must_block, list) or not isinstance(must_allow, list):
         return [
-            _finding("canary_config_invalid", "Canary config must define domain lists")
+            _finding(
+                "canary_config_invalid",
+                "Canary config must define domain lists",
+                **_details_with_canaries_path(canaries_path, field="must_block|must_allow"),
+            )
         ], {}
 
     must_block_results: list[dict[str, object]] = []
@@ -567,10 +1005,88 @@ def validate_canaries(
                 domain=domain_text,
             ))
 
-    return errors, {
+    scoped_canaries, scoped_config_errors = _validate_scoped_canaries(canaries, canaries_path)
+    if scoped_config_errors:
+        return scoped_config_errors, {}
+
+    scoped_errors, scoped_results = _evaluate_scoped_canaries(
+        scoped_canaries,
+        coverage_records,
+    )
+    errors.extend(scoped_errors)
+
+    details: dict[str, object] = {
+        "schema_version": schema_version,
         "must_block": must_block_results,
         "must_allow": must_allow_results,
     }
+    if schema_version == CANARY_SCHEMA_V2 or scoped_results:
+        details["scoped"] = scoped_results
+    return errors, details
+
+
+def _release_evidence_payload(
+    *,
+    current_rules: tuple[str, ...],
+    previous_rules: tuple[str, ...] | None,
+    source_health: dict[str, object],
+    scoped_canaries: object,
+    coverage_records: tuple[CoverageRecord, ...],
+    evidence_json_path: Path | None = None,
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    """Build diagnostic-only release evidence and optional sidecar payload."""
+    source_health_context = compact_source_health_context(source_health)
+    sidecar_payload: dict[str, object] | None = None
+
+    if previous_rules is not None:
+        churn = compare_membership(current_rules, previous_rules)
+        churn_details = membership_churn_to_dict(churn)
+        membership_churn: dict[str, object] = {
+            "available": True,
+            **churn_details,
+        }
+        output_fingerprints: dict[str, object] = {
+            "current": churn.current_fingerprint,
+            "previous": churn.previous_fingerprint,
+            "added": churn.added_fingerprint,
+            "removed": churn.removed_fingerprint,
+        }
+    else:
+        churn = None
+        membership_churn = {
+            "available": False,
+            "current_count": len(current_rules),
+            "previous_count": None,
+            "added_count": None,
+            "removed_count": None,
+        }
+        output_fingerprints = {
+            "current": fingerprint_membership(current_rules),
+            "previous": None,
+            "added": None,
+            "removed": None,
+        }
+
+    sidecar: dict[str, object] = {"available": False, "path": None}
+    if evidence_json_path is not None:
+        sidecar = {"available": True, "path": str(evidence_json_path)}
+        sidecar_payload = render_diagnostic_sidecar(
+            membership_churn=churn,
+            source_health_context=source_health_context,
+            coverage_records=coverage_records,
+        )
+
+    return (
+        {
+            "schema_version": RELEASE_EVIDENCE_SCHEMA_VERSION,
+            "membership_churn": membership_churn,
+            "output_fingerprints": output_fingerprints,
+            "source_health_context": source_health_context,
+            "scoped_canaries": scoped_canaries if isinstance(scoped_canaries, list) else [],
+            "sidecar": sidecar,
+        },
+        sidecar_payload,
+    )
 
 
 # =============================================================================
@@ -709,6 +1225,42 @@ def render_markdown_summary(summary: ValidationSummary) -> str:
     for key, value in summary.thresholds.items():
         lines.append(f"- `{key}`: {value}")
 
+    evidence = summary.release_evidence
+    if evidence:
+        churn = evidence.get("membership_churn")
+        fingerprints = evidence.get("output_fingerprints")
+        source_context = evidence.get("source_health_context")
+        scoped_canaries = evidence.get("scoped_canaries")
+        sidecar = evidence.get("sidecar")
+
+        lines.append("")
+        lines.append("### Release Evidence")
+        if isinstance(churn, dict) and churn.get("available") is True:
+            lines.append(
+                f"- Membership churn: {churn.get('added_count', 0)} added, "
+                f"{churn.get('removed_count', 0)} removed"
+            )
+        else:
+            lines.append("- Membership churn: unavailable")
+
+        if isinstance(fingerprints, dict):
+            current_fingerprint = str(fingerprints.get("current") or "unavailable")
+            previous_fingerprint = str(fingerprints.get("previous") or "unavailable")
+            lines.append(f"- Current fingerprint: {current_fingerprint[:12]}")
+            lines.append(f"- Previous fingerprint: {previous_fingerprint[:12]}")
+
+        if isinstance(source_context, dict):
+            lines.append(
+                f"- Source health context: {source_context.get('source_count', 0)} sources, "
+                f"{source_context.get('degraded_sources', 0)} degraded"
+            )
+
+        if isinstance(scoped_canaries, list):
+            lines.append(f"- Scoped canaries: {len(scoped_canaries)}")
+
+        if isinstance(sidecar, dict) and sidecar.get("available") is True:
+            lines.append(f"- Evidence sidecar: {sidecar.get('path')}")
+
     lines.append("")
     return "\n".join(lines)
 
@@ -717,8 +1269,12 @@ def save_validation_reports(
     summary: ValidationSummary,
     summary_json_path: Path,
     summary_md_path: Path,
+    evidence_json_path: Path | None = None,
+    evidence_sidecar: dict[str, object] | None = None,
 ) -> None:
     """Write JSON and Markdown validation summaries atomically."""
+    if evidence_json_path is not None and evidence_sidecar is not None:
+        write_report_json(evidence_json_path, evidence_sidecar)
     _atomic_write_json(summary_json_path, summary.to_dict())
     _atomic_write_text(summary_md_path, render_markdown_summary(summary))
 
@@ -737,6 +1293,7 @@ def validate_release(
     previous_output_path: Path | None = None,
     summary_json_path: Path | None = None,
     summary_md_path: Path | None = None,
+    evidence_json_path: Path | None = None,
     thresholds: ReleaseThresholds = DEFAULT_THRESHOLDS,
 ) -> ValidationSummary:
     """Validate a release candidate and optionally write summary reports."""
@@ -765,7 +1322,11 @@ def validate_release(
     errors.extend(source_errors)
     warnings.extend(source_warnings)
 
-    output_scan = scan_output(output_path)
+    output_scan = scan_output(
+        output_path,
+        collect_coverage_records=_canary_config_needs_scoped_coverage(canaries),
+        collect_coverage_sample=evidence_json_path is not None,
+    )
     errors.extend(output_scan.errors)
 
     current_count = output_scan.line_count
@@ -793,6 +1354,8 @@ def validate_release(
         canaries,
         output_scan.blocked_domains,
         output_scan.wildcard_domains,
+        coverage_records=output_scan.coverage_records,
+        canaries_path=canaries_path,
     )
     errors.extend(canary_errors)
 
@@ -803,8 +1366,10 @@ def validate_release(
         "absolute_delta": None,
         "relative_delta": None,
     }
+    previous_rules: tuple[str, ...] | None = None
     if previous_output_path and previous_output_path.exists():
-        previous_count = _non_empty_line_count(previous_output_path)
+        previous_rules = _read_non_empty_lines(previous_output_path)
+        previous_count = len(previous_rules)
         previous_summary = validate_previous_output_delta(current_count, previous_count, thresholds)
         errors.extend(previous_summary.errors)
         warnings.extend(previous_summary.warnings)
@@ -819,6 +1384,15 @@ def validate_release(
     if pipeline_count is not None:
         counts["pipeline_reported_output_rules"] = pipeline_count
 
+    release_evidence, evidence_sidecar = _release_evidence_payload(
+        current_rules=output_scan.rules,
+        previous_rules=previous_rules,
+        source_health=source_health,
+        scoped_canaries=canary_details.get("scoped", []),
+        coverage_records=output_scan.coverage_sample_records,
+        evidence_json_path=evidence_json_path,
+    )
+
     summary = ValidationSummary(
         errors=errors,
         warnings=warnings,
@@ -829,10 +1403,17 @@ def validate_release(
         syntax=output_scan.syntax,
         canaries=canary_details,
         previous_release=previous_release,
+        release_evidence=release_evidence,
     )
 
     if summary_json_path and summary_md_path:
-        save_validation_reports(summary, summary_json_path, summary_md_path)
+        save_validation_reports(
+            summary,
+            summary_json_path,
+            summary_md_path,
+            evidence_json_path=evidence_json_path,
+            evidence_sidecar=evidence_sidecar,
+        )
 
     return summary
 
@@ -846,6 +1427,7 @@ def run_validation(
     previous_output_path: Path | None,
     summary_json_path: Path,
     summary_md_path: Path,
+    evidence_json_path: Path | None = None,
     thresholds: ReleaseThresholds = DEFAULT_THRESHOLDS,
 ) -> ValidationRunResult:
     """Validate and return a CLI-style exit code."""
@@ -857,6 +1439,7 @@ def run_validation(
         previous_output_path=previous_output_path,
         summary_json_path=summary_json_path,
         summary_md_path=summary_md_path,
+        evidence_json_path=evidence_json_path,
         thresholds=thresholds,
     )
     return ValidationRunResult(summary=summary, exit_code=1 if summary.errors else 0)
@@ -880,6 +1463,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--previous-output", help="Optional previous release output")
     parser.add_argument("--summary-json", required=True, help="Path for validation JSON summary")
     parser.add_argument("--summary-md", required=True, help="Path for validation Markdown summary")
+    parser.add_argument("--evidence-json", help="Optional path for detailed release evidence JSON")
     parser.add_argument(
         "--minimum-output-rules",
         type=int,
@@ -893,6 +1477,7 @@ def main() -> int:
     """CLI entry point."""
     args = _parse_args()
     previous_output = Path(args.previous_output) if args.previous_output else None
+    evidence_json = Path(args.evidence_json) if args.evidence_json else None
     thresholds = ReleaseThresholds(minimum_output_rules=args.minimum_output_rules)
 
     try:
@@ -904,6 +1489,7 @@ def main() -> int:
             previous_output_path=previous_output,
             summary_json_path=Path(args.summary_json),
             summary_md_path=Path(args.summary_md),
+            evidence_json_path=evidence_json,
             thresholds=thresholds,
         )
         if result.exit_code:

@@ -9,6 +9,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "update.yml"
+HEAVY_EVIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "heavy-evidence.yml"
+RELEASE_GUARD_DOC = ROOT / "docs" / "RELEASE_GUARD_PROMOTION.md"
+README = ROOT / "README.md"
 PYPROJECT = ROOT / "pyproject.toml"
 RELEASE_CONSTRAINTS = ROOT / "constraints" / "release-py314.txt"
 RELEASE_INSTALL = 'python -m pip install -q -c constraints/release-py314.txt ".[dev]"'
@@ -16,10 +19,39 @@ AUDIT_INSTALL = (
     'python -m pip install -e ".[dev]" --ignore-requires-python '
     "-c constraints/release-py314.txt"
 )
+HEAVY_EVIDENCE_WORKFLOW_TOKENS = (
+    "scripts.benchmark_pipeline",
+    "scripts.profile_pipeline",
+    "reports/benchmarks",
+    "reports/profiles",
+    ".[profile]",
+    "--py-spy-speedscope",
+    "--py-spy-flamegraph",
+    "--pyperf-json",
+    "--dns-diagnostics",
+    "py-spy",
+    "pyperf",
+    "dnspython",
+    "adguardhome",
+    "adguard/adguardhome",
+    "agh oracle",
+)
 
 
 def _workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
+
+
+def _heavy_workflow_text() -> str:
+    return HEAVY_EVIDENCE_WORKFLOW.read_text(encoding="utf-8")
+
+
+def _release_guard_doc_text() -> str:
+    return RELEASE_GUARD_DOC.read_text(encoding="utf-8")
+
+
+def _readme_text() -> str:
+    return README.read_text(encoding="utf-8")
 
 
 def _pyproject_text() -> str:
@@ -189,6 +221,124 @@ def test_scheduled_publish_path_excludes_manual_profile_tools() -> None:
     assert "dnspython" in pyproject
     assert "pyperf" not in pyproject
     assert RELEASE_INSTALL in build_validate
+
+
+def test_scheduled_release_chain_excludes_heavy_evidence_dependencies() -> None:
+    """Scheduled publish, validation, and cache cleanup must not depend on heavy evidence."""
+    workflow = _workflow_text()
+    build_validate = _job_section(workflow, "build_validate")
+    publish = _job_section(workflow, "publish")
+    cache_cleanup = _job_section(workflow, "cache_cleanup")
+    scheduled_chain = "\n".join([build_validate, publish, cache_cleanup]).lower()
+
+    for token in HEAVY_EVIDENCE_WORKFLOW_TOKENS:
+        assert token not in scheduled_chain
+
+    assert "python -m scripts.release_validator" in build_validate
+    assert "--evidence-json reports/release-evidence.json" in build_validate
+    assert "needs: build_validate" in publish
+    assert "actions/download-artifact@" in publish
+    assert "release-candidate" in publish
+    assert "release-candidate" not in cache_cleanup
+
+
+def test_scheduled_release_validation_writes_diagnostic_evidence_sidecar() -> None:
+    """Release evidence should be generated as diagnostics without changing publish input."""
+    workflow = _workflow_text()
+    build_validate = _job_section(workflow, "build_validate")
+    validate_step = _step_section(build_validate, "Validate Release Candidate")
+    append_summary_step = _step_section(build_validate, "Append Validation Summary")
+    publish = _job_section(workflow, "publish")
+    stage_step = _step_section(publish, "Stage Release File")
+
+    assert "python -m scripts.release_validator" in validate_step
+    assert "--summary-json reports/validation-summary.json" in validate_step
+    assert "--summary-md reports/validation-summary.md" in validate_step
+    assert "--evidence-json reports/release-evidence.json" in validate_step
+    assert "reports/release-evidence.json" not in append_summary_step
+
+    assert 'cp release-candidate/lists/merged.txt "$OUTPUT"' in stage_step
+    assert "release-candidate/reports" not in stage_step
+    assert "release-evidence.json" not in stage_step
+
+
+def test_release_candidate_artifact_excludes_heavy_evidence_report_roots() -> None:
+    """The artifact consumed by publish should contain only lightweight release diagnostics."""
+    workflow = _workflow_text()
+    build_validate = _job_section(workflow, "build_validate")
+    upload_step = _step_section(build_validate, "Upload Release Diagnostics")
+
+    assert "lists/merged.txt" in upload_step
+    assert "reports/*.json" in upload_step
+    assert "reports/*.md" in upload_step
+    assert "retention-days: 14" in upload_step
+    assert "reports/benchmarks" not in upload_step
+    assert "reports/profiles" not in upload_step
+
+
+def test_manual_heavy_evidence_workflow_is_dispatch_only_and_read_only() -> None:
+    """Heavy evidence must be manually requested and run without repository write scopes."""
+    text = _heavy_workflow_text()
+    job = _job_section(text, "heavy_evidence")
+
+    assert "\non:\n  workflow_dispatch:\n" in text
+    assert "schedule:" not in text
+    assert "cron:" not in text
+    assert "\npermissions: {}\n" in text
+    assert "\n    permissions:\n      contents: read\n" in job
+    assert "contents: write" not in text
+    assert "actions: write" not in text
+    assert "\n    timeout-minutes: 60\n" in job
+
+    assert "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd" in text
+    assert "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405" in text
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in text
+
+
+def test_manual_heavy_evidence_workflow_collects_only_retained_diagnostics() -> None:
+    """The manual workflow should upload heavy diagnostics without a release handoff."""
+    text = _heavy_workflow_text()
+    lower_text = text.lower()
+    upload_step = _step_section(text, "Upload Heavy Evidence")
+
+    assert "python -m scripts.downloader" in text
+    assert "--health-report reports/heavy-evidence/source-health.json" in text
+    assert "python -m scripts.benchmark_pipeline freeze" in text
+    assert "python -m scripts.benchmark_pipeline run-frozen" in text
+    assert "reports/heavy-evidence/benchmark-frozen.json" in text
+    assert "python -m scripts.profile_pipeline" in text
+    assert "--report-dir reports/profiles/heavy-evidence" in text
+
+    assert "name: heavy-release-evidence" in upload_step
+    assert "reports/heavy-evidence/**" in upload_step
+    assert "reports/benchmarks/**" in upload_step
+    assert "reports/profiles/**" in upload_step
+    assert "if-no-files-found: warn" in upload_step
+    assert "retention-days: 14" in upload_step
+
+    for token in (
+        "publish:",
+        "softprops/action-gh-release",
+        "tag_name:",
+        "github_token",
+        "actions/download-artifact",
+        "actions/cache",
+        "gh cache",
+        "gh release",
+        "git tag",
+    ):
+        assert token not in lower_text
+
+
+def test_readme_points_to_release_guard_promotion_documentation() -> None:
+    """Fork-facing docs should point maintainers to release evidence boundaries."""
+    readme = _readme_text()
+    doc = _release_guard_doc_text()
+
+    assert "[`docs/RELEASE_GUARD_PROMOTION.md`](docs/RELEASE_GUARD_PROMOTION.md)" in readme
+    assert "reports/release-evidence.json" in readme
+    assert "workflow_dispatch" in readme
+    assert "weekly heavy-evidence schedule is not active" in doc
 
 
 def test_python_compatibility_audit_matrix_is_read_only_and_separate() -> None:
