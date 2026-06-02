@@ -1,5 +1,6 @@
 """Static guards for Phase 9 internal diagnostics boundaries."""
 
+import ast
 import io
 import subprocess
 import tokenize
@@ -27,6 +28,36 @@ ALLOWED_DIAGNOSTIC_TOKENS = (
     "stage_summaries",
     "semantics",
     "runtime_profile",
+)
+INSPECT_ONLY_FINDING_CODE_TOKENS = (
+    "benchmark",
+    "profile",
+    "runtime",
+    "stage",
+    "semantic",
+    "churn",
+    "fingerprint",
+    "membership",
+    "language",
+    "headroom",
+    "p95",
+)
+HEAVY_EVIDENCE_SURFACE_TOKENS = (
+    "scripts.benchmark_pipeline",
+    "scripts.profile_pipeline",
+    "reports/benchmarks",
+    "reports/profiles",
+    ".[profile]",
+    "--py-spy-speedscope",
+    "--py-spy-flamegraph",
+    "--pyperf-json",
+    "--dns-diagnostics",
+    "py-spy",
+    "pyperf",
+    "dnspython",
+    "adguardhome",
+    "adguard/adguardhome",
+    "agh oracle",
 )
 
 
@@ -72,6 +103,37 @@ def _python_string_literals(path: str) -> str:
         for token in tokens
         if token.type == tokenize.STRING
     )
+
+
+def _python_tree(path: str) -> ast.AST:
+    return ast.parse(_read(path), filename=path)
+
+
+def _release_validator_finding_codes() -> set[str]:
+    codes: set[str] = set()
+    for node in ast.walk(_python_tree("scripts/release_validator.py")):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Name) or node.func.id != "_finding":
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant):
+            value = node.args[0].value
+            if isinstance(value, str):
+                codes.add(value)
+    return codes
+
+
+def _release_threshold_field_names() -> set[str]:
+    for node in ast.walk(_python_tree("scripts/release_validator.py")):
+        if not isinstance(node, ast.ClassDef) or node.name != "ReleaseThresholds":
+            continue
+        return {
+            statement.target.id
+            for statement in node.body
+            if isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+        }
+    raise AssertionError("ReleaseThresholds class not found")
 
 
 def test_pipeline_cli_does_not_add_deferred_platform_controls() -> None:
@@ -206,6 +268,65 @@ def test_dedicated_profile_wrapper_is_only_manual_profiling_surface() -> None:
         assert "--py-spy-flamegraph" not in text
         assert "--pyperf-json" not in text
         assert "--dns-diagnostics" not in text
+
+
+def test_default_command_surfaces_do_not_call_heavy_evidence_wrappers() -> None:
+    """Default public commands may expose compact diagnostics, not heavy evidence entrypoints."""
+    normal_surfaces = [
+        "scripts/pipeline.py",
+        "scripts/release_validator.py",
+        "run.py",
+    ]
+
+    for path in normal_surfaces:
+        text = _non_comment_text(path)
+        for token in HEAVY_EVIDENCE_SURFACE_TOKENS:
+            assert token not in text
+
+
+def test_release_validator_has_no_heavy_evidence_imports_or_threshold_fields() -> None:
+    """Benchmark, profile, and language evidence must not become validator hard gates."""
+    code = _python_code_without_strings("scripts/release_validator.py")
+    threshold_fields = _release_threshold_field_names()
+
+    for token in (
+        "benchmark_pipeline",
+        "profile_pipeline",
+        "benchmark_evidence",
+        "profile_evidence",
+        "language_gate",
+        "py_spy",
+        "pyperf",
+        "dnspython",
+    ):
+        assert token not in code
+
+    assert "minimum_output_rules" in threshold_fields
+    assert "previous_extreme_drop_ratio" in threshold_fields
+    assert {
+        field
+        for field in threshold_fields
+        if any(token in field for token in ("benchmark", "profile", "language", "p95"))
+    } == set()
+
+
+def test_release_validator_finding_codes_stay_limited_to_deterministic_gates() -> None:
+    """Inspect-only diagnostics must not appear as validator error or warning codes."""
+    finding_codes = _release_validator_finding_codes()
+    promoted_diagnostic_codes = {
+        code
+        for code in finding_codes
+        if any(token in code for token in INSPECT_ONLY_FINDING_CODE_TOKENS)
+    }
+
+    assert promoted_diagnostic_codes == set()
+    assert {
+        "output_invalid_syntax",
+        "pipeline_output_count_mismatch",
+        "canary_must_block_missing",
+        "source_health_catastrophic_failed_stale",
+        "previous_output_extreme_drop",
+    } <= finding_codes
 
 
 def test_release_validator_has_no_stage_threshold_logic() -> None:

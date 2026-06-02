@@ -16,6 +16,23 @@ AUDIT_INSTALL = (
     'python -m pip install -e ".[dev]" --ignore-requires-python '
     "-c constraints/release-py314.txt"
 )
+HEAVY_EVIDENCE_WORKFLOW_TOKENS = (
+    "scripts.benchmark_pipeline",
+    "scripts.profile_pipeline",
+    "reports/benchmarks",
+    "reports/profiles",
+    ".[profile]",
+    "--py-spy-speedscope",
+    "--py-spy-flamegraph",
+    "--pyperf-json",
+    "--dns-diagnostics",
+    "py-spy",
+    "pyperf",
+    "dnspython",
+    "adguardhome",
+    "adguard/adguardhome",
+    "agh oracle",
+)
 
 
 def _workflow_text() -> str:
@@ -189,6 +206,39 @@ def test_scheduled_publish_path_excludes_manual_profile_tools() -> None:
     assert "dnspython" in pyproject
     assert "pyperf" not in pyproject
     assert RELEASE_INSTALL in build_validate
+
+
+def test_scheduled_release_chain_excludes_heavy_evidence_dependencies() -> None:
+    """Scheduled publish, validation, and cache cleanup must not depend on heavy evidence."""
+    workflow = _workflow_text()
+    build_validate = _job_section(workflow, "build_validate")
+    publish = _job_section(workflow, "publish")
+    cache_cleanup = _job_section(workflow, "cache_cleanup")
+    scheduled_chain = "\n".join([build_validate, publish, cache_cleanup]).lower()
+
+    for token in HEAVY_EVIDENCE_WORKFLOW_TOKENS:
+        assert token not in scheduled_chain
+
+    assert "python -m scripts.release_validator" in build_validate
+    assert "--evidence-json" not in build_validate
+    assert "needs: build_validate" in publish
+    assert "actions/download-artifact@" in publish
+    assert "release-candidate" in publish
+    assert "release-candidate" not in cache_cleanup
+
+
+def test_release_candidate_artifact_excludes_heavy_evidence_report_roots() -> None:
+    """The artifact consumed by publish should contain only lightweight release diagnostics."""
+    workflow = _workflow_text()
+    build_validate = _job_section(workflow, "build_validate")
+    upload_step = _step_section(build_validate, "Upload Release Diagnostics")
+
+    assert "lists/merged.txt" in upload_step
+    assert "reports/*.json" in upload_step
+    assert "reports/*.md" in upload_step
+    assert "retention-days: 14" in upload_step
+    assert "reports/benchmarks" not in upload_step
+    assert "reports/profiles" not in upload_step
 
 
 def test_python_compatibility_audit_matrix_is_read_only_and_separate() -> None:
