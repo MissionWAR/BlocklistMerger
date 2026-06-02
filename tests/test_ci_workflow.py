@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "update.yml"
+HEAVY_EVIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "heavy-evidence.yml"
 PYPROJECT = ROOT / "pyproject.toml"
 RELEASE_CONSTRAINTS = ROOT / "constraints" / "release-py314.txt"
 RELEASE_INSTALL = 'python -m pip install -q -c constraints/release-py314.txt ".[dev]"'
@@ -37,6 +38,10 @@ HEAVY_EVIDENCE_WORKFLOW_TOKENS = (
 
 def _workflow_text() -> str:
     return WORKFLOW.read_text(encoding="utf-8")
+
+
+def _heavy_workflow_text() -> str:
+    return HEAVY_EVIDENCE_WORKFLOW.read_text(encoding="utf-8")
 
 
 def _pyproject_text() -> str:
@@ -259,6 +264,60 @@ def test_release_candidate_artifact_excludes_heavy_evidence_report_roots() -> No
     assert "retention-days: 14" in upload_step
     assert "reports/benchmarks" not in upload_step
     assert "reports/profiles" not in upload_step
+
+
+def test_manual_heavy_evidence_workflow_is_dispatch_only_and_read_only() -> None:
+    """Heavy evidence must be manually requested and run without repository write scopes."""
+    text = _heavy_workflow_text()
+    job = _job_section(text, "heavy_evidence")
+
+    assert "\non:\n  workflow_dispatch:\n" in text
+    assert "schedule:" not in text
+    assert "cron:" not in text
+    assert "\npermissions: {}\n" in text
+    assert "\n    permissions:\n      contents: read\n" in job
+    assert "contents: write" not in text
+    assert "actions: write" not in text
+    assert "\n    timeout-minutes: 60\n" in job
+
+    assert "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd" in text
+    assert "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405" in text
+    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in text
+
+
+def test_manual_heavy_evidence_workflow_collects_only_retained_diagnostics() -> None:
+    """The manual workflow should upload heavy diagnostics without a release handoff."""
+    text = _heavy_workflow_text()
+    lower_text = text.lower()
+    upload_step = _step_section(text, "Upload Heavy Evidence")
+
+    assert "python -m scripts.downloader" in text
+    assert "--health-report reports/heavy-evidence/source-health.json" in text
+    assert "python -m scripts.benchmark_pipeline freeze" in text
+    assert "python -m scripts.benchmark_pipeline run-frozen" in text
+    assert "reports/heavy-evidence/benchmark-frozen.json" in text
+    assert "python -m scripts.profile_pipeline" in text
+    assert "--report-dir reports/profiles/heavy-evidence" in text
+
+    assert "name: heavy-release-evidence" in upload_step
+    assert "reports/heavy-evidence/**" in upload_step
+    assert "reports/benchmarks/**" in upload_step
+    assert "reports/profiles/**" in upload_step
+    assert "if-no-files-found: warn" in upload_step
+    assert "retention-days: 14" in upload_step
+
+    for token in (
+        "publish:",
+        "softprops/action-gh-release",
+        "tag_name:",
+        "github_token",
+        "actions/download-artifact",
+        "actions/cache",
+        "gh cache",
+        "gh release",
+        "git tag",
+    ):
+        assert token not in lower_text
 
 
 def test_python_compatibility_audit_matrix_is_read_only_and_separate() -> None:

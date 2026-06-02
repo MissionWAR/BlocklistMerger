@@ -246,6 +246,26 @@ def test_scheduled_workflow_has_no_runtime_language_hard_gates() -> None:
         assert token not in text
 
 
+def test_manual_heavy_evidence_workflow_is_not_a_scheduled_publish_gate() -> None:
+    """Manual heavy evidence may collect reports but must not affect scheduled release."""
+    text = _non_comment_text(".github/workflows/heavy-evidence.yml")
+
+    assert "workflow_dispatch" in text
+    assert "reports/heavy-evidence/**" in text
+    assert "reports/benchmarks/**" in text
+    assert "reports/profiles/**" in text
+    assert "schedule:" not in text
+    assert "cron:" not in text
+    assert "publish:" not in text
+    assert "needs: build_validate" not in text
+    assert "contents: write" not in text
+    assert "actions: write" not in text
+    assert "softprops/action-gh-release" not in text
+    assert "actions/download-artifact" not in text
+    assert "actions/cache" not in text
+    assert "gh cache" not in text
+
+
 def test_dedicated_profile_wrapper_is_only_manual_profiling_surface() -> None:
     wrapper = _non_comment_text("scripts/profile_pipeline.py")
     normal_surfaces = [
