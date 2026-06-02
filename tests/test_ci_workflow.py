@@ -220,11 +220,31 @@ def test_scheduled_release_chain_excludes_heavy_evidence_dependencies() -> None:
         assert token not in scheduled_chain
 
     assert "python -m scripts.release_validator" in build_validate
-    assert "--evidence-json" not in build_validate
+    assert "--evidence-json reports/release-evidence.json" in build_validate
     assert "needs: build_validate" in publish
     assert "actions/download-artifact@" in publish
     assert "release-candidate" in publish
     assert "release-candidate" not in cache_cleanup
+
+
+def test_scheduled_release_validation_writes_diagnostic_evidence_sidecar() -> None:
+    """Release evidence should be generated as diagnostics without changing publish input."""
+    workflow = _workflow_text()
+    build_validate = _job_section(workflow, "build_validate")
+    validate_step = _step_section(build_validate, "Validate Release Candidate")
+    append_summary_step = _step_section(build_validate, "Append Validation Summary")
+    publish = _job_section(workflow, "publish")
+    stage_step = _step_section(publish, "Stage Release File")
+
+    assert "python -m scripts.release_validator" in validate_step
+    assert "--summary-json reports/validation-summary.json" in validate_step
+    assert "--summary-md reports/validation-summary.md" in validate_step
+    assert "--evidence-json reports/release-evidence.json" in validate_step
+    assert "reports/release-evidence.json" not in append_summary_step
+
+    assert 'cp release-candidate/lists/merged.txt "$OUTPUT"' in stage_step
+    assert "release-candidate/reports" not in stage_step
+    assert "release-evidence.json" not in stage_step
 
 
 def test_release_candidate_artifact_excludes_heavy_evidence_report_roots() -> None:
