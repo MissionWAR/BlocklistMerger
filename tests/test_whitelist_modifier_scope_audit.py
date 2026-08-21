@@ -187,7 +187,7 @@ class TestWhitelistModifierScopeAudit:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 rules = [line.strip() for line in f if line.strip()]
             return rules, stats
 
