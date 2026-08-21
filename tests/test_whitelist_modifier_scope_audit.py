@@ -27,7 +27,144 @@ Pattern source: tests/test_cross_format_audit.py (Phase 12 audit suites).
 import os
 import tempfile
 
+import pytest
+
 from scripts.compiler import compile_rules
+
+# ----------------------------------------------------------------------
+# WL boundary matrix (Phase 13 RESEARCH.md, Layer 1 scenarios).
+#
+# Tuple shape: (block_rules, exception_rules, expected_output, expected_pruned).
+# expected_output asserts the exact surviving output lines; expected_pruned is
+# CompileStats.whitelist_conflict_pruned. Exceptions themselves are never
+# emitted, so every "kept" case surfaces as the surviving block lines only.
+# ----------------------------------------------------------------------
+
+WHITELIST_SCOPE_MATRIX = [
+    # D-01: a scoped exception cannot remove an unrestricted block.
+    pytest.param(
+        ("||example.com^",),
+        ("@@||example.com^$client=10.0.0.1",),
+        ["||example.com^"],
+        0,
+        id="WL-01-scoped-exception-keeps-unrestricted-block",
+    ),
+    # Absence of restriction is broader than presence of one.
+    pytest.param(
+        ("||example.com^$client=10.0.0.1",),
+        ("@@||example.com^",),
+        [],
+        1,
+        id="WL-02-bare-exception-covers-scoped-child",
+    ),
+    pytest.param(
+        ("||example.com^$client=A",),
+        ("@@||example.com^$client=B",),
+        ["||example.com^$client=A"],
+        0,
+        id="WL-03-client-value-mismatch-prevents-coverage",
+    ),
+    # D-02: $important priority asymmetry between block and exception.
+    pytest.param(
+        ("||example.com^$important",),
+        ("@@||example.com^",),
+        ["||example.com^$important"],
+        0,
+        id="WL-04-non-important-exception-keeps-important-block",
+    ),
+    # Equal priority + equal scope covers. Single-$ AGH combined syntax.
+    pytest.param(
+        ("||example.com^$important,client=X",),
+        ("@@||example.com^$important,client=X",),
+        [],
+        1,
+        id="WL-05-important-scoped-exception-covers-equal-block",
+    ),
+    # TLD wildcard removal happens at write time under the same dual lock.
+    pytest.param(
+        ("||*.autos^$client=X",),
+        ("@@||*.autos^$client=X",),
+        [],
+        1,
+        id="WL-06-tld-wildcard-scoped-exception-covers-equal-wildcard",
+    ),
+    pytest.param(
+        ("||*.autos^",),
+        ("@@||*.autos^$client=X",),
+        ["||*.autos^"],
+        0,
+        id="WL-07-scoped-tld-exception-keeps-bare-tld-wildcard",
+    ),
+    # dnsrewrite rows are rewrite diagnostics: never emitted, so there is
+    # nothing for the bare exception to prune.
+    pytest.param(
+        ("||example.com^$dnsrewrite=1.2.3.4",),
+        ("@@||example.com^",),
+        [],
+        0,
+        id="WL-08-dnsrewrite-block-not-emitted-and-not-pruned",
+    ),
+    pytest.param(
+        ("||sub.example.com^",),
+        ("@@||*.example.com^$ctag=pc",),
+        ["||sub.example.com^"],
+        0,
+        id="WL-09-scoped-wildcard-exception-keeps-bare-subdomain",
+    ),
+    pytest.param(
+        ("||sub.example.com^$ctag=pc",),
+        ("@@||*.example.com^$ctag=pc",),
+        [],
+        1,
+        id="WL-10-matching-scoped-wildcard-exception-covers-scoped-subdomain",
+    ),
+    # Correct by design (research WL-11): the parent exception carries
+    # $dnstype=A while the deep child block carries none. A narrow-scope
+    # modifier present on the parent but missing on the child means the child
+    # blocks strictly more than the exception unblocks, so keeping the block
+    # is the safe outcome rather than a missed dedup opportunity.
+    pytest.param(
+        ("||a.b.example.com^",),
+        ("@@||example.com^$dnstype=A",),
+        ["||a.b.example.com^"],
+        0,
+        id="WL-11-parent-narrow-dnstype-keeps-deep-bare-child",
+    ),
+    # Unknown modifier names cannot prove coverage; consumed silently.
+    pytest.param(
+        ("||example.com^",),
+        ("@@||example.com^$future=value",),
+        ["||example.com^"],
+        0,
+        id="WL-12-unknown-modifier-exception-cannot-prune",
+    ),
+    # EX-01: negated dnstype value signatures are incomparable -> keep.
+    pytest.param(
+        ("||example.com^$dnstype=A",),
+        ("@@||example.com^$dnstype=~AAAA",),
+        ["||example.com^$dnstype=A"],
+        0,
+        id="WL-13-negated-dnstype-incomparability-prevents-coverage",
+    ),
+    # EX-02: multi-narrowing exceptions require ALL narrow names to match;
+    # the child lacking dnstype means coverage is unproven despite the equal
+    # client value.
+    pytest.param(
+        ("||example.com^$client=10.0.0.1",),
+        ("@@||example.com^$client=10.0.0.1,dnstype=a",),
+        ["||example.com^$client=10.0.0.1"],
+        0,
+        id="WL-14-multi-narrow-exception-requires-all-names-on-child",
+    ),
+    # EX-04: duplicate modifier names within one side reject coverage.
+    pytest.param(
+        ("||example.com^",),
+        ("@@||example.com^$client=A,client=B",),
+        ["||example.com^"],
+        0,
+        id="WL-15-duplicate-name-exception-cannot-prove-coverage",
+    ),
+]
 
 
 class TestWhitelistModifierScopeAudit:
@@ -63,3 +200,88 @@ class TestWhitelistModifierScopeAudit:
         assert "||example.com^" not in rules
         assert not any(rule.startswith("@@") for rule in rules)
         assert stats.whitelist_conflict_pruned == 1
+
+    # ------------------------------------------------------------------
+    # WL-01..WL-15 scoped-modifier boundary matrix (D-01 / D-02)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("block_rules", "exception_rules", "expected_output", "expected_pruned"),
+        WHITELIST_SCOPE_MATRIX,
+    )
+    def test_whitelist_boundary_matrix(
+        self,
+        block_rules,
+        exception_rules,
+        expected_output,
+        expected_pruned,
+    ):
+        """Compile each WL fixture end-to-end; assert exact output and prunes.
+
+        Exceptions are never emitted, so kept outcomes contain only the
+        surviving block lines. Two documented nuances:
+
+        - WL-11 is correct by design: a narrow-scope modifier present on the
+          parent exception but absent from the child block means the child
+          blocks strictly more than the exception unblocks, so keeping the
+          block is the safe outcome (modifier_scope_covers returns False).
+        - WL-05 uses single-$ combined-modifier syntax ($important,client=X);
+          repeating the '$' would reparse "$client" as an unknown name.
+        """
+        rules, stats = self._compile([*block_rules, *exception_rules])
+
+        assert rules == expected_output
+        assert stats.whitelist_conflict_pruned == expected_pruned
+
+    def test_wl08_dnsrewrite_block_is_rewrite_diagnostics_not_block(self):
+        """WL-08 mechanism: $dnsrewrite rows never reach blocking indexes.
+
+        The dnsrewrite block is classified EFFECT_REWRITE and dropped during
+        compiler Phase 1 before any exception interaction can occur. The bare
+        exception therefore prunes nothing. NO_COVERAGE protection is layered:
+        rewrite diagnostics are excluded upstream, while modifier_scope_covers()
+        independently rejects any pair containing dnsrewrite (see
+        TestModifierScopeTruthTable for the unit-level proof).
+        """
+        rules, stats = self._compile([
+            "||example.com^$dnsrewrite=1.2.3.4",
+            "@@||example.com^",
+        ])
+
+        assert rules == []
+        assert stats.whitelist_conflict_pruned == 0
+        assert stats.rule_effect_rewrite == 1
+
+    def test_wl12_unknown_modifier_exception_rejected_upstream(self):
+        """WL-12 mechanism: unknown-modifier exceptions carry no pruning power.
+
+        $future=value makes classify_rule_effect() report EFFECT_UNSUPPORTED,
+        so compiler Phase 1 drops the exception before it even enters the
+        exception index. The block survives untouched.
+        """
+        rules, stats = self._compile([
+            "||example.com^",
+            "@@||example.com^$future=value",
+        ])
+
+        assert rules == ["||example.com^"]
+        assert stats.whitelist_conflict_pruned == 0
+        assert stats.rule_effect_unsupported == 1
+
+    def test_wl15_duplicate_name_exception_consumed_but_unproven(self):
+        """WL-15 mechanism: duplicate names reach the exception index unproven.
+
+        Each duplicate chunk parses cleanly on its own, so the exception is
+        still consumed into the exception index (rule_effect_exception == 1),
+        but _has_duplicate_names() inside modifier_scope_covers() rejects
+        coverage regardless of the other side — the conservative answer while
+        AGH behavior for duplicate modifiers is undocumented.
+        """
+        rules, stats = self._compile([
+            "||example.com^",
+            "@@||example.com^$client=A,client=B",
+        ])
+
+        assert rules == ["||example.com^"]
+        assert stats.whitelist_conflict_pruned == 0
+        assert stats.rule_effect_exception == 1
