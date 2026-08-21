@@ -20,16 +20,27 @@ Evidence layers:
   WL boundary matrix from Phase 13 research.
 - TestModifierScopeTruthTable: direct modifier_scope_covers() truth-table
   calls isolating the unit semantic from compiler integration.
+- TestCorpusWhitelistAudit (AUD-05 / D-03): slow-marked full-corpus run of
+  lists/_raw/ through compile_rules() with a CappedProofLedger, producing
+  structured whitelist-conflict metrics for FINDINGS.md analysis.
 
 Pattern source: tests/test_cross_format_audit.py (Phase 12 audit suites).
 """
 
 import os
 import tempfile
+from pathlib import Path
+from typing import Final
 
 import pytest
 
 from scripts.compiler import compile_rules
+from scripts.pruning_proof import (
+    OUTCOME_KEPT,
+    REASON_EXCEPTION_COVERED,
+    REASON_KEPT_BECAUSE_UNCERTAIN,
+    CappedProofLedger,
+)
 from scripts.rule_semantics import modifier_scope_covers, parse_modifier_text
 
 # ----------------------------------------------------------------------
@@ -341,3 +352,100 @@ class TestModifierScopeTruthTable:
         child = parse_modifier_text(child_text)
 
         assert modifier_scope_covers(parent, child) is expected
+
+
+# ----------------------------------------------------------------------
+# Full-corpus audit (AUD-05 / D-03).
+#
+# Streams the entire lists/_raw/ production corpus through compile_rules()
+# with a CappedProofLedger and quantifies whitelist-conflict activity at
+# scale. The run takes minutes over ~138 MB of input, so it is gated behind
+# the registered `slow` marker (deselected unless --run-slow is passed); the
+# skipif keeps forks without a fetched corpus green even with the flag.
+# ----------------------------------------------------------------------
+
+CORPUS_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "lists" / "_raw"
+CORPUS_FILES_PRESENT: Final[bool] = CORPUS_DIR.is_dir() and any(CORPUS_DIR.glob("*.txt"))
+
+
+@pytest.mark.slow
+class TestCorpusWhitelistAudit:
+    """Full-corpus AUD-05 evidence run through compile_rules() + CappedProofLedger."""
+
+    def _corpus_lines(self):
+        """Stream raw corpus rows lazily so peak memory stays compilation-bound."""
+        for corpus_file in sorted(CORPUS_DIR.glob("*.txt")):
+            with open(corpus_file, encoding="utf-8-sig", errors="replace") as handle:
+                yield from handle
+
+    @pytest.mark.skipif(
+        not CORPUS_FILES_PRESENT,
+        reason="lists/_raw/ corpus not fetched; run `python run.py fetch` first",
+    )
+    def test_full_corpus_compile_with_proof_ledger(self):
+        """Compile the whole production corpus under proof instrumentation.
+
+        Per D-03 this is the corpus execution step producing structured
+        metrics. The assertions pin the invariants; the informational values
+        (printed for FINDINGS.md analysis) quantify corpus behavior:
+
+        - Sanity: total_input exceeds 1M rows so a silently-empty corpus run
+          can never masquerade as a clean audit.
+        - Dual lock: every removal-by-exception must carry
+          modifier_scope_proven=True in its proof sample. A False value would
+          mean pruning happened without the modifier lock — the dual-lock
+          bypass bug this audit hunts for.
+        - Uncertain keeps are counted but never asserted: their magnitude is
+          an upstream-composition fact (research assumption A3), not a
+          compiler-correctness contract.
+        """
+        ledger = CappedProofLedger(sample_cap=10_000)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "corpus_output.txt")
+            stats = compile_rules(self._corpus_lines(), output, proof_ledger=ledger)
+
+        # Sanity threshold from the plan: corpus actually loaded.
+        assert stats.total_input > 1_000_000
+
+        # Informational metric contract: >= 0 always holds; asserted to pin
+        # the counter exists and stays non-negative at corpus scale.
+        assert stats.whitelist_conflict_pruned >= 0
+
+        summary = ledger.summary()
+
+        # Cross-check: each whitelist prune produced exactly one proof record.
+        exception_covered_records = summary["by_reason"].get(REASON_EXCEPTION_COVERED, 0)
+        assert exception_covered_records == stats.whitelist_conflict_pruned
+
+        # Dual-lock invariant scan across materialized proof samples.
+        dual_lock_violations = [
+            record
+            for record in ledger.records
+            if record.reason == REASON_EXCEPTION_COVERED
+            and record.sample.get("modifier_scope_proven") is False
+        ]
+        assert not dual_lock_violations
+
+        # Informational: blocks kept because a domain-matching exception had
+        # unproven modifiers (kept_because_uncertain records whose detail
+        # names an exception). Bounded by the ledger sample cap.
+        uncertain_exception_keeps = sum(
+            1
+            for record in ledger.records
+            if record.outcome == OUTCOME_KEPT
+            and record.reason == REASON_KEPT_BECAUSE_UNCERTAIN
+            and "exception" in str(record.sample.get("reason_detail", ""))
+        )
+
+        print(f"\n[AUD-05] total_input={stats.total_input:,}")
+        print(f"[AUD-05] whitelist_conflict_pruned={stats.whitelist_conflict_pruned:,}")
+        exception_rule_keys = stats.exception_rule_keys
+        print(f"[AUD-05] exception_rule_keys={exception_rule_keys:,}")
+        print(
+            f"[AUD-05] uncertain_exception_keeps(sampled<={ledger.sample_cap})="
+            f"{uncertain_exception_keeps}"
+        )
+        print(f"[AUD-05] ledger_summary={summary}")
+
+        # Ledger integrity: aggregated count matches the reported total.
+        assert summary["total_records"] == len(ledger)
