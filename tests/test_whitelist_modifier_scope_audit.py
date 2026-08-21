@@ -30,6 +30,7 @@ import tempfile
 import pytest
 
 from scripts.compiler import compile_rules
+from scripts.rule_semantics import modifier_scope_covers, parse_modifier_text
 
 # ----------------------------------------------------------------------
 # WL boundary matrix (Phase 13 RESEARCH.md, Layer 1 scenarios).
@@ -285,3 +286,58 @@ class TestWhitelistModifierScopeAudit:
         assert rules == ["||example.com^"]
         assert stats.whitelist_conflict_pruned == 0
         assert stats.rule_effect_exception == 1
+
+
+# ----------------------------------------------------------------------
+# modifier_scope_covers() truth table (Phase 13 RESEARCH.md, Layer 3).
+#
+# Rows: (parent_modifier_text, child_modifier_text, expected_coverage).
+# ParsedModifier records are built inline through parse_modifier_text() so the
+# truth table exercises the real parser output — including dnstype value
+# canonicalization — instead of hand-assembled stand-ins.
+# ----------------------------------------------------------------------
+
+MODIFIER_SCOPE_TRUTH_TABLE = [
+    pytest.param("", "", True, id="empty-parent-covers-empty-child"),
+    # A bare parent (no restrictions) is broader than a scoped child.
+    pytest.param("", "client=10.0.0.1", True, id="bare-parent-covers-scoped-child"),
+    # A scoped parent can never cover a bare child.
+    pytest.param("client=10.0.0.1", "", False, id="scoped-parent-cannot-cover-bare-child"),
+    pytest.param("client=A", "client=A", True, id="exact-client-value-match"),
+    pytest.param("client=A", "client=B", False, id="client-value-mismatch"),
+    pytest.param("ctag=pc", "ctag=mobile", False, id="ctag-value-mismatch"),
+    # dnstype values canonicalize case-insensitively.
+    pytest.param("dnstype=a", "dnstype=A", True, id="dnstype-case-insensitive-canonicalization"),
+    # NO_COVERAGE modifiers reject any pair they appear in.
+    pytest.param("dnsrewrite=1.2.3.4", "", False, id="dnsrewrite-no-coverage-rejection"),
+    pytest.param("denyallow=safe.example", "", False, id="denyallow-no-coverage-rejection"),
+    pytest.param("badfilter", "", False, id="badfilter-no-coverage-rejection"),
+    # Unknown names are uncertain and rejected.
+    pytest.param("unknown_mod=V", "", False, id="unknown-modifier-name-rejected"),
+]
+
+
+class TestModifierScopeTruthTable:
+    """Direct modifier_scope_covers() truth table, independent of compile_rules()."""
+
+    @pytest.mark.parametrize(
+        ("parent_text", "child_text", "expected"),
+        MODIFIER_SCOPE_TRUTH_TABLE,
+    )
+    def test_modifier_scope_truth_table(self, parent_text, child_text, expected):
+        """Prove each truth-table entry at the unit semantic layer.
+
+        This isolates scripts/rule_semantics.modifier_scope_covers() from
+        compiler integration so regressions surface here before they can
+        manifest as incorrect pruning decisions end-to-end.
+
+        Note: $important pairs are intentionally absent from this direct-call
+        table. In production, priority asymmetry is resolved by
+        compiler._important_priority_state() BEFORE important is stripped and
+        remaining modifiers reach this function, so plain modifier_scope_covers()
+        semantics for important pairs are not the production contract.
+        """
+        parent = parse_modifier_text(parent_text)
+        child = parse_modifier_text(child_text)
+
+        assert modifier_scope_covers(parent, child) is expected
