@@ -29,17 +29,22 @@ Pattern source: tests/test_cross_format_audit.py (Phase 12 audit suites).
 
 import os
 import tempfile
+import time
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
-from typing import Final
+from typing import Final, NamedTuple
 
 import pytest
 
-from scripts.compiler import compile_rules
+from scripts.compiler import CompileStats, clear_caches, compile_rules
 from scripts.pruning_proof import (
+    DEFAULT_SAMPLE_CAP,
     OUTCOME_KEPT,
+    REASON_DENYALLOW_COVERED,
     REASON_EXCEPTION_COVERED,
     REASON_KEPT_BECAUSE_UNCERTAIN,
     CappedProofLedger,
+    RuleFacet,
 )
 from scripts.rule_semantics import modifier_scope_covers, parse_modifier_text
 
@@ -497,10 +502,198 @@ class TestCorpusWhitelistAudit:
 # ----------------------------------------------------------------------
 # Denyallow shadow-comparison machinery (D-04 Plan B gate infrastructure).
 #
-# Fast unit layer: proves the two-leg comparison helper produces the exact
-# delta signature on synthetic fixture lines BEFORE the full corpus gate
-# runs. The slow corpus consumer lives in TestDenyallowShadowEquivalence
-# below and reuses every component proven here.
+# Reusable two-leg comparator: compiles one rule stream twice (denyallow
+# flag OFF then ON) inside a single process with fresh capped tallying
+# ledgers, clearing compiler LRU caches BETWEEN legs. The uncapped
+# tallying subclass records every denyallow_covered candidate identity so
+# removals can be witnessed by exact identity rather than capped samples.
+# The fast unit layer below proves the machinery on synthetic fixture
+# lines; TestDenyallowShadowEquivalence feeds it the full corpus.
+# ----------------------------------------------------------------------
+
+
+class DenyallowTallyingLedger(CappedProofLedger):
+    """CappedProofLedger that tallies every denyallow_covered candidate.
+
+    FINDINGS §8 item 3 tally-before-delegating pattern: when an incoming
+    decision carries REASON_DENYALLOW_COVERED, the candidate facet is
+    resolved eagerly and its emitted rule text joins ``denyallow_candidates``
+    BEFORE delegating to super() unchanged. This bypasses sample_cap
+    truncation for exactly one dimension (~500k short strings ≈ tens of MB,
+    far cheaper than materializing full proof records), giving the shadow
+    gate an exact per-line witness instead of a capped sample.
+    """
+
+    def __init__(self, sample_cap: int = DEFAULT_SAMPLE_CAP) -> None:
+        super().__init__(sample_cap=sample_cap)
+        self.denyallow_candidates: set[str] = set()
+
+    def append_decision(
+        self,
+        *,
+        decision_id: str,
+        decision_type: str,
+        outcome: str,
+        proof_status: str,
+        reason: str,
+        candidate_factory: Callable[[], RuleFacet],
+        covering_factory: Callable[[], RuleFacet | None],
+        strict_agh_delta: str,
+        project_policy_delta: str,
+        sample_factory: Callable[[], dict[str, object] | None] | None = None,
+    ) -> None:
+        """Tally denyallow candidates uncapped, then delegate unchanged."""
+        if reason == REASON_DENYALLOW_COVERED:
+            # normalized_rule is the exact text _write_output() emits, so
+            # tally identities compare equal against output-file lines.
+            self.denyallow_candidates.add(candidate_factory().normalized_rule)
+        super().append_decision(
+            decision_id=decision_id,
+            decision_type=decision_type,
+            outcome=outcome,
+            proof_status=proof_status,
+            reason=reason,
+            candidate_factory=candidate_factory,
+            covering_factory=covering_factory,
+            strict_agh_delta=strict_agh_delta,
+            project_policy_delta=project_policy_delta,
+            sample_factory=sample_factory,
+        )
+
+
+class ShadowComparisonResult(NamedTuple):
+    """Paired flag-OFF/flag-ON compile outcomes for shadow-gate assertions.
+
+    off_seconds/on_seconds are per-leg wall clocks surfaced only for the
+    corpus gate's informational prints; all correctness assertions are
+    computed from the six evidence fields.
+    """
+
+    off_lines: list[str]
+    on_lines: list[str]
+    off_stats: CompileStats
+    on_stats: CompileStats
+    off_ledger: DenyallowTallyingLedger
+    on_ledger: DenyallowTallyingLedger
+    off_seconds: float
+    on_seconds: float
+
+
+def _shadow_line_factory(
+    lines: Callable[[], Iterable[str]] | Iterable[str],
+) -> Callable[[], Iterable[str]]:
+    """Normalize a line source into a zero-arg factory of fresh iterators.
+
+    Args:
+        lines: Re-iterable rule source (list/tuple) or a zero-arg callable
+            returning a fresh iterable (e.g., the corpus harness's generator
+            method). Each shadow leg MUST compile its own fresh iterator
+            because compile_rules() consumes the stream exactly once.
+
+    Returns:
+        A callable producing an independent line iterator per call.
+
+    Raises:
+        TypeError: When ``lines`` is already a one-shot iterator, which could
+            never feed both legs.
+    """
+    if isinstance(lines, Iterator):
+        raise TypeError(
+            "lines must be re-iterable or a zero-arg factory returning fresh "
+            "iterators; a one-shot iterator cannot feed both shadow legs"
+        )
+    if callable(lines):
+        return lines
+    return lambda: iter(lines)
+
+
+def _compile_shadow_leg(
+    line_source: Callable[[], Iterable[str]],
+    output_path: Path,
+    *,
+    denyallow_pruning: bool,
+) -> tuple[CompileStats, DenyallowTallyingLedger, float]:
+    """Run one shadow leg with a fresh ledger and fresh lines iterator."""
+    ledger = DenyallowTallyingLedger(sample_cap=10_000)
+    leg_start = time.perf_counter()
+    stats = compile_rules(
+        line_source(),
+        str(output_path),
+        proof_ledger=ledger,
+        denyallow_pruning=denyallow_pruning,
+    )
+    return stats, ledger, time.perf_counter() - leg_start
+
+
+def _read_output_lines(output_path: Path) -> list[str]:
+    """Read compiled output back as stripped non-empty lines (mirrors _compile)."""
+    with open(output_path, encoding="utf-8") as handle:
+        return [line.strip() for line in handle if line.strip()]
+
+
+def _run_shadow_comparison(
+    lines: Callable[[], Iterable[str]] | Iterable[str],
+) -> ShadowComparisonResult:
+    """Compile the same rule stream twice (flag OFF, then ON) in one process.
+
+    D-04 Plan B machinery. Each leg receives its own fresh capped tallying
+    ledger and its own fresh lines iterator; compiler.clear_caches() runs
+    BETWEEN the two compile legs because the module LRU caches are
+    process-global and conftest's autouse fixture only clears between tests,
+    never mid-test (research Pitfall 7).
+
+    Args:
+        lines: Re-iterable rule source (list/tuple) or a zero-arg callable
+            returning a fresh iterable (e.g., the corpus generator method).
+
+    Returns:
+        ShadowComparisonResult pairing both legs' output lines, stats, and
+        ledgers plus per-leg wall-clock seconds.
+    """
+    line_source = _shadow_line_factory(lines)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+
+        off_output = tmp_path / "shadow_off.txt"
+        off_stats, off_ledger, off_seconds = _compile_shadow_leg(
+            line_source,
+            off_output,
+            denyallow_pruning=False,
+        )
+        off_lines = _read_output_lines(off_output)
+
+        # Cache hygiene between legs: the ON leg must not inherit warmed
+        # domain/TLD caches from the OFF leg.
+        clear_caches()
+
+        on_output = tmp_path / "shadow_on.txt"
+        on_stats, on_ledger, on_seconds = _compile_shadow_leg(
+            line_source,
+            on_output,
+            denyallow_pruning=True,
+        )
+        on_lines = _read_output_lines(on_output)
+
+    return ShadowComparisonResult(
+        off_lines=off_lines,
+        on_lines=on_lines,
+        off_stats=off_stats,
+        on_stats=on_stats,
+        off_ledger=off_ledger,
+        on_ledger=on_ledger,
+        off_seconds=off_seconds,
+        on_seconds=on_seconds,
+    )
+
+
+# ----------------------------------------------------------------------
+# Denyallow shadow-comparison machinery unit layer (fast fixtures).
+#
+# Proves the two-leg comparison helper produces the exact delta signature
+# on synthetic fixture lines BEFORE the full corpus gate runs. The slow
+# corpus consumer lives in TestDenyallowShadowEquivalence below and reuses
+# every component proven here.
 # ----------------------------------------------------------------------
 
 
@@ -560,12 +753,16 @@ class TestShadowComparisonMachinery:
         assert kept_drop == denyallow_on
 
         # Every other attribution bucket is byte-stable in both directions.
+        # The two buckets that may differ are skipped here because each is
+        # already pinned EXACTLY above: kept_because_uncertain by the
+        # kept_drop == denyallow_on assertion, denyallow_covered by the
+        # stats↔ledger equality assertions.
         for reason, off_count in off_by_reason.items():
-            if reason == REASON_KEPT_BECAUSE_UNCERTAIN:
+            if reason in {REASON_DENYALLOW_COVERED, REASON_KEPT_BECAUSE_UNCERTAIN}:
                 continue
             assert on_by_reason.get(reason, 0) == off_count
         for reason, on_count in on_by_reason.items():
-            if reason == REASON_DENYALLOW_COVERED:
+            if reason in {REASON_DENYALLOW_COVERED, REASON_KEPT_BECAUSE_UNCERTAIN}:
                 continue
             assert off_by_reason.get(reason, 0) == on_count
 
