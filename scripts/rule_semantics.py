@@ -17,6 +17,7 @@ from scripts.rule_syntax import (
     RULE_KIND_INVALID,
     RULE_KIND_PLAIN_DOMAIN,
     RULE_KIND_REGEX,
+    RuleSyntax,
     classify_rule_syntax,
 )
 
@@ -459,19 +460,24 @@ def canonical_modifier_signature(modifiers: tuple[ParsedModifier, ...]) -> tuple
     return tuple(sorted(_modifier_signature(modifier) for modifier in modifiers))
 
 
-def classify_rule_effect(rule: str) -> RuleEffect:
+def classify_rule_effect(rule: str, *, syntax: RuleSyntax | None = None) -> RuleEffect:
     """
     Classify a raw rule's DNS effect before compression or pruning.
 
     Args:
         rule: Raw cleaned rule text.
+        syntax: Optional precomputed ``classify_rule_syntax(rule)`` result.
+            Callers that already classified the same raw line (the compiler's
+            parse phase) pass it here so the split/scan work runs exactly once
+            per row; the classification outcome is identical either way.
 
     Returns:
         A `RuleEffect` diagnostic record. The result explains syntax/effect
         semantics only; it does not resolve `badfilter`, delete exceptions, or
         prove structural pruning coverage.
     """
-    syntax = classify_rule_syntax(rule)
+    if syntax is None:
+        syntax = classify_rule_syntax(rule)
     modifiers = parse_modifier_text(syntax.modifier_text)
     names = modifier_names(modifiers)
 

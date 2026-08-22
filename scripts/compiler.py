@@ -91,6 +91,7 @@ from scripts.rule_semantics import (
     EFFECT_UNCERTAIN,
     EFFECT_UNSUPPORTED,
     ParsedModifier,
+    RuleEffect,
     _denyallow_allow_set,
     _domain_disjoint_from_all,
     canonical_modifier_signature,
@@ -362,6 +363,8 @@ def _parse_abp_rule(
     source_scope: str | None = None,
     source_reason: str | None = None,
     source_docs_source: str | None = None,
+    parsed_effect: RuleEffect | None = None,
+    parsed_syntax: RuleSyntax | None = None,
 ) -> AbpRuleRecord | None:
     """
     Parse an ABP domain rule into a structured compiler record.
@@ -369,15 +372,54 @@ def _parse_abp_rule(
     The public `extract_abp_info()` helper intentionally exposes the legacy
     names-only tuple. Compiler internals use this richer record so modifier
     values remain available for semantic duplicate and coverage decisions.
+
+    Args:
+        rule: ABP-style rule text to parse.
+        source_rule: Original cleaned input row before compression.
+        source_kind/source_effect/source_scope/source_reason/source_docs_source:
+            Precomputed provenance labels; any missing field falls back to a
+            fresh ``classify_rule_effect`` classification.
+        parsed_effect: Precomputed effect for ``source_rule or rule``. When
+            provided (and every source_* label is present), the internal
+            re-classification is skipped entirely — the hot pipeline path
+            always supplies it, so each row classifies exactly once.
+        parsed_syntax: Precomputed ``classify_rule_syntax(rule)`` result.
+            Only valid when ``rule`` is the exact same text that was
+            classified (the direct-ABP path); hosts/plain callers synthesize
+            a different rule string and must leave this as None.
+
+    Returns:
+        The structured record, or None when the rule has no ABP domain shape.
     """
-    pattern, modifier_text = split_pattern_and_modifiers(rule)
+    if parsed_syntax is not None:
+        # Same-text contract: pattern/modifier_text were split from `rule`.
+        pattern, modifier_text = parsed_syntax.pattern, parsed_syntax.modifier_text
+    else:
+        pattern, modifier_text = split_pattern_and_modifiers(rule)
     match = ABP_DOMAIN_PATTERN.match(pattern)
     if not match:
         return None
 
     modifiers = parse_modifier_text(modifier_text)
     names = modifier_names(modifiers)
-    proof_effect = classify_rule_effect(source_rule or rule)
+
+    # proof_effect feeds only the `or` fallbacks below; the pipeline path
+    # passes all six provenance labels plus parsed_effect, so it stays None
+    # there and the third full classification per row disappears. Falsy (not
+    # just None) labels trigger classification to preserve the legacy
+    # `source_x or proof_effect.x` fallback contract exactly.
+    needs_effect = (
+        not source_kind
+        or not source_effect
+        or not source_scope
+        or not source_reason
+        or not source_docs_source
+    )
+    proof_effect: RuleEffect | None
+    if parsed_effect is not None or not needs_effect:
+        proof_effect = parsed_effect
+    else:
+        proof_effect = classify_rule_effect(source_rule or rule)
 
     return AbpRuleRecord(
         rule=rule,
@@ -388,6 +430,9 @@ def _parse_abp_rule(
         is_exception=match.group(1) is not None,
         is_wildcard=match.group(2) is not None,
         source_rule=source_rule or rule,
+        # Runtime-safe by construction: whenever every explicit source_* label
+        # above is missing/empty, needs_effect forced a classification, so the
+        # fallbacks never dereference a None proof_effect.
         source_kind=source_kind or proof_effect.syntax_kind,
         source_effect=source_effect or proof_effect.effect,
         source_scope=source_scope or proof_effect.scope,
@@ -981,10 +1026,14 @@ def _parse_and_compress_lines(
         if not (line := line.strip()):
             continue
 
-        effect = classify_rule_effect(line)
+        # Classify the raw row once and thread the results everywhere below:
+        # effect consumes the syntax object, and _parse_abp_rule receives both
+        # instead of re-running the same splits/scans (profile-proven 3x/line
+        # parse concentration, Phase 14 PERF-01).
+        syntax = classify_rule_syntax(line)
+        effect = classify_rule_effect(line, syntax=syntax)
         _record_rule_effect(stats, effect.effect, effect.uncertain)
 
-        syntax = classify_rule_syntax(line)
         if syntax.has_url_path or syntax.is_invalid:
             _record_nonblocking_proof(
                 proof_ledger,
@@ -1016,6 +1065,8 @@ def _parse_and_compress_lines(
                 source_scope=effect.scope,
                 source_reason=effect.reason,
                 source_docs_source=effect.docs_source,
+                parsed_effect=effect,
+                parsed_syntax=syntax,
             )
 
             if record is None:
@@ -1077,6 +1128,7 @@ def _parse_and_compress_lines(
                     source_scope=effect.scope,
                     source_reason=effect.reason,
                     source_docs_source=effect.docs_source,
+                    parsed_effect=effect,
                 )
                 if record is not None and _store_rule_variant(
                     abp_rules,
@@ -1111,6 +1163,7 @@ def _parse_and_compress_lines(
                     source_scope=effect.scope,
                     source_reason=effect.reason,
                     source_docs_source=effect.docs_source,
+                    parsed_effect=effect,
                 )
                 if record is not None and _store_rule_variant(
                     abp_rules,
