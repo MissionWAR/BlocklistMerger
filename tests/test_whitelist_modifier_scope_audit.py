@@ -787,3 +787,113 @@ class TestShadowComparisonMachinery:
 
         assert first.off_lines == second.off_lines
         assert first.on_lines == second.on_lines
+
+
+# ----------------------------------------------------------------------
+# Full-corpus denyallow shadow equivalence (D-04 Plan B gate).
+#
+# THE equivalence checkpoint for flipping denyallow_pruning ON: streams the
+# entire lists/_raw/ production corpus through _run_shadow_comparison()
+# (two same-process compile legs with mid-call cache clearing) and asserts
+# the EXACT delta signature — enabling the flag removes exactly the
+# denyallow-proven population and nothing else. A red gate here HALTS the
+# rollout before any default flip; it is never silenced by weakening an
+# assertion. Runs ~25-35 min over ~132 MB of input, so it is gated behind
+# the registered `slow` marker (deselected unless --run-slow is passed);
+# the skipif keeps forks without a fetched corpus green even with the flag.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.slow
+class TestDenyallowShadowEquivalence:
+    """D-04 Plan B full-corpus shadow gate through _run_shadow_comparison()."""
+
+    def _corpus_lines(self):
+        """Stream raw corpus rows lazily so peak memory stays compilation-bound."""
+        for corpus_file in sorted(CORPUS_DIR.glob("*.txt")):
+            with open(corpus_file, encoding="utf-8-sig", errors="replace") as handle:
+                yield from handle
+
+    @pytest.mark.skipif(
+        not CORPUS_FILES_PRESENT,
+        reason="lists/_raw/ corpus not fetched; run `python run.py fetch` first",
+    )
+    def test_full_corpus_shadow_equivalence(self):
+        """Prove flag ON removes ONLY the denyallow-proven population at scale.
+
+        Locked D-04/D-05 signature, asserted via computed values (never
+        chained comparisons — each claim gets its own assert so no bound is
+        compared against the wrong operand):
+
+        - Both legs ingest identical input; input exceeds 1M rows.
+        - Output diff: added-lines empty; removed set positive.
+        - denyallow_covered == stats.denyallow_wildcard_pruned (both legs,
+          OFF pinning 0 == 0) AND == len(removed) — exact, not sampled,
+          via the uncapped tally witness.
+        - kept_because_uncertain drops by EXACTLY the denyallow count;
+          every other by_reason bucket byte-stable; total_records identical.
+
+        Informational prints compare magnitudes against FINDINGS §4's
+        518,754 uncertain-keep upper bound without asserting them.
+        """
+        result = _run_shadow_comparison(self._corpus_lines)
+
+        removed = set(result.off_lines) - set(result.on_lines)
+        added = set(result.on_lines) - set(result.off_lines)
+
+        # Input identity + sanity (separate asserts: a chained expression
+        # would compare the second leg against the literal, always False).
+        assert result.off_stats.total_input == result.on_stats.total_input
+        assert result.off_stats.total_input > 1_000_000
+
+        off_summary = result.off_ledger.summary()
+        on_summary = result.on_ledger.summary()
+        off_by_reason = off_summary["by_reason"]
+        on_by_reason = on_summary["by_reason"]
+
+        denyallow_off = off_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+        denyallow_on = on_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+
+        # Output diff shape.
+        assert not added
+        assert len(removed) > 0
+
+        # Stats ↔ ledger equality in BOTH legs (OFF pins 0 == 0 so a future
+        # regression that prunes with the flag disabled fails loudly here).
+        assert denyallow_on == result.on_stats.denyallow_wildcard_pruned
+        assert denyallow_off == result.off_stats.denyallow_wildcard_pruned
+        exception_covered_off = off_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+        assert exception_covered_off == result.off_stats.whitelist_conflict_pruned
+        exception_covered_on = on_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+        assert exception_covered_on == result.on_stats.whitelist_conflict_pruned
+
+        # Every removed line carries an uncapped proof witness by identity.
+        assert denyallow_on == len(removed)
+        assert result.on_ledger.denyallow_candidates == removed
+        assert result.off_ledger.denyallow_candidates == set()
+
+        # Exact uncertain-bucket delta (D-05 at corpus scale).
+        kept_before = off_by_reason[REASON_KEPT_BECAUSE_UNCERTAIN]
+        kept_after = on_by_reason[REASON_KEPT_BECAUSE_UNCERTAIN]
+        assert kept_before - kept_after == denyallow_on
+
+        # Byte-stable attribution everywhere else, both directions.
+        for reason, off_count in off_by_reason.items():
+            if reason in {REASON_DENYALLOW_COVERED, REASON_KEPT_BECAUSE_UNCERTAIN}:
+                continue
+            assert on_by_reason.get(reason, 0) == off_count
+        for reason, on_count in on_by_reason.items():
+            if reason in {REASON_DENYALLOW_COVERED, REASON_KEPT_BECAUSE_UNCERTAIN}:
+                continue
+            assert off_by_reason.get(reason, 0) == on_count
+
+        # One ledger record per decision either way.
+        assert off_summary["total_records"] == on_summary["total_records"]
+
+        # Informational evidence block (asserts nothing about magnitude).
+        print(f"\n[D-04 SHADOW] total_input={result.off_stats.total_input:,}")
+        print(f"[D-04 SHADOW] removed={len(removed):,} (FINDINGS §4 upper bound: 518,754)")
+        print(f"[D-04 SHADOW] denyallow_covered={denyallow_on:,}")
+        print(f"[D-04 SHADOW] kept_because_uncertain {kept_before:,} -> {kept_after:,}")
+        print(f"[D-04 SHADOW] off_leg_seconds={result.off_seconds:.1f}")
+        print(f"[D-04 SHADOW] on_leg_seconds={result.on_seconds:.1f}")
