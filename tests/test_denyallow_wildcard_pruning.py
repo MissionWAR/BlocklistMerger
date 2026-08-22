@@ -36,8 +36,143 @@ Pattern source: tests/test_whitelist_modifier_scope_audit.py (Phase 13 audit sui
 import os
 import tempfile
 
+import pytest
+
 from scripts.compiler import compile_rules
-from scripts.pruning_proof import CappedProofLedger
+from scripts.pruning_proof import REASON_DENYALLOW_COVERED, CappedProofLedger
+from scripts.rule_semantics import (
+    _denyallow_allow_set,
+    _domain_disjoint_from_all,
+    parse_modifier_text,
+)
+
+# ----------------------------------------------------------------------
+# DA-01..DA-10 denyallow boundary matrix.
+#
+# Tuple shape:
+#   (wildcard_rules, child_rules, expected_output_on, expected_count_on)
+# expected_output_on is the exact surviving output under
+# denyallow_pruning=True; expected_count_on is CompileStats.
+# denyallow_wildcard_pruned for that run. The flag-OFF matrix method
+# asserts the same rows keep every child rule verbatim with counter zero.
+#
+# Corpus-real samples from FINDINGS §6 anchor DA-01/DA-02/DA-05/DA-06;
+# DA-04 pins the descendant-entry safety correction to FINDINGS §8 item 2's
+# registered-domain-only sketch.
+# ----------------------------------------------------------------------
+
+DENYALLOW_PRUNE_MATRIX = [
+    # Golden prune: neither entry shares subtree overlap with adjust.world.
+    pytest.param(
+        ("||*.world^$denyallow=bevisioneers.world|boo.world",),
+        ("||adjust.world^",),
+        ["||*.world^$denyallow=bevisioneers.world|boo.world"],
+        1,
+        id="DA-01-disjoint-child-pruned",
+    ),
+    # Exact match between child domain and an allow-entry forces KEEP.
+    pytest.param(
+        ("||*.asia^$denyallow=amzn.asia|autoads.asia",),
+        ("||autoads.asia^",),
+        ["||*.asia^$denyallow=amzn.asia|autoads.asia", "||autoads.asia^"],
+        0,
+        id="DA-02-exact-entry-child-kept",
+    ),
+    # Child strictly below an allow-entry subtree forces KEEP.
+    pytest.param(
+        ("||*.com^$denyallow=example.com",),
+        ("||shop.example.com^",),
+        ["||*.com^$denyallow=example.com", "||shop.example.com^"],
+        0,
+        id="DA-03-child-under-entry-subtree-kept",
+    ),
+    # FINDINGS §8 safety correction: an allow-entry strictly BELOW the child
+    # domain also forces KEEP — a registered-domain-only check would wrongly
+    # prune ||example.com^ here and lose coverage of safe.example.com.
+    pytest.param(
+        ("||*.com^$denyallow=safe.example.com",),
+        ("||example.com^",),
+        ["||*.com^$denyallow=safe.example.com", "||example.com^"],
+        0,
+        id="DA-04-descendant-entry-child-kept",
+    ),
+    # Phase 13 D-02 boundary: $important children are never denyallow-pruned;
+    # modifier_scope_covers((), child.modifiers) rejects the priority pair.
+    pytest.param(
+        ("||*.world^$denyallow=bevisioneers.world|boo.world",),
+        ("||promo.world^$important",),
+        ["||*.world^$denyallow=bevisioneers.world|boo.world", "||promo.world^$important"],
+        0,
+        id="DA-05-important-child-kept",
+    ),
+    # A child carrying its own NO_COVERAGE modifier ($denyallow) is ineligible
+    # via the same eligibility gate (cf. test_cross_format_audit precedent).
+    pytest.param(
+        ("||*.world^$denyallow=bevisioneers.world|boo.world",),
+        ("||other.world^$denyallow=safe.world",),
+        [
+            "||*.world^$denyallow=bevisioneers.world|boo.world",
+            "||other.world^$denyallow=safe.world",
+        ],
+        0,
+        id="DA-06-nocoverage-carrier-child-kept",
+    ),
+    # Research Pitfall 3: entry == wildcard TLD exempts everything the
+    # wildcard could block, so the variant is inadmissible -> children kept.
+    pytest.param(
+        ("||*.com^$denyallow=com",),
+        ("||example.com^",),
+        ["||*.com^$denyallow=com", "||example.com^"],
+        0,
+        id="DA-07-degenerate-entry-equals-tld-kept",
+    ),
+    # Research Pitfall / OQ1 resolution: name-level negation makes the
+    # wildcard inadmissible in v1 -> children kept in both states.
+    pytest.param(
+        ("||*.world^$~denyallow=x.world",),
+        ("||adjust.world^",),
+        ["||*.world^$~denyallow=x.world", "||adjust.world^"],
+        0,
+        id="DA-08a-name-negated-wildcard-kept",
+    ),
+    # Mixed modifiers alongside $denyallow reduce admissibility -> children
+    # kept; only wildcards reducing to exactly one clean $denyallow prove.
+    pytest.param(
+        ("||*.world^$denyallow=a.world,client=1.2.3.4",),
+        ("||adjust.world^",),
+        ["||*.world^$denyallow=a.world,client=1.2.3.4", "||adjust.world^"],
+        0,
+        id="DA-08b-mixed-modifier-wildcard-kept",
+    ),
+    # Research Pitfall 5: multi-variant TLD keys scan variants in storage
+    # (append) order — the FIRST admissible disjoint variant wins, so input
+    # order fixes which wildcard proves coverage deterministically.
+    pytest.param(
+        ("||*.world^$~denyallow=x.world", "||*.world^$denyallow=zeta.world"),
+        ("||adjust.world^",),
+        ["||*.world^$~denyallow=x.world", "||*.world^$denyallow=zeta.world"],
+        1,
+        id="DA-09-multi-variant-first-admissible-wins",
+    ),
+    # Research Pitfall 1: entries normalize through lower().strip().rstrip(".")
+    # before comparison, so BOO.World equals child boo.world after lowering.
+    pytest.param(
+        ("||*.world^$denyallow=BOO.World",),
+        ("||boo.world^",),
+        ["||*.world^$denyallow=BOO.World", "||boo.world^"],
+        0,
+        id="DA-10-mixed-case-exact-after-normalization-kept",
+    ),
+    # Companion to DA-10: case normalization never flips verdicts — a mixed-
+    # case entry genuinely disjoint from the child still prunes with flag ON.
+    pytest.param(
+        ("||*.world^$denyallow=Bee.World",),
+        ("||boo.world^",),
+        ["||*.world^$denyallow=Bee.World"],
+        1,
+        id="DA-10-mixed-case-disjoint-still-prunes",
+    ),
+]
 
 
 class TestDenyallowWildcardPruning:
@@ -91,10 +226,190 @@ class TestDenyallowWildcardPruning:
         ]
         assert stats.denyallow_wildcard_pruned == 0
 
+    # ------------------------------------------------------------------
+    # DA-01..DA-10 golden/negative boundary matrix.
+    #
+    # Every row is compiled TWICE by the two matrix methods below: flag ON
+    # asserts exact output plus the denyallow_wildcard_pruned counter (and
+    # the 1:1 ledger pairing at fixture scale), default OFF asserts every
+    # child block rule survives verbatim with counter zero — the
+    # feature-flag-tested-in-BOTH-states requirement from the phase brief.
+    #
+    # Tuple shape:
+    #   (wildcard_rules, child_rules, expected_output_on, expected_count_on)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("wildcard_rules", "child_rules", "expected_output_on", "expected_count_on"),
+        DENYALLOW_PRUNE_MATRIX,
+    )
+    def test_denyallow_matrix_flag_on(
+        self,
+        wildcard_rules,
+        child_rules,
+        expected_output_on,
+        expected_count_on,
+    ):
+        """Compile each DA row with denyallow_pruning=True; assert exact output.
+
+        The CappedProofLedger attached to every row pins the FIX-02 stats↔ledger
+        equality at fixture scale: by_reason[REASON_DENYALLOW_COVERED] must equal
+        stats.denyallow_wildcard_pruned for prune rows AND stay paired at zero
+        for keep rows (DA-01's dedicated pairing requirement generalizes here).
+        """
+        ledger = CappedProofLedger()
+        rules, stats = self._compile(
+            [*wildcard_rules, *child_rules],
+            proof_ledger=ledger,
+            denyallow_pruning=True,
+        )
+
+        assert rules == expected_output_on
+        assert stats.denyallow_wildcard_pruned == expected_count_on
+        summary = ledger.summary()
+        assert summary["by_reason"].get(REASON_DENYALLOW_COVERED, 0) == expected_count_on
+
+    @pytest.mark.parametrize(
+        ("wildcard_rules", "child_rules", "expected_output_on", "expected_count_on"),
+        DENYALLOW_PRUNE_MATRIX,
+    )
+    def test_denyallow_matrix_flag_off_keeps_children_verbatim(
+        self,
+        wildcard_rules,
+        child_rules,
+        expected_output_on,
+        expected_count_on,
+    ):
+        """Compile each DA row with defaults; every child block rule survives.
+
+        This is the D-04 staging backstop: shipped-default behavior must remain
+        byte-identical to pre-change HEAD regardless of what the flag would do,
+        so children are asserted present verbatim and the counter stays zero.
+        """
+        rules, stats = self._compile([*wildcard_rules, *child_rules])
+
+        assert stats.denyallow_wildcard_pruned == 0
+        for child in child_rules:
+            assert child in rules
+
+
+# ----------------------------------------------------------------------
+# Unit truth tables for the two pure helpers (direct calls, no fixtures).
+#
+# Inputs are built via parse_modifier_text() like the audit suite's
+# MODIFIER_SCOPE_TRUTH_TABLE so the tables exercise real parser output
+# instead of hand-assembled stand-ins. Importing the underscore-private
+# helpers directly from scripts.rule_semantics is an intentional
+# cross-module private import for unit pinning; no Ruff-selected rule
+# flags it.
+# ----------------------------------------------------------------------
+
+DENYALLOW_ALLOW_SET_TRUTH_TABLE = [
+    # Clean single denyallow: entries lowercased and trailing dots stripped.
+    pytest.param(
+        "denyallow=A.Example.com",
+        "net",
+        frozenset({"a.example.com"}),
+        id="allowset-clean-single-entry-lowercased",
+    ),
+    pytest.param(
+        "denyallow=amzn.asia|autoads.asia",
+        "asia",
+        frozenset({"amzn.asia", "autoads.asia"}),
+        id="allowset-pipe-separated-entries-collected",
+    ),
+    # Exactly-one-modifier admissibility: anything else alongside reject.
+    pytest.param(
+        "denyallow=a.com,client=1.2.3.4",
+        "com",
+        None,
+        id="allowset-multiple-modifiers-rejected",
+    ),
+    # Name-level negation can never prove coverage.
+    pytest.param(
+        "~denyallow=x.com",
+        "com",
+        None,
+        id="allowset-name-negated-rejected",
+    ),
+    # Value-level negation (~entry) is undocumented syntax -> never prove.
+    pytest.param(
+        "denyallow=~x.com",
+        "com",
+        None,
+        id="allowset-value-negated-rejected",
+    ),
+    # Underscore label fails PLAIN_DOMAIN_PATTERN after normalization.
+    pytest.param(
+        "denyallow=bad_domain.com",
+        "com",
+        None,
+        id="allowset-plain-domain-pattern-rejected",
+    ),
+    # One invalid entry rejects the whole set — coverage needs ALL entries valid.
+    pytest.param(
+        "denyallow=a.com|bad_domain.com",
+        "com",
+        None,
+        id="allowset-any-invalid-entry-rejects-whole-set",
+    ),
+    # Degenerate self-referential exemption of research Pitfall 3.
+    pytest.param(
+        "denyallow=com",
+        "com",
+        None,
+        id="allowset-degenerate-entry-equals-tld-rejected",
+    ),
+]
+
+DOMAIN_DISJOINT_TRUTH_TABLE = [
+    # Equal domain/entry share subtrees by definition -> KEEP direction.
+    pytest.param("boo.world", {"boo.world"}, False, id="disjoint-equal-entry-overlaps"),
+    # Domain strictly below an entry subtree -> KEEP direction.
+    pytest.param(
+        "shop.example.com",
+        {"example.com"},
+        False,
+        id="disjoint-domain-under-entry-subtree-overlaps",
+    ),
+    # Entry strictly below the domain (descendant correction) -> KEEP.
+    pytest.param(
+        "example.com",
+        {"safe.example.com"},
+        False,
+        id="disjoint-descendant-entry-overlaps",
+    ),
+    # Fully disjoint subtrees from every entry -> prune may proceed.
+    pytest.param(
+        "adjust.world",
+        {"bevisioneers.world", "boo.world"},
+        True,
+        id="disjoint-fully-disjoint-from-all-entries",
+    ),
+]
+
 
 class TestDenyallowAllowSetTruthTable:
-    """Unit truth table for rule_semantics._denyallow_allow_set()."""
+    """Direct rule_semantics._denyallow_allow_set() truth table."""
+
+    @pytest.mark.parametrize(
+        ("modifier_text", "tld", "expected"),
+        DENYALLOW_ALLOW_SET_TRUTH_TABLE,
+    )
+    def test_denyallow_allow_set_truth_table(self, modifier_text, tld, expected):
+        """Prove each admissibility boundary at the unit semantic layer."""
+        modifiers = parse_modifier_text(modifier_text)
+
+        assert _denyallow_allow_set(modifiers, tld) == expected
 
 
 class TestDomainDisjointTruthTable:
-    """Unit truth table for rule_semantics._domain_disjoint_from_all()."""
+    """Direct rule_semantics._domain_disjoint_from_all() truth table."""
+
+    @pytest.mark.parametrize(
+        ("domain", "entries", "expected"),
+        DOMAIN_DISJOINT_TRUTH_TABLE,
+    )
+    def test_domain_disjoint_truth_table(self, domain, entries, expected):
+        """Prove each three-way disjointness boundary at the unit layer."""
+        assert _domain_disjoint_from_all(domain, frozenset(entries)) is expected
