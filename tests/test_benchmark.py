@@ -11,7 +11,17 @@ import json
 import time
 from pathlib import Path
 
-from scripts.benchmark import build_corpus_manifest, main, manifest_digest
+import pytest
+
+from scripts.benchmark import (
+    build_corpus_manifest,
+    extract_perf_fields,
+    improvement_percent,
+    main,
+    manifest_digest,
+    meets_floor,
+    run_compare,
+)
 
 
 def _make_tiny_corpus(raw_dir: Path) -> None:
@@ -72,3 +82,88 @@ class TestTimingLegSmoke:
 
         third = manifest_digest(build_corpus_manifest(raw_dir))
         assert third != first
+
+
+def _full_timing_document(median: float, digest: str) -> dict[str, object]:
+    """Build a synthetic timing report shaped like a real run artifact."""
+    return {
+        "report_type": "corpus_benchmark",
+        "mode": "timing",
+        "summary": {"min_seconds": median, "median_seconds": median, "max_seconds": median},
+        "corpus": {
+            "dir": "lists/_raw",
+            "file_count": 2,
+            "total_bytes": 64,
+            "manifest_sha256": digest,
+        },
+    }
+
+
+class TestCompareMath:
+    """Pure delta math and document-shape tolerance on synthetic numbers only."""
+
+    @pytest.mark.parametrize(
+        ("pre_median", "post_median", "expected"),
+        [
+            pytest.param(100.0, 85.0, 15.0, id="fifteen-percent-improvement"),
+            pytest.param(100.0, 100.0, 0.0, id="no-change"),
+            pytest.param(100.0, 120.0, -20.0, id="regression-is-negative"),
+        ],
+    )
+    def test_improvement_percent_synthetic_math(
+        self, pre_median: float, post_median: float, expected: float
+    ) -> None:
+        result = improvement_percent(pre_median, post_median)
+        assert abs(result - expected) < 1e-9
+
+    def test_improvement_percent_rejects_nonpositive_pre_median(self) -> None:
+        with pytest.raises(ValueError):
+            improvement_percent(0.0, 50.0)
+
+    def test_meets_floor_inclusive_at_exact_boundary(self) -> None:
+        # D-01's >=15% floor is inclusive: exactly-at-floor passes.
+        assert meets_floor(15.0, 15.0) is True
+        assert meets_floor(14.999, 15.0) is False
+        assert meets_floor(20.0, 15.0) is True
+
+    def test_meets_floor_honors_custom_floor(self) -> None:
+        assert meets_floor(5.0, 5.0) is True
+        assert meets_floor(4.999999, 5.0) is False
+        assert meets_floor(10.0, 30.0) is False
+
+    def test_extract_perf_fields_full_timing_report(self) -> None:
+        document = _full_timing_document(median=1.25, digest="a" * 64)
+        assert extract_perf_fields(document) == (1.25, "a" * 64)
+
+    def test_extract_perf_fields_slim_pinned_baseline(self) -> None:
+        slim = {"median_seconds": 2.5, "manifest_sha256": "b" * 64}
+        assert extract_perf_fields(slim) == (2.5, "b" * 64)
+
+    def test_extract_perf_fields_missing_shapes_raise_actionable_error(self) -> None:
+        empty: dict[str, object] = {"report_type": "corpus_benchmark", "mode": "timing"}
+        with pytest.raises(ValueError) as exc_info:
+            extract_perf_fields(empty)
+        message = str(exc_info.value)
+        assert "median_seconds" in message
+        assert "manifest_sha256" in message
+
+    def test_digest_mismatch_rejected_without_percentage(
+        self, tmp_path: Path, capsys
+    ) -> None:
+        pre_path = tmp_path / "pre.json"
+        post_path = tmp_path / "post.json"
+        pre_path.write_text(
+            json.dumps(_full_timing_document(100.0, "c" * 64)), encoding="utf-8"
+        )
+        post_path.write_text(
+            json.dumps(_full_timing_document(50.0, "d" * 64)), encoding="utf-8"
+        )
+
+        exit_code = run_compare(pre_path, post_path, 15.0)
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "c" * 64 in captured.out
+        assert "d" * 64 in captured.out
+        assert "improvement_percent" not in captured.out
+        assert "PASS" not in captured.out and "FAIL" not in captured.out
