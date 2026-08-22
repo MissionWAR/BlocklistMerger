@@ -86,6 +86,7 @@ class PipelineStats(TypedDict):
     trimmed: int
     abp_subdomain_pruned: int
     tld_wildcard_pruned: int
+    denyallow_wildcard_pruned: int
     duplicate_pruned: int
     whitelist_conflict_pruned: int
     local_hostname_pruned: int
@@ -682,6 +683,7 @@ def process_files_with_profile(
     stats["lines_output"] = compile_stats.total_output
     stats["abp_subdomain_pruned"] = compile_stats.abp_subdomain_pruned
     stats["tld_wildcard_pruned"] = compile_stats.tld_wildcard_pruned
+    stats["denyallow_wildcard_pruned"] = compile_stats.denyallow_wildcard_pruned
     stats["duplicate_pruned"] = compile_stats.duplicate_pruned
     stats["whitelist_conflict_pruned"] = compile_stats.whitelist_conflict_pruned
     stats["local_hostname_pruned"] = compile_stats.local_hostname_pruned

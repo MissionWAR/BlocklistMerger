@@ -176,6 +176,17 @@ WHITELIST_SCOPE_MATRIX = [
         0,
         id="WL-15-duplicate-name-exception-cannot-prove-coverage",
     ),
+    # VD-01 (D-07): priority direction — an @@$important exception removes a
+    # bare block. $important raises the exception above ordinary blocking
+    # priority, so the asymmetry only protects important BLOCKS (WL-04),
+    # never bare blocks against an important exception.
+    pytest.param(
+        ("||example.com^",),
+        ("@@||example.com^$important",),
+        [],
+        1,
+        id="WL-16-important-exception-prunes-bare-block",
+    ),
 ]
 
 
@@ -298,6 +309,24 @@ class TestWhitelistModifierScopeAudit:
         assert stats.whitelist_conflict_pruned == 0
         assert stats.rule_effect_exception == 1
 
+    def test_vd02_exception_scan_proves_no_early_return_past_scoped_mismatch(self):
+        """VD-02 (D-07): the exception scan continues past scope mismatches.
+
+        Ordered so a scoped-mismatch exception precedes the covering bare
+        exception. _find_covering_exception() scans ALL exceptions instead of
+        returning early on the first domain match, so the later bare coverer
+        still removes the block. An early-return implementation would keep
+        ||example.com^ here and prune nothing.
+        """
+        rules, stats = self._compile([
+            "||example.com^",
+            "@@||example.com^$client=192.168.1.1",
+            "@@||example.com^",
+        ])
+
+        assert rules == []
+        assert stats.whitelist_conflict_pruned == 1
+
 
 # ----------------------------------------------------------------------
 # modifier_scope_covers() truth table (Phase 13 RESEARCH.md, Layer 3).
@@ -325,6 +354,11 @@ MODIFIER_SCOPE_TRUTH_TABLE = [
     pytest.param("badfilter", "", False, id="badfilter-no-coverage-rejection"),
     # Unknown names are uncertain and rejected.
     pytest.param("unknown_mod=V", "", False, id="unknown-modifier-name-rejected"),
+    # VD-03 (D-07): negation-equality branch of narrow-scope comparison.
+    # Identical negated client signatures cover each other...
+    pytest.param("client=~10.0.0.1", "client=~10.0.0.1", True, id="vd03-negation-equality-covers"),
+    # ...but a bare value never covers its negated form (or vice versa).
+    pytest.param("client=10.0.0.1", "client=~10.0.0.1", False, id="vd03-negation-mismatch-rejects"),
 ]
 
 
@@ -407,9 +441,12 @@ class TestCorpusWhitelistAudit:
         # Sanity threshold from the plan: corpus actually loaded.
         assert stats.total_input > 1_000_000
 
-        # Informational metric contract: >= 0 always holds; asserted to pin
-        # the counter exists and stays non-negative at corpus scale.
-        assert stats.whitelist_conflict_pruned >= 0
+        # Informational metric floor backed by corpus evidence: the first six
+        # lists/_raw files alone produced 31 whitelist conflicts during the
+        # Phase 13 audit, so a full-corpus run must prune at least one rule
+        # for this counter to be trustworthy (IN-01 fix — replaces the old
+        # tautological >= 0 assertion).
+        assert stats.whitelist_conflict_pruned > 0
 
         summary = ledger.summary()
 
@@ -428,7 +465,13 @@ class TestCorpusWhitelistAudit:
 
         # Informational: blocks kept because a domain-matching exception had
         # unproven modifiers (kept_because_uncertain records whose detail
-        # names an exception). Bounded by the ledger sample cap.
+        # names an exception). Two metric caveats (IN-02/IN-03 documentation):
+        # (a) the tally depends on exact reason_detail wording — if compiler
+        # detail constants change, this count silently degrades to zero
+        # without failing anything, so treat drops as a wording-drift signal;
+        # (b) counts are bounded by the CappedProofLedger sample cap per
+        # bucket, so printed values are sample-bounded figures, not corpus
+        # totals.
         uncertain_exception_keeps = sum(
             1
             for record in ledger.records
