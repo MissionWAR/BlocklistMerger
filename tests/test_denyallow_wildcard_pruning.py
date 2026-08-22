@@ -18,9 +18,10 @@ covers exact-match entries, ancestor/superdomain entries, and -- the safety
 correction to FINDINGS §8 item 2's registered-domain-only sketch --
 descendant entries (`||*.com^$denyallow=safe.example.com` never covers
 `||example.com^` because safe.example.com stays unblocked inside the child's
-blocked set). Only fully-disjoint children may be pruned, and only when
-`denyallow_pruning=True` (D-04 Plan A staging: the production default stays
-OFF until the Plan B corpus shadow gate passes in 14-03).
+blocked set). Only fully-disjoint children may be pruned. Since v1.2 the
+production default is denyallow_pruning=True (D-04: flipped after the 14-03
+full-corpus shadow gate passed), so every OFF-semantics leg in this suite
+passes denyallow_pruning=False EXPLICITLY to keep testing both flag states.
 
 Evidence layers:
 - TestDenyallowWildcardPruning: end-to-end compile_rules() fixtures run in
@@ -211,14 +212,16 @@ class TestDenyallowWildcardPruning:
         assert stats.denyallow_wildcard_pruned == 1
         assert ledger.summary()["by_reason"]["denyallow_covered"] == 1
 
-    def test_flag_off_default_keeps_every_rule_and_counter_stays_zero(self):
-        """Default OFF: identical input keeps both lines; the counter stays zero.
+    def test_flag_off_explicit_keeps_every_rule_and_counter_stays_zero(self):
+        """Explicit OFF: identical input keeps both lines; the counter stays zero.
 
-        This pins D-04 staging: shipped default behavior is byte-identical to
-        pre-change HEAD until the 14-03 shadow gate flips the flag.
+        Since v1.2 the production default is denyallow_pruning=True (D-04
+        flip after the 14-03 corpus gate), so this leg passes False
+        explicitly to keep pinning the pre-v1.2 keep-everything semantics:
+        byte-identical survival of every rule with a zeroed counter.
         """
         lines = ["||*.world^$denyallow=bevisioneers.world|boo.world", "||adjust.world^"]
-        rules, stats = self._compile(lines)
+        rules, stats = self._compile(lines, denyallow_pruning=False)
 
         assert rules == [
             "||*.world^$denyallow=bevisioneers.world|boo.world",
@@ -231,9 +234,10 @@ class TestDenyallowWildcardPruning:
     #
     # Every row is compiled TWICE by the two matrix methods below: flag ON
     # asserts exact output plus the denyallow_wildcard_pruned counter (and
-    # the 1:1 ledger pairing at fixture scale), default OFF asserts every
-    # child block rule survives verbatim with counter zero — the
-    # feature-flag-tested-in-BOTH-states requirement from the phase brief.
+    # the 1:1 ledger pairing at fixture scale), explicit denyallow_pruning=
+    # False asserts every child block rule survives verbatim with counter
+    # zero — the feature-flag-tested-in-BOTH-states requirement from the
+    # phase brief.
     #
     # Tuple shape:
     #   (wildcard_rules, child_rules, expected_output_on, expected_count_on)
@@ -280,13 +284,17 @@ class TestDenyallowWildcardPruning:
         expected_output_on,
         expected_count_on,
     ):
-        """Compile each DA row with defaults; every child block rule survives.
+        """Compile each DA row with denyallow_pruning=False; children survive.
 
-        This is the D-04 staging backstop: shipped-default behavior must remain
-        byte-identical to pre-change HEAD regardless of what the flag would do,
-        so children are asserted present verbatim and the counter stays zero.
+        This is the OFF-state half of the both-states requirement: since
+        v1.2 the production default is True, so OFF semantics must be
+        requested explicitly — every child block rule survives verbatim and
+        the counter stays zero regardless of what the flag would do.
         """
-        rules, stats = self._compile([*wildcard_rules, *child_rules])
+        rules, stats = self._compile(
+            [*wildcard_rules, *child_rules],
+            denyallow_pruning=False,
+        )
 
         assert stats.denyallow_wildcard_pruned == 0
         for child in child_rules:

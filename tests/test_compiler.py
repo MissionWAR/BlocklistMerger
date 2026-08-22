@@ -602,9 +602,10 @@ class TestCompilerProofLedgerPlumbing:
         """compile_rules() exposes only intentional keyword-only options.
 
         proof_ledger stays the single optional instrumentation hook; the
-        Phase 14 denyallow flag joins it keyword-only with default OFF so
-        D-04 Plan A staging keeps shipped behavior byte-identical until the
-        Plan B corpus shadow gate flips it.
+        Phase 14 denyallow flag joins it keyword-only with production-on
+        default True since v1.2 (D-04): the Plan B full-corpus shadow gate
+        proved the removal population exact before the default flipped, and
+        passing False explicitly restores pre-v1.2 keep-everything behavior.
         """
         signature = inspect.signature(compile_rules)
         parameters = signature.parameters
@@ -613,7 +614,7 @@ class TestCompilerProofLedgerPlumbing:
         assert parameters["proof_ledger"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["proof_ledger"].default is None
         assert parameters["denyallow_pruning"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert parameters["denyallow_pruning"].default is False
+        assert parameters["denyallow_pruning"].default is True
         assert "stage_summaries" not in CompileStats.__dataclass_fields__
 
     def test_compiler_stage_summaries_are_aggregate_only_and_preserve_output(self):

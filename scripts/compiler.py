@@ -31,7 +31,9 @@ Modifier-Aware Pruning:
     $important    Child with $important must NOT be pruned by parent without it
     $badfilter    Never prune by a $badfilter parent (it disables rules, not blocks)
     $dnsrewrite   Never prune (has custom DNS response behavior)
-    $denyallow    Never prune (excludes specific domains)
+    $denyallow    A child CARRYING it is never pruned; children under a clean
+                  $denyallow TLD wildcard are pruned when provably disjoint
+                  (v1.2 denyallow-aware coverage, on by default)
     $dnstype      Only prune if parent blocks ALL types
     $client/$ctag Parent with restrictions can't prune unrestricted child
     ============  ================================================================
@@ -1563,7 +1565,7 @@ def compile_rules(
     output_file: str,
     *,
     proof_ledger: ProofLedger | None = None,
-    denyallow_pruning: bool = False,
+    denyallow_pruning: bool = True,
 ) -> CompileStats:
     """
     Compile and deduplicate rules with format compression.
@@ -1577,10 +1579,12 @@ def compile_rules(
         lines: Iterable of rule strings to compile (e.g., list, generator, or file object)
         output_file: Path to write the compiled output
         proof_ledger: Optional append-only ledger for compiler proof decisions.
-        denyallow_pruning: When True, attempt last-resort denyallow coverage proofs at
-            TLD wildcards whose modifiers reduce to exactly one clean $denyallow record;
-            prunes only children fully disjoint from every allow-entry subtree. Default
-            False keeps pre-flag behavior byte-identical (D-04 Plan A staging).
+        denyallow_pruning: Attempt last-resort denyallow coverage proofs at TLD
+            wildcards whose modifiers reduce to exactly one clean $denyallow record;
+            prunes only children fully disjoint from every allow-entry subtree.
+            Production-on since v1.2 (D-04): the full-corpus shadow gate proved
+            removals are exactly the provably-covered population before this default
+            flipped True. Pass False to restore pre-v1.2 keep-everything behavior.
 
     Returns:
         CompileStats with metrics about the compilation process
