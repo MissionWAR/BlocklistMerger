@@ -182,7 +182,8 @@ class TestProfileLeg:
             stats_file = Path.cwd() / stats_file
         assert stats_file.is_file()
         assert stats_file.suffix == ".pstats"
-        assert Path("reports") / "benchmarks" / "runs" in stats_file.parents
+        runs_root = Path.cwd() / "reports" / "benchmarks" / "runs"
+        assert stats_file.parent == runs_root
 
         # Legs never mix: no timing-summary keys leak into a profile document.
         assert "runs" not in data
