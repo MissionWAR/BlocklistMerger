@@ -138,6 +138,115 @@ class TestMemoryLeg:
         assert "per_run" not in data
 
 
+class TestProfileLeg:
+    """Profile-leg smoke tests over a tiny synthetic corpus."""
+
+    def test_profile_mode_report_shape(self, tmp_path: Path, monkeypatch) -> None:
+        """--profile writes a mode='profile' report with ranking + pstats artifact."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/profile-smoke.json")
+
+        monkeypatch.chdir(tmp_path)
+        return_code = main(
+            [
+                "--corpus",
+                str(raw_dir),
+                "--profile",
+                "--json",
+                str(report_path),
+            ]
+        )
+
+        assert return_code == 0
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+
+        assert data["report_type"] == "corpus_benchmark"
+        assert data["mode"] == "profile"
+        assert isinstance(data["elapsed_seconds"], (int, float))
+        assert data["elapsed_seconds"] > 0
+
+        # Ranking entries carry identification + cumulative-time fields.
+        top_functions = data["top_functions"]
+        assert isinstance(top_functions, list) and top_functions
+        for entry in top_functions:
+            assert isinstance(entry["function"], str) and entry["function"]
+            assert isinstance(entry["location"], str)
+            assert isinstance(entry["primitive_calls"], int)
+            assert isinstance(entry["total_calls"], int)
+            assert isinstance(entry["cumulative_seconds"], (int, float))
+
+        # The raw cProfile artifact exists beside the report under runs/.
+        stats_file = Path(data["stats_file"])
+        if not stats_file.is_absolute():
+            stats_file = Path.cwd() / stats_file
+        assert stats_file.is_file()
+        assert stats_file.suffix == ".pstats"
+        assert Path("reports") / "benchmarks" / "runs" in stats_file.parents
+
+        # Legs never mix: no timing-summary keys leak into a profile document.
+        assert "runs" not in data
+        assert "durations_seconds" not in data
+        assert "summary" not in data
+        assert "per_run" not in data
+        assert "tracemalloc_peak_bytes" not in data
+
+
+class TestMemoryTop:
+    """--memory-top allocation snapshot tests over a tiny synthetic corpus."""
+
+    def test_memory_top_allocations(self, tmp_path: Path, monkeypatch) -> None:
+        """--memory-top N embeds at most N allocation rows into the memory report."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/memory-top-smoke.json")
+
+        monkeypatch.chdir(tmp_path)
+        return_code = main(
+            [
+                "--corpus",
+                str(raw_dir),
+                "--track-memory",
+                "--memory-top",
+                "2",
+                "--json",
+                str(report_path),
+            ]
+        )
+
+        assert return_code == 0
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+
+        top_allocations = data["top_allocations"]
+        assert isinstance(top_allocations, list)
+        assert len(top_allocations) <= 2
+        assert top_allocations  # a real compile allocates something
+        for entry in top_allocations:
+            assert isinstance(entry["location"], str) and entry["location"]
+            assert isinstance(entry["size_bytes"], int) and entry["size_bytes"] > 0
+            assert isinstance(entry["count"], int) and entry["count"] > 0
+
+        # Memory-mode leg separation still holds with the extra key present.
+        assert "runs" not in data
+        assert "summary" not in data
+        assert "per_run" not in data
+
+    def test_memory_top_absent_without_flag(self, tmp_path: Path, monkeypatch) -> None:
+        """Without --memory-top the memory report carries no top_allocations key."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/memory-notop-smoke.json")
+
+        monkeypatch.chdir(tmp_path)
+        return_code = main(
+            ["--corpus", str(raw_dir), "--track-memory", "--json", str(report_path)]
+        )
+
+        assert return_code == 0
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        assert "top_allocations" not in data
+
+
 class TestCompareMath:
     """Pure delta math and document-shape tolerance on synthetic numbers only."""
 
