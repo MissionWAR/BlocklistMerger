@@ -8,17 +8,17 @@ These tests prove that hosts/plain-domain entries compressed to bare ABP rules
 during compiler Phase 1 are pruned only when an existing ABP parent rule covers
 them at equal or broader modifier scope.
 
-Note: should_prune_by_modifiers() in scripts/compiler.py is legacy dead code —
-it has zero callers in the main pruning pipeline. The active pipeline uses
-_find_covering_parent_record() -> modifier_scope_covers() instead. Phase 14
-handles cleanup; the function's empty-modifier fast-path contract is asserted
-below to document current behavior until removal.
+Note: the legacy modifier-pruning helper documented as dead since Phase 12
+(should-prune-by-modifier-name fast path) was REMOVED in Phase 14 (plan 14-04)
+together with its two orphaned modifier-set constants. The active pipeline
+proves coverage through _find_covering_parent_record() ->
+modifier_scope_covers().
 """
 
 import os
 import tempfile
 
-from scripts.compiler import compile_rules, should_prune_by_modifiers
+from scripts.compiler import compile_rules
 
 
 class TestCrossFormatPruningAudit:
@@ -117,7 +117,7 @@ class TestCrossFormatPruningAudit:
         assert rules.count("||b.com^") == 1
 
     # ------------------------------------------------------------------
-    # Task 3: $important asymmetry boundary and dead-code documentation
+    # Task 3: $important asymmetry boundary
     # ------------------------------------------------------------------
 
     def test_important_parent_prunes_hosts_compressed_child(self):
@@ -138,14 +138,3 @@ class TestCrossFormatPruningAudit:
         ])
         assert "||example.com^" in rules
         assert "||example.com^$important" in rules
-
-    def test_should_prune_by_modifiers_empty_fast_path_returns_true(self):
-        """
-        should_prune_by_modifiers returns True for empty-modifier pairs.
-
-        This documents the fast-path contract of the legacy dead-code helper
-        (E-09 research finding). The function has zero callers in the main
-        pruning pipeline — _find_covering_parent_record() delegates to
-        modifier_scope_covers() instead. Phase 14 removes this helper.
-        """
-        assert should_prune_by_modifiers(frozenset(), frozenset()) is True

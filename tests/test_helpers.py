@@ -8,7 +8,6 @@ from scripts.compiler import (
     extract_hosts_info,
     get_registered_domain,
     normalize_domain,
-    should_prune_by_modifiers,
     walk_parent_domains,
 )
 from scripts.rule_semantics import canonical_modifier_signature
@@ -97,53 +96,6 @@ def test_walk_parent_domains_and_registered_domain() -> None:
 
     assert get_registered_domain("deep.sub.example.com") == "example.com"
     assert get_registered_domain("example.co.uk") == "example.co.uk"
-
-
-def test_should_prune_by_modifiers_basic_cases() -> None:
-    # No modifiers on either side → prune
-    assert should_prune_by_modifiers(EMPTY_FROZENSET, EMPTY_FROZENSET) is True
-
-    # Parent with badfilter should never prune
-    assert (
-        should_prune_by_modifiers(EMPTY_FROZENSET, frozenset({"badfilter"}))
-        is False
-    )
-
-    # Child important must not be pruned by non-important parent
-    assert (
-        should_prune_by_modifiers(frozenset({"important"}), EMPTY_FROZENSET)
-        is False
-    )
-
-    # Child with special behavior should not be pruned
-    for mod in ("dnsrewrite", "denyallow", "badfilter"):
-        assert (
-            should_prune_by_modifiers(frozenset({mod}), EMPTY_FROZENSET)
-            is False
-        )
-
-
-def test_should_prune_by_modifiers_dnstype_and_client_restrictions() -> None:
-    # Child dnstype vs parent without dnstype → parent blocks all types, prune
-    assert (
-        should_prune_by_modifiers(frozenset({"dnstype"}), EMPTY_FROZENSET)
-        is True
-    )
-
-    # Parent dnstype vs child without → child blocks all types, do not prune
-    assert (
-        should_prune_by_modifiers(EMPTY_FROZENSET, frozenset({"dnstype"}))
-        is False
-    )
-
-    # Parent/client restricted vs unrestricted child → do not prune
-    assert (
-        should_prune_by_modifiers(
-            EMPTY_FROZENSET,
-            frozenset({"client"}),
-        )
-        is False
-    )
 
 
 def test_cleaner_extract_modifiers_roundtrip() -> None:

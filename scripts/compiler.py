@@ -228,26 +228,6 @@ LOCAL_HOSTNAMES: Final[frozenset[str]] = frozenset({
 })
 
 # =============================================================================
-# MODIFIER CONSTANTS
-# =============================================================================
-
-#: Modifiers with special behavior that should never be pruned.
-#: These modifiers have effects that can't be covered by a parent rule.
-SPECIAL_BEHAVIOR_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "badfilter",   # Disables other rules (meta-modifier)
-    "dnsrewrite",  # Custom DNS response (e.g., redirect to specific IP)
-    "denyallow",   # Excludes specific domains from blocking
-})
-
-#: Modifiers that restrict who is blocked (client-specific rules).
-#: A parent with these can't prune a child without them.
-CLIENT_RESTRICTION_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "client",  # Block only for specific client IP
-    "ctag",    # Block only for specific client tag
-})
-
-
-# =============================================================================
 # DATA STRUCTURES
 # =============================================================================
 
@@ -945,64 +925,6 @@ def walk_parent_domains(domain: str) -> tuple[str, ...]:
             parents.append(f"{'.'.join(suffix_parts)}.{registered}")
 
     return tuple(parents)
-
-
-def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset[str]) -> bool:
-    """
-    Determine if a child rule is redundant given the parent's modifiers.
-
-    This function implements the modifier-aware pruning logic that ensures
-    we don't incorrectly remove rules with special behavior.
-
-    Args:
-        child_mods: Modifiers on the child (subdomain) rule
-        parent_mods: Modifiers on the parent rule
-
-    Returns:
-        True if child can be safely pruned (parent covers it), False otherwise
-
-    Pruning Rules:
-        1. $badfilter parent → Never prune (it disables rules, doesn't block)
-        2. $important child → Keep if parent lacks $important
-        3. $dnsrewrite/$denyallow/$badfilter child → Never prune (special behavior)
-        4. $dnstype mismatch → Child blocking ALL types not covered by parent blocking ONE
-        5. $client/$ctag parent → Child without restrictions blocks more broadly
-
-    Example:
-        >>> should_prune_by_modifiers(frozenset(), frozenset())
-        True
-        >>> should_prune_by_modifiers(frozenset({'important'}), frozenset())
-        False  # Child's $important takes priority
-    """
-    # Fast path: no modifiers on either side (most common case ~90%+)
-    # This avoids all the set operations below
-    if not child_mods and not parent_mods:
-        return True
-
-    # Special-behavior parents are not broad blocking coverage.
-    if parent_mods & SPECIAL_BEHAVIOR_MODIFIERS:
-        return False
-
-    # Child's $important overrides non-important parent
-    if "important" in child_mods and "important" not in parent_mods:
-        return False
-
-    # Special behavior modifiers are never redundant
-    if child_mods & SPECIAL_BEHAVIOR_MODIFIERS:
-        return False
-
-    # Handle $dnstype: parent blocking ALL types covers child blocking specific type,
-    # but not vice versa (child blocking ALL not covered by parent blocking ONE)
-    if "dnstype" in child_mods:
-        if "dnstype" in parent_mods:
-            return False  # Can't compare values, be conservative
-        # else: parent blocks ALL types, covers child's specific type
-    elif "dnstype" in parent_mods:
-        return False  # Child blocks ALL types, parent only blocks one type
-
-    # $client/$ctag restrict WHO is blocked. Restricted parents cannot prove
-    # coverage for unrestricted children or differently restricted children.
-    return not parent_mods & CLIENT_RESTRICTION_MODIFIERS
 
 
 # =============================================================================
