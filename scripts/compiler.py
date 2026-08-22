@@ -156,6 +156,8 @@ RuleDuplicateIndex = dict[RuleDuplicateKey, RuleEntry]
 RuleStorage = dict[str, list[RuleEntry]]
 WildcardStorage = dict[str, list[WildcardEntry]]
 ExceptionRules = list[RuleEntry]
+#: Exception domain -> append-ordered entries bucketed once per compile.
+ExceptionIndex = dict[str, list[RuleEntry]]
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -1264,6 +1266,71 @@ def _find_domain_scope_exception(record: RuleEntry, exceptions: ExceptionRules) 
     return None
 
 
+# ---------------------------------------------------------------------------
+# Indexed exception lookups (Phase 14 PERF-01, profile-proven hotspot)
+#
+# The legacy helpers above scan every exception per candidate record —
+# O(records x exceptions) full-coverage predicate calls dominated the Phase 14
+# cProfile ranking (~1.6k cumulative seconds over ~3.55M candidates). The
+# domain-scope predicate reduces to block.domain == exception.domain OR
+# exception.domain in walk_parent_domains(block.domain), so bucketing each
+# exception under its own normalized domain makes every candidate's probe-key
+# set [domain, *walk_parent_domains(domain)] a superset of every possible
+# covering exception's key (exact set-equivalence by definition).
+# ---------------------------------------------------------------------------
+
+
+def _build_exception_index(exceptions: ExceptionRules) -> ExceptionIndex:
+    """Bucket exceptions under their own normalized domain, preserving append order."""
+    index: ExceptionIndex = {}
+    for exception in exceptions:
+        index.setdefault(exception.domain, []).append(exception)
+    return index
+
+
+def _exception_probe_keys(record: RuleEntry) -> tuple[str, ...]:
+    """Return index keys able to hold exceptions whose scope covers ``record``."""
+    return (record.domain, *walk_parent_domains(record.domain))
+
+
+def _find_covering_exception_indexed(
+    record: RuleEntry,
+    index: ExceptionIndex,
+) -> RuleEntry | None:
+    """Return the first fully-covering exception found through the index.
+
+    Buckets keep append order and probe keys run most-specific first, so the
+    returned WITNESS may differ from the legacy global-first scan when several
+    differently-keyed exceptions cover one candidate. Output bytes, all stats
+    counters, and ledger reason buckets are existence-based and unaffected;
+    only capped ledger samples could differ (accepted per assumption A5 and
+    re-verified by the slow corpus audit at the ship gate).
+    """
+    for key in _exception_probe_keys(record):
+        bucket = index.get(key)
+        if not bucket:
+            continue
+        for exception in bucket:
+            if _exception_covers_block(exception, record):
+                return exception
+    return None
+
+
+def _find_domain_scope_exception_indexed(
+    record: RuleEntry,
+    index: ExceptionIndex,
+) -> RuleEntry | None:
+    """Return the first domain-scope-matching exception via the index."""
+    for key in _exception_probe_keys(record):
+        bucket = index.get(key)
+        if not bucket:
+            continue
+        for exception in bucket:
+            if _exception_domain_scope_covers(exception, record):
+                return exception
+    return None
+
+
 def _any_parent_record_covers(child: RuleEntry, parents: list[RuleEntry]) -> bool:
     """Return True when any parent variant proves coverage for a child variant."""
     return any(
@@ -1372,15 +1439,36 @@ def _prune_redundant_rules(
     stats: CompileStats,
     proof_ledger: ProofLedger | None,
     denyallow_pruning: bool = False,
+    *,
+    exception_index: ExceptionIndex | None = None,
 ) -> RuleStorage:
-    """Phase 3: Remove redundant subdomain and whitelist-conflicted rules."""
+    """Phase 3: Remove redundant subdomain and whitelist-conflicted rules.
+
+    Args:
+        abp_rules: Blocking ABP records keyed by storage domain.
+        abp_wildcards: TLD wildcard records keyed by suffix.
+        tld_wildcards: Set of wildcard suffix keys for O(1) membership checks.
+        exceptions: Exception (whitelist) records in input order.
+        stats: Mutable compilation statistics.
+        proof_ledger: Optional proof-decision ledger.
+        denyallow_pruning: Attempt last-resort denyallow coverage proofs.
+        exception_index: Prebuilt exception domain index; when provided both
+            exception lookups use indexed probes, otherwise the legacy linear
+            scans run so direct internal callers stay valid.
+
+    Returns:
+        Surviving blocking records keyed by domain.
+    """
     pruned_abp: RuleStorage = {}
 
     for domain, records in abp_rules.items():
         for record in records:
             clean_domain = record.domain
 
-            covering_exception = _find_covering_exception(record, exceptions)
+            if exception_index is not None:
+                covering_exception = _find_covering_exception_indexed(record, exception_index)
+            else:
+                covering_exception = _find_covering_exception(record, exceptions)
             if covering_exception is not None:
                 stats.whitelist_conflict_pruned += 1
                 _record_proven_pruning(
@@ -1397,7 +1485,13 @@ def _prune_redundant_rules(
                     ),
                 )
                 continue
-            uncertain_covering = _find_domain_scope_exception(record, exceptions)
+            if exception_index is not None:
+                uncertain_covering = _find_domain_scope_exception_indexed(
+                    record,
+                    exception_index,
+                )
+            else:
+                uncertain_covering = _find_domain_scope_exception(record, exceptions)
             uncertain_reason = "exception_domain_scope_matched_modifier_scope_unproven"
 
             tld = get_tld(clean_domain)
@@ -1514,8 +1608,23 @@ def _write_output(
     exceptions: ExceptionRules,
     other_rules: set[str],
     proof_ledger: ProofLedger | None,
+    *,
+    exception_index: ExceptionIndex | None = None,
 ) -> None:
-    """Phase 4: Write deduplicated rules to output atomically."""
+    """Phase 4: Write deduplicated rules to output atomically.
+
+    Args:
+        output_file: Destination path for the merged list.
+        stats: Mutable compilation statistics.
+        abp_wildcards: TLD wildcard records keyed by suffix.
+        pruned_abp: Surviving blocking records from the pruning phase.
+        exceptions: Exception (whitelist) records in input order.
+        other_rules: Non-ABP rules preserved verbatim, sorted at write time.
+        proof_ledger: Optional proof-decision ledger.
+        exception_index: Prebuilt exception domain index; when provided the
+            write-time whitelist scan uses indexed probes, otherwise the
+            legacy linear scan runs so direct internal callers stay valid.
+    """
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_suffix(".tmp")
@@ -1523,7 +1632,10 @@ def _write_output(
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
         for records in abp_wildcards.values():
             for record in records:
-                covering_exception = _find_covering_exception(record, exceptions)
+                if exception_index is not None:
+                    covering_exception = _find_covering_exception_indexed(record, exception_index)
+                else:
+                    covering_exception = _find_covering_exception(record, exceptions)
                 if covering_exception is not None:
                     stats.whitelist_conflict_pruned += 1
                     _record_proven_pruning(
@@ -1622,6 +1734,11 @@ def compile_rules(
     # PHASE 2: Build coverage lookup set
     tld_wildcards = _build_coverage_lookups(abp_wildcards)
 
+    # PHASE 2b: Bucket exceptions by domain once so both exception scans
+    # (prune time and write time) probe O(depth) buckets instead of scanning
+    # the whole exception list per candidate (profile-proven PERF-01 slice).
+    exception_index = _build_exception_index(exceptions)
+
     # PHASE 3: Prune ABP subdomain rules
     pruned_abp = _prune_redundant_rules(
         abp_rules=abp_rules,
@@ -1631,6 +1748,7 @@ def compile_rules(
         stats=stats,
         proof_ledger=proof_ledger,
         denyallow_pruning=denyallow_pruning,
+        exception_index=exception_index,
     )
 
     # PHASE 4: Output to file
@@ -1642,6 +1760,7 @@ def compile_rules(
         exceptions=exceptions,
         other_rules=other_rules,
         proof_ledger=proof_ledger,
+        exception_index=exception_index,
     )
 
     return stats
