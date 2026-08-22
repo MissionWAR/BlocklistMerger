@@ -99,6 +99,45 @@ def _full_timing_document(median: float, digest: str) -> dict[str, object]:
     }
 
 
+class TestMemoryLeg:
+    """Memory-leg smoke tests over a tiny synthetic corpus."""
+
+    def test_track_memory_reports_positive_peak(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """--track-memory writes a memory-mode report and never mixes in timing."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/memory-smoke.json")
+
+        monkeypatch.chdir(tmp_path)
+        return_code = main(
+            [
+                "--corpus",
+                str(raw_dir),
+                "--track-memory",
+                "--json",
+                str(report_path),
+            ]
+        )
+
+        assert return_code == 0
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+
+        assert data["report_type"] == "corpus_benchmark"
+        assert data["mode"] == "memory"
+        assert isinstance(data["tracemalloc_peak_bytes"], int)
+        assert data["tracemalloc_peak_bytes"] > 0
+        assert isinstance(data["tracemalloc_current_bytes"], int)
+        assert data["tracemalloc_current_bytes"] >= 0
+
+        # Pitfall 6: legs never combine — one invocation, one measurement kind.
+        assert "runs" not in data
+        assert "durations_seconds" not in data
+        assert "summary" not in data
+        assert "per_run" not in data
+
+
 class TestCompareMath:
     """Pure delta math and document-shape tolerance on synthetic numbers only."""
 
