@@ -66,6 +66,7 @@ from scripts.pruning_proof import (
     PROOF_STATUS_UNCERTAIN,
     REASON_BADFILTER_DISABLED,
     REASON_CROSS_FORMAT_BROADENED,
+    REASON_DENYALLOW_COVERED,
     REASON_DNSREWRITE_CHANGED,
     REASON_DUPLICATE_RULE,
     REASON_EXCEPTION_COVERED,
@@ -88,6 +89,8 @@ from scripts.rule_semantics import (
     EFFECT_UNCERTAIN,
     EFFECT_UNSUPPORTED,
     ParsedModifier,
+    _denyallow_allow_set,
+    _domain_disjoint_from_all,
     canonical_modifier_signature,
     classify_rule_effect,
     modifier_names,
@@ -258,6 +261,7 @@ class CompileStats:
         other_kept: Other rules (regex, etc.) kept in output
         abp_subdomain_pruned: Subdomain rules pruned by parent rules
         tld_wildcard_pruned: Rules pruned by TLD wildcards (e.g., ||*.autos^)
+        denyallow_wildcard_pruned: Rules pruned by admissible $denyallow wildcard coverage
         duplicate_pruned: Exact duplicate rules removed
         whitelist_conflict_pruned: Rules removed due to whitelist conflicts
         local_hostname_pruned: Local hostnames (localhost, etc.) skipped
@@ -295,6 +299,7 @@ class CompileStats:
     # Pruning counts
     abp_subdomain_pruned: int = 0
     tld_wildcard_pruned: int = 0
+    denyallow_wildcard_pruned: int = 0
     duplicate_pruned: int = 0
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
@@ -1273,6 +1278,27 @@ def _find_covering_parent_record(child: RuleEntry, parents: list[RuleEntry]) -> 
     return None
 
 
+def _find_denyallow_covering_variant(
+    child: RuleEntry,
+    variants: list[RuleEntry],
+    tld: str,
+) -> RuleEntry | None:
+    """Return the first wildcard variant whose admissible $denyallow set covers a child.
+
+    Iterates variants in storage (append) order so multi-variant TLD keys
+    resolve deterministically. A variant proves coverage only when its parsed
+    modifiers reduce to exactly one clean $denyallow record (see
+    ``_denyallow_allow_set``) AND every allow-entry is fully disjoint from the
+    child's normalized domain under the three-way subtree test (see
+    ``_domain_disjoint_from_all``).
+    """
+    for variant in variants:
+        allow_set = _denyallow_allow_set(variant.modifiers, tld)
+        if allow_set is not None and _domain_disjoint_from_all(child.domain, allow_set):
+            return variant
+    return None
+
+
 def _record_proven_pruning(
     proof_ledger: ProofLedger | None,
     *,
@@ -1343,6 +1369,7 @@ def _prune_redundant_rules(
     exceptions: ExceptionRules,
     stats: CompileStats,
     proof_ledger: ProofLedger | None,
+    denyallow_pruning: bool = False,
 ) -> RuleStorage:
     """Phase 3: Remove redundant subdomain and whitelist-conflicted rules."""
     pruned_abp: RuleStorage = {}
@@ -1436,6 +1463,35 @@ def _prune_redundant_rules(
                     covering=covering_parent,
                 )
             else:
+                # Last-resort denyallow proof (D-04 Plan A): attempted BEFORE
+                # recording the uncertain keep so the shadow-gate signature
+                # holds exactly — kept_because_uncertain drops by precisely
+                # the denyallow count with total_records unchanged, instead of
+                # double-counting one rule in both buckets. The gate on
+                # uncertain_reason == "tld_wildcard_modifier_scope_unproven"
+                # makes abp_wildcards[tld] safe to index: that reason is only
+                # set inside the TLD branch above where tld is non-empty, the
+                # key exists, and later walks cannot overwrite it because they
+                # only fire while uncertain_covering is still None.
+                if (
+                    denyallow_pruning
+                    and uncertain_reason == "tld_wildcard_modifier_scope_unproven"
+                    and modifier_scope_covers((), record.modifiers)
+                ):
+                    denyallow_variant = _find_denyallow_covering_variant(
+                        record,
+                        abp_wildcards[tld],
+                        tld,
+                    )
+                    if denyallow_variant is not None:
+                        stats.denyallow_wildcard_pruned += 1
+                        _record_proven_pruning(
+                            proof_ledger,
+                            reason=REASON_DENYALLOW_COVERED,
+                            candidate=record,
+                            covering=denyallow_variant,
+                        )
+                        continue
                 if uncertain_covering is not None:
                     _record_uncertain_keep(
                         proof_ledger,
@@ -1507,6 +1563,7 @@ def compile_rules(
     output_file: str,
     *,
     proof_ledger: ProofLedger | None = None,
+    denyallow_pruning: bool = False,
 ) -> CompileStats:
     """
     Compile and deduplicate rules with format compression.
@@ -1520,6 +1577,10 @@ def compile_rules(
         lines: Iterable of rule strings to compile (e.g., list, generator, or file object)
         output_file: Path to write the compiled output
         proof_ledger: Optional append-only ledger for compiler proof decisions.
+        denyallow_pruning: When True, attempt last-resort denyallow coverage proofs at
+            TLD wildcards whose modifiers reduce to exactly one clean $denyallow record;
+            prunes only children fully disjoint from every allow-entry subtree. Default
+            False keeps pre-flag behavior byte-identical (D-04 Plan A staging).
 
     Returns:
         CompileStats with metrics about the compilation process
@@ -1565,6 +1626,7 @@ def compile_rules(
         exceptions=exceptions,
         stats=stats,
         proof_ledger=proof_ledger,
+        denyallow_pruning=denyallow_pruning,
     )
 
     # PHASE 4: Output to file

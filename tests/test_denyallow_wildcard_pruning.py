@@ -36,8 +36,6 @@ Pattern source: tests/test_whitelist_modifier_scope_audit.py (Phase 13 audit sui
 import os
 import tempfile
 
-import pytest
-
 from scripts.compiler import compile_rules
 from scripts.pruning_proof import CappedProofLedger
 

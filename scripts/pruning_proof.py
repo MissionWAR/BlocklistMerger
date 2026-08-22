@@ -48,6 +48,7 @@ REASON_DUPLICATE_RULE: Final[str] = "duplicate_rule"
 REASON_PARENT_COVERED: Final[str] = "parent_covered"
 REASON_WILDCARD_COVERED: Final[str] = "wildcard_covered"
 REASON_TLD_WILDCARD_COVERED: Final[str] = "tld_wildcard_covered"
+REASON_DENYALLOW_COVERED: Final[str] = "denyallow_covered"
 REASON_EXCEPTION_COVERED: Final[str] = "exception_covered"
 REASON_KEPT_BECAUSE_UNCERTAIN: Final[str] = "kept_because_uncertain"
 REASON_UNSUPPORTED_MODIFIER_REMOVED: Final[str] = "unsupported_modifier_removed"
@@ -79,6 +80,7 @@ __all__ = [
     "PROOF_STATUS_UNPROVEN",
     "REASON_BADFILTER_DISABLED",
     "REASON_CROSS_FORMAT_BROADENED",
+    "REASON_DENYALLOW_COVERED",
     "REASON_DNSREWRITE_CHANGED",
     "REASON_DUPLICATE_RULE",
     "REASON_EXCEPTION_COVERED",
