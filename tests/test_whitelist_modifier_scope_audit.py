@@ -492,3 +492,101 @@ class TestCorpusWhitelistAudit:
 
         # Ledger integrity: aggregated count matches the reported total.
         assert summary["total_records"] == len(ledger)
+
+
+# ----------------------------------------------------------------------
+# Denyallow shadow-comparison machinery (D-04 Plan B gate infrastructure).
+#
+# Fast unit layer: proves the two-leg comparison helper produces the exact
+# delta signature on synthetic fixture lines BEFORE the full corpus gate
+# runs. The slow corpus consumer lives in TestDenyallowShadowEquivalence
+# below and reuses every component proven here.
+# ----------------------------------------------------------------------
+
+
+class TestShadowComparisonMachinery:
+    """Unit-proven two-leg shadow comparison over synthetic fixture lines.
+
+    Fixture mirrors FINDINGS §6 samples: an admissible $denyallow TLD
+    wildcard covers two disjoint children (pruned under flag ON), while an
+    $important child and an unrelated-domain rule must survive both legs.
+    """
+
+    SHADOW_FIXTURE_LINES = [
+        "||*.world^$denyallow=bevisioneers.world|boo.world",
+        "||adjust.world^",
+        "||autoads.world^",
+        "||promo.world^$important",
+        "||unrelated.example^",
+    ]
+
+    def _result(self):
+        return _run_shadow_comparison(list(self.SHADOW_FIXTURE_LINES))
+
+    def test_two_leg_delta_signature_exact_on_fixture_lines(self):
+        """Flag ON removes exactly the disjoint children; nothing else moves.
+
+        Pins the D-04/D-05 delta signature end-to-end: removed set exact,
+        added empty, kept_because_uncertain drops by precisely the
+        denyallow_covered count, every other by_reason bucket identical,
+        total_records identical, stats↔ledger equality in BOTH legs, and the
+        uncapped tally witness equals the removed set by identity.
+        """
+        result = self._result()
+        removed = set(result.off_lines) - set(result.on_lines)
+        added = set(result.on_lines) - set(result.off_lines)
+
+        # Only the two disjoint children disappear; no line appears or changes.
+        assert removed == {"||adjust.world^", "||autoads.world^"}
+        assert not added
+
+        off_by_reason = result.off_ledger.summary()["by_reason"]
+        on_by_reason = result.on_ledger.summary()["by_reason"]
+        denyallow_off = off_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+        denyallow_on = on_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+
+        # Stats ↔ ledger equality holds in BOTH legs; OFF leg pins 0 == 0 so a
+        # regression that prunes with the flag disabled fails loudly here.
+        assert denyallow_off == result.off_stats.denyallow_wildcard_pruned
+        assert denyallow_on == result.on_stats.denyallow_wildcard_pruned
+        assert denyallow_on > 0
+        assert denyallow_off == 0
+
+        # Exact uncertain-bucket delta: keeps drop by exactly the prune count.
+        kept_drop = (
+            off_by_reason[REASON_KEPT_BECAUSE_UNCERTAIN]
+            - on_by_reason[REASON_KEPT_BECAUSE_UNCERTAIN]
+        )
+        assert kept_drop == denyallow_on
+
+        # Every other attribution bucket is byte-stable in both directions.
+        for reason, off_count in off_by_reason.items():
+            if reason == REASON_KEPT_BECAUSE_UNCERTAIN:
+                continue
+            assert on_by_reason.get(reason, 0) == off_count
+        for reason, on_count in on_by_reason.items():
+            if reason == REASON_DENYALLOW_COVERED:
+                continue
+            assert off_by_reason.get(reason, 0) == on_count
+
+        # total_records identical across legs (one record per decision either way).
+        assert result.off_ledger.summary()["total_records"] == (
+            result.on_ledger.summary()["total_records"]
+        )
+
+        # Uncapped tally bypasses sample truncation: identities match removals.
+        assert result.on_ledger.denyallow_candidates == removed
+        assert result.off_ledger.denyallow_candidates == set()
+
+    def test_shadow_reruns_are_byte_deterministic(self):
+        """Two invocations over the same lines yield identical off/on outputs.
+
+        Storage-order first-match determinism (research Pitfall 5): rerunning
+        the comparison must reproduce byte-identical legs or corpus-scale
+        fingerprints would be meaningless.
+        """
+        first = self._result()
+        second = self._result()
+
+        assert first.off_lines == second.off_lines
+        assert first.on_lines == second.on_lines
