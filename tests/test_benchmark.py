@@ -163,7 +163,10 @@ class TestCompareMath:
         captured = capsys.readouterr()
 
         assert exit_code == 1
-        assert "c" * 64 in captured.out
-        assert "d" * 64 in captured.out
+        # Mismatch details go to stderr (error-stream convention); stdout
+        # stays completely verdict-free — no percentage, no PASS/FAIL.
+        assert "c" * 64 in captured.err
+        assert "d" * 64 in captured.err
         assert "improvement_percent" not in captured.out
         assert "PASS" not in captured.out and "FAIL" not in captured.out
+        assert "PASS" not in captured.err and "FAIL" not in captured.err

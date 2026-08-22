@@ -13,13 +13,23 @@ workflows only — there is deliberately no CI integration (D-02).
 Usage:
     py -3.14 -m scripts.benchmark --corpus lists/_raw --runs 3 \
         --json reports/benchmarks/runs/pre.json
+    py -3.14 -m scripts.benchmark --compare pre.json post.json \
+        --min-improve-percent 15.0
+    py -3.14 -m scripts.benchmark --corpus lists/_raw --runs 3 \
+        --json reports/benchmarks/runs/post.json --compare-baseline
 
 Exit codes:
-    0  success (compare mode: improvement meets the floor)
+    0  success; compare modes: improvement meets the floor
     1  operational failure: missing/empty corpus, mid-leg corpus drift,
-       unparseable report documents, drifted-corpus comparison, below-floor
-       compare verdict, or missing baseline document
+       unparseable or missing report documents, drifted-corpus comparison,
+       below-floor compare verdict, or missing baseline document (Plan 14-03
+       pins tests/fixtures/benchmarks/corpus-baseline.json)
     2  argparse usage error
+
+Compare verdict line (single machine-readable JSON object on stdout):
+    {"pre_seconds": <float>, "post_seconds": <float>,
+     "improvement_percent": <float>, "floor_percent": <float>,
+     "passes": <bool>}
 
 JSON schema (mode == "timing"):
     {
@@ -60,7 +70,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Final, NamedTuple
 
@@ -296,6 +306,136 @@ def _python_identity() -> dict[str, object]:
     }
 
 
+def improvement_percent(pre_median: float, post_median: float) -> float:
+    """Return wall-clock improvement percent; positive means post is faster.
+
+    Raises:
+        ValueError: When ``pre_median`` is not strictly positive, because no
+            improvement percentage is definable over a zero baseline.
+    """
+    if pre_median <= 0:
+        raise ValueError(
+            f"pre_median must be > 0 to compute an improvement percent (got {pre_median!r})"
+        )
+    return (pre_median - post_median) / pre_median * 100
+
+
+def meets_floor(improvement_pct: float, floor_pct: float = DEFAULT_MIN_IMPROVE_PERCENT) -> bool:
+    """Return True when the improvement meets the D-01 floor (inclusive >=)."""
+    return improvement_pct >= floor_pct
+
+
+def extract_perf_fields(document: Mapping[str, object]) -> tuple[float, str]:
+    """Return ``(median_seconds, manifest_sha256)`` from a report document.
+
+    Tolerates both the full timing-report shape (``summary.median_seconds`` +
+    ``corpus.manifest_sha256``) and the slim pinned-baseline shape
+    (top-level ``median_seconds`` + ``manifest_sha256``).
+
+    Raises:
+        ValueError: With an actionable message naming the expected keys when
+            neither median shape nor digest location is present/usable.
+    """
+    summary = document.get("summary")
+    corpus = document.get("corpus")
+
+    median_candidates: list[object] = []
+    if isinstance(summary, Mapping):
+        median_candidates.append(summary.get("median_seconds"))
+    median_candidates.append(document.get("median_seconds"))
+
+    digest_candidates: list[object] = []
+    if isinstance(corpus, Mapping):
+        digest_candidates.append(corpus.get("manifest_sha256"))
+    digest_candidates.append(document.get("manifest_sha256"))
+
+    median_value = next(
+        (
+            candidate
+            for candidate in median_candidates
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool)
+        ),
+        None,
+    )
+    digest_value = next(
+        (
+            candidate
+            for candidate in digest_candidates
+            if isinstance(candidate, str) and bool(candidate)
+        ),
+        None,
+    )
+
+    problems: list[str] = []
+    if median_value is None:
+        problems.append("median_seconds (expected summary.median_seconds or top-level)")
+    if digest_value is None:
+        problems.append("manifest_sha256 (expected corpus.manifest_sha256 or top-level)")
+    if problems:
+        raise ValueError(f"document is missing usable perf fields: {'; '.join(problems)}")
+    return float(median_value), str(digest_value)
+
+
+def _load_timing_report(path: Path) -> dict[str, object]:
+    """Load one timing-mode benchmark document, failing loudly when foreign.
+
+    Compare READ paths intentionally accept evidence files anywhere on disk;
+    only WRITER paths are root-confined under reports/benchmarks/.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except OSError as error:
+        raise BenchmarkError(f"{path}: cannot read compare document ({error})") from error
+    except json.JSONDecodeError as error:
+        raise BenchmarkError(f"{path}: not parseable JSON ({error})") from error
+
+    if not isinstance(data, dict):
+        raise BenchmarkError(f"{path}: compare document must be a JSON object")
+    if data.get("report_type") != "corpus_benchmark":
+        raise BenchmarkError(
+            f"{path}: field 'report_type' must be 'corpus_benchmark' "
+            f"(got {data.get('report_type')!r})"
+        )
+    if data.get("mode") != "timing":
+        raise BenchmarkError(f"{path}: field 'mode' must be 'timing' (got {data.get('mode')!r})")
+    return data
+
+
+def run_compare(pre_path: Path, post_path: Path, min_improve_percent: float) -> int:
+    """Compare two timing reports and enforce the D-01 floor via exit code."""
+    pre_median, pre_digest = extract_perf_fields(_load_timing_report(pre_path))
+    post_median, post_digest = extract_perf_fields(_load_timing_report(post_path))
+
+    # Dishonest-comparison guard (D-02): never compute an improvement number
+    # over different corpus inputs — refuse with both digests named.
+    if pre_digest != post_digest:
+        print("ERROR: refusing dishonest comparison across drifted corpora:", file=sys.stderr)
+        print(f"  pre  ({pre_path}): manifest_sha256={pre_digest}", file=sys.stderr)
+        print(f"  post ({post_path}): manifest_sha256={post_digest}", file=sys.stderr)
+        print("Re-capture both sides against the same pinned corpus snapshot.", file=sys.stderr)
+        return 1
+
+    improvement = improvement_percent(pre_median, post_median)
+    passes = meets_floor(improvement, min_improve_percent)
+
+    print("=== benchmark compare ===")
+    print(f"pre  median : {pre_median:.6f}s  ({pre_path})")
+    print(f"post median : {post_median:.6f}s  ({post_path})")
+    print(f"delta       : {pre_median - post_median:+.6f}s")
+    print(f"improvement : {improvement:.2f}%")
+    print(f"floor       : >= {min_improve_percent:.2f}%")
+    print("verdict     : PASS" if passes else "verdict     : FAIL")
+    print(json.dumps({
+        "pre_seconds": pre_median,
+        "post_seconds": post_median,
+        "improvement_percent": round(improvement, 6),
+        "floor_percent": min_improve_percent,
+        "passes": passes,
+    }))
+    return 0 if passes else 1
+
+
 # =========================================================================
 # MEASUREMENT LEGS
 # =========================================================================
@@ -408,13 +548,64 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json",
         type=Path,
-        required=True,
-        help="report destination under reports/benchmarks/ (required)",
+        default=None,
+        help=(
+            "report destination under reports/benchmarks/; required for timing "
+            "runs and for --compare-baseline (the fresh report becomes the post side)"
+        ),
+    )
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("PRE", "POST"),
+        default=None,
+        help=(
+            "document-only comparison of two existing timing reports; ignores "
+            "--corpus/--runs and writes nothing"
+        ),
+    )
+    parser.add_argument(
+        "--compare-baseline",
+        nargs="?",
+        const=DEFAULT_BASELINE_PATH,
+        default=None,
+        metavar="BASELINE",
+        help=(
+            "run a fresh timing leg (--json target becomes the post side), then "
+            f"compare against a pinned baseline (default: {DEFAULT_BASELINE_PATH})"
+        ),
+    )
+    parser.add_argument(
+        "--min-improve-percent",
+        type=float,
+        default=DEFAULT_MIN_IMPROVE_PERCENT,
+        help=(
+            f"inclusive improvement floor for compare exit codes "
+            f"(default: {DEFAULT_MIN_IMPROVE_PERCENT})"
+        ),
     )
     args = parser.parse_args(argv)
 
     try:
+        # Document-only mode: never touches the corpus directory.
+        if args.compare is not None:
+            pre_path = Path(args.compare[0])
+            post_path = Path(args.compare[1])
+            return run_compare(pre_path, post_path, args.min_improve_percent)
+
+        baseline_path: Path | None = (
+            Path(args.compare_baseline) if args.compare_baseline is not None else None
+        )
+        if baseline_path is not None and not baseline_path.is_file():
+            raise BenchmarkError(
+                f"baseline document not found: {baseline_path}; Plan 14-03 pins "
+                "tests/fixtures/benchmarks/corpus-baseline.json (any timing report "
+                "can seed it by writing a report to that path)"
+            )
+
         corpus_dir = args.corpus
+        if args.runs < 1:
+            parser.error("--runs must be >= 1")
         if not corpus_dir.is_dir():
             raise BenchmarkError(
                 f"corpus directory not found: {corpus_dir}; run `python run.py fetch` first"
@@ -424,10 +615,19 @@ def main(argv: list[str] | None = None) -> int:
                 f"corpus directory contains no *.txt files: {corpus_dir}; "
                 "run `python run.py fetch` first"
             )
-        if args.runs < 1:
-            parser.error("--runs must be >= 1")
+        if args.json is None:
+            parser.error("--json is required for timing runs")
 
         run_timing_leg(corpus_dir, args.runs, args.json)
+
+        if baseline_path is not None:
+            if not args.json.is_file():
+                raise BenchmarkError(
+                    "--compare-baseline requires a freshly written report: supply "
+                    "--json PATH under reports/benchmarks/ so the new timing leg "
+                    "becomes the comparison's post side"
+                )
+            return run_compare(baseline_path, args.json, args.min_improve_percent)
     except BenchmarkError as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
