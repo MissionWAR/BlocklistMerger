@@ -17,6 +17,8 @@ Usage:
         --min-improve-percent 15.0
     py -3.14 -m scripts.benchmark --corpus lists/_raw --runs 3 \
         --json reports/benchmarks/runs/post.json --compare-baseline
+    py -3.14 -m scripts.benchmark --corpus lists/_raw \
+        --track-memory --json reports/benchmarks/runs/pre-memory.json
 
 Exit codes:
     0  success; compare modes: improvement meets the floor
@@ -58,6 +60,17 @@ JSON schema (mode == "timing"):
       "per_run": [{"index": <int>, "elapsed_seconds": <float>,
                    "output_byte_size": <int>, "output_sha256": "<64 hex>"}]
     }
+
+JSON schema (mode == "memory", from --track-memory):
+    Common report_type/created_at/identity/corpus fields as timing mode, plus:
+    {
+      "mode": "memory",
+      "tracemalloc_current_bytes": <int >= 0>,
+      "tracemalloc_peak_bytes": <int > 0>
+    }
+    Memory numbers come from memory-leg invocations only: --track-memory
+    ignores --runs and never emits runs/durations_seconds/summary/per_run
+    keys, so profiler overhead can never contaminate wall-clock medians.
 """
 
 import argparse
@@ -70,6 +83,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tracemalloc
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Final, NamedTuple
@@ -519,6 +533,52 @@ def run_timing_leg(corpus_dir: Path, runs: int, json_path: Path) -> dict[str, ob
     return report
 
 
+def run_memory_leg(corpus_dir: Path, json_path: Path) -> dict[str, object]:
+    """Measure one compile's traced peak memory as its own invocation.
+
+    Tracemalloc adds real CPU overhead, so this leg is architecturally
+    separated from timing (research Pitfall 6): memory numbers come from
+    memory-leg invocations only, and this function deliberately records no
+    durations — combining the legs would corrupt the D-01 wall-clock floor.
+    """
+    entries = build_corpus_manifest(corpus_dir)
+    digest = manifest_digest(entries)
+
+    # Guard-railed start/get/stop idiom mirroring scripts/pipeline.py: only
+    # stop tracing when this leg started it.
+    stop_tracemalloc = not tracemalloc.is_tracing()
+    if stop_tracemalloc:
+        tracemalloc.start()
+    try:
+        with tempfile.TemporaryDirectory(prefix="blocklist-benchmark-") as temp_dir_name:
+            output_path = Path(temp_dir_name) / "compiled-output.txt"
+            compile_rules(iter_corpus_lines(corpus_dir), str(output_path))
+    finally:
+        current_bytes, peak_bytes = tracemalloc.get_traced_memory()
+        if stop_tracemalloc:
+            tracemalloc.stop()
+
+    report: dict[str, object] = {
+        "schema_version": 1,
+        "report_type": "corpus_benchmark",
+        "mode": "memory",
+        "created_at": _utc_timestamp(),
+        "identity": _python_identity(),
+        "corpus": {
+            "dir": str(corpus_dir),
+            "file_count": len(entries),
+            "total_bytes": sum(entry.byte_size for entry in entries),
+            "manifest_sha256": digest,
+        },
+        # Field names mirror scripts/pipeline.py MemoryProfile for parity.
+        "tracemalloc_current_bytes": current_bytes,
+        "tracemalloc_peak_bytes": peak_bytes,
+    }
+    _write_json_report(json_path, report)
+    print(f"memory leg complete: peak={peak_bytes} bytes; report written to {json_path}")
+    return report
+
+
 # =========================================================================
 # CLI INTERFACE
 # =========================================================================
@@ -552,6 +612,14 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "report destination under reports/benchmarks/; required for timing "
             "runs and for --compare-baseline (the fresh report becomes the post side)"
+        ),
+    )
+    parser.add_argument(
+        "--track-memory",
+        action="store_true",
+        help=(
+            "run the tracemalloc peak-memory leg instead of timing; ignores "
+            "--runs (memory numbers come from memory-leg invocations only)"
         ),
     )
     parser.add_argument(
@@ -604,7 +672,10 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         corpus_dir = args.corpus
-        if args.runs < 1:
+        # --track-memory ignores --runs: leg separation keeps tracemalloc's
+        # profiler overhead out of wall-clock medians (Pitfall 6), so the
+        # runs count is meaningless for memory legs and never validated.
+        if not args.track_memory and args.runs < 1:
             parser.error("--runs must be >= 1")
         if not corpus_dir.is_dir():
             raise BenchmarkError(
@@ -618,7 +689,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.json is None:
             parser.error("--json is required for timing runs")
 
-        run_timing_leg(corpus_dir, args.runs, args.json)
+        if args.track_memory:
+            run_memory_leg(corpus_dir, args.json)
+        else:
+            run_timing_leg(corpus_dir, args.runs, args.json)
 
         if baseline_path is not None:
             if not args.json.is_file():
