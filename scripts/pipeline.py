@@ -340,6 +340,7 @@ def _new_pipeline_stats() -> PipelineStats:
         "trimmed": 0,
         "abp_subdomain_pruned": 0,
         "tld_wildcard_pruned": 0,
+        "denyallow_wildcard_pruned": 0,
         "duplicate_pruned": 0,
         "whitelist_conflict_pruned": 0,
         "local_hostname_pruned": 0,
