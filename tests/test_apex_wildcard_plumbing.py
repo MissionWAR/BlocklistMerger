@@ -40,6 +40,7 @@ from scripts.pipeline import PipelineStats, _new_pipeline_stats, process_files
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
     REASON_APEX_COVERS_TLD_WILDCARD,
+    REASON_KEPT_BECAUSE_UNCERTAIN,
     CappedProofLedger,
 )
 
@@ -452,6 +453,185 @@ class TestApexWildcardPruning:
         assert stats_on.apex_covered_wildcard_pruned == 0
         summary_on = ledger_on.summary()
         assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_on["by_reason"]
+
+    # ------------------------------------------------------------------
+    # D-04-shaped placement shadow signature (Phase 16 plan 16-02, Task 2).
+    #
+    # The composite below drives 29 real removals past the 25-entry sample
+    # cap so every pin runs on genuine emission: tally == counter ==
+    # removed-set identity, total_records grows by exactly the removal
+    # count (Derived Implication 3 of D-16-01 -- deliberately UNLIKE the
+    # v1.2 denyallow signature where totals stayed stable), added lines
+    # stay empty, whitelist/uncertain buckets hold bit-identical across
+    # legs, and repeated flagged compiles are byte-deterministic.
+    # ------------------------------------------------------------------
+
+    def test_d04_shadow_signature_locks_on_real_prunes(self):
+        """Signature locks on a composite producing 29 real prunes past the cap."""
+        ledger_off = CappedProofLedger()
+        ledger_on = CappedProofLedger()
+        pair_tlds = [
+            "xyz",
+            "online",
+            "site",
+            "top",
+            "icu",
+            "club",
+            "shop",
+            "store",
+            "tech",
+            "cloud",
+            "space",
+            "website",
+            "fun",
+            "pro",
+            "cyou",
+            "live",
+            "life",
+            "world",
+            "today",
+            "email",
+            "link",
+            "zone",
+            "agency",
+            "digital",
+            "global",
+            "network",
+            "media",
+            "systems",
+        ]
+        composite = []
+        for tld in pair_tlds:
+            composite.append(f"||{tld}^")
+            composite.append(f"||*.{tld}^")
+        composite += [
+            "||autos^",
+            "||*.autos^",
+            "||*.autos^$important",
+            "||*.com^",
+            "||foo.com^$important",
+            "@@||whi.test^",
+            "||whi.test^",
+        ]
+
+        rules_off, stats_off = self._compile(composite, proof_ledger=ledger_off)
+        rules_on, stats_on = self._compile(
+            composite,
+            proof_ledger=ledger_on,
+            wildcard_apex_pruning=True,
+        )
+
+        summary_off = ledger_off.summary()
+        summary_on = ledger_on.summary()
+        removed = set(rules_off) - set(rules_on)
+
+        # Identity trio first (teeth ordering): uncapped tally, counter,
+        # removed-set size -- all on genuine write-time emission.
+        tally_on = summary_on["by_reason"][REASON_APEX_COVERS_TLD_WILDCARD]
+        assert tally_on == 29
+        assert stats_on.apex_covered_wildcard_pruned == 29
+        assert len(removed) == 29
+
+        expected_removed = {f"||*.{tld}^" for tld in pair_tlds} | {"||*.autos^"}
+        assert removed == expected_removed
+
+        added = set(rules_on) - set(rules_off)
+        assert added == set()
+
+        delta_total_records = summary_on["total_records"] - summary_off["total_records"]
+        assert delta_total_records == 29
+
+        apex_samples = [
+            record
+            for record in ledger_on.records
+            if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
+        ]
+        assert len(apex_samples) <= DEFAULT_SAMPLE_CAP
+
+        assert stats_off.whitelist_conflict_pruned == 1
+        assert stats_on.whitelist_conflict_pruned == 1
+
+        uncertain_off = summary_off["by_reason"][REASON_KEPT_BECAUSE_UNCERTAIN]
+        assert uncertain_off == 1
+        uncertain_on = summary_on["by_reason"][REASON_KEPT_BECAUSE_UNCERTAIN]
+        assert uncertain_on == 1
+
+        all_reasons = set(summary_off["by_reason"]) | set(summary_on["by_reason"])
+        for reason in sorted(all_reasons):
+            if reason == REASON_APEX_COVERS_TLD_WILDCARD:
+                continue
+            off_count = summary_off["by_reason"].get(reason)
+            on_count = summary_on["by_reason"].get(reason)
+            assert off_count == on_count
+
+        assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_off["by_reason"]
+
+    def test_flagged_compile_is_deterministic_across_runs(self):
+        """Two same-process flagged compiles are byte-equal with identical evidence."""
+        ledger_run1 = CappedProofLedger()
+        ledger_run2 = CappedProofLedger()
+        pair_tlds = [
+            "xyz",
+            "online",
+            "site",
+            "top",
+            "icu",
+            "club",
+            "shop",
+            "store",
+            "tech",
+            "cloud",
+            "space",
+            "website",
+            "fun",
+            "pro",
+            "cyou",
+            "live",
+            "life",
+            "world",
+            "today",
+            "email",
+            "link",
+            "zone",
+            "agency",
+            "digital",
+            "global",
+            "network",
+            "media",
+            "systems",
+        ]
+        composite = []
+        for tld in pair_tlds:
+            composite.append(f"||{tld}^")
+            composite.append(f"||*.{tld}^")
+        composite += [
+            "||autos^",
+            "||*.autos^",
+            "||*.autos^$important",
+            "||*.com^",
+            "||foo.com^$important",
+            "@@||whi.test^",
+            "||whi.test^",
+        ]
+
+        rules_run1, stats_run1 = self._compile(
+            composite,
+            proof_ledger=ledger_run1,
+            wildcard_apex_pruning=True,
+        )
+        rules_run2, stats_run2 = self._compile(
+            composite,
+            proof_ledger=ledger_run2,
+            wildcard_apex_pruning=True,
+        )
+
+        assert rules_run1 == rules_run2
+        stats1_count = stats_run1.apex_covered_wildcard_pruned
+        stats2_count = stats_run2.apex_covered_wildcard_pruned
+        assert stats1_count == stats2_count
+        by_reason_run1 = ledger_run1.summary()["by_reason"]
+        by_reason_run2 = ledger_run2.summary()["by_reason"]
+        assert by_reason_run1 == by_reason_run2
 
 
 # ----------------------------------------------------------------------
