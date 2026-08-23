@@ -44,6 +44,7 @@ PROOF_STATUS_UNPROVEN: Final[str] = "unproven"
 PROOF_STATUS_UNCERTAIN: Final[str] = "uncertain"
 PROOF_STATUS_NOT_APPLICABLE: Final[str] = "not_applicable"
 
+REASON_APEX_COVERS_TLD_WILDCARD: Final[str] = "apex_covers_tld_wildcard"
 REASON_DUPLICATE_RULE: Final[str] = "duplicate_rule"
 REASON_PARENT_COVERED: Final[str] = "parent_covered"
 REASON_WILDCARD_COVERED: Final[str] = "wildcard_covered"
@@ -78,6 +79,7 @@ __all__ = [
     "PROOF_STATUS_PROVEN",
     "PROOF_STATUS_UNCERTAIN",
     "PROOF_STATUS_UNPROVEN",
+    "REASON_APEX_COVERS_TLD_WILDCARD",
     "REASON_BADFILTER_DISABLED",
     "REASON_CROSS_FORMAT_BROADENED",
     "REASON_DENYALLOW_COVERED",

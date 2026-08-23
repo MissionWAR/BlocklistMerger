@@ -247,6 +247,7 @@ class CompileStats:
         abp_subdomain_pruned: Subdomain rules pruned by parent rules
         tld_wildcard_pruned: Rules pruned by TLD wildcards (e.g., ||*.autos^)
         denyallow_wildcard_pruned: Rules pruned by admissible $denyallow wildcard coverage
+        apex_covered_wildcard_pruned: TLD wildcard variants pruned by surviving apex coverage
         duplicate_pruned: Exact duplicate rules removed
         whitelist_conflict_pruned: Rules removed due to whitelist conflicts
         local_hostname_pruned: Local hostnames (localhost, etc.) skipped
@@ -285,6 +286,7 @@ class CompileStats:
     abp_subdomain_pruned: int = 0
     tld_wildcard_pruned: int = 0
     denyallow_wildcard_pruned: int = 0
+    apex_covered_wildcard_pruned: int = 0
     duplicate_pruned: int = 0
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
