@@ -23,6 +23,27 @@ The current hard-gate set is:
 - Schema v2 scoped hard canary failures when a scoped record explicitly sets
   `gate: hard` and fixture coverage proves the behavior is deterministic.
 
+### Previous-output extreme absolute delta recalibration
+
+On 2026-08-23 the hard gate `previous_output_extreme_absolute_delta` was raised
+from 1,000,000 to 2,000,000 rules. The gate is backed by the constant
+DEFAULT_PREVIOUS_EXTREME_ABSOLUTE_DELTA in scripts/release_validator.py.
+
+The first scheduled run after the v1.2 denyallow wildcard compression milestone
+legitimately shrank merged.txt by 1,074,698 rules (-22.9%) by folding many
+subdomain rules into denyallow wildcards. Source health, syntax checks,
+canaries, and the 25% drop-ratio guard all stayed green, so the old 1,000,000
+absolute guard blocked a healthy publish. The new value is sized from that
+measured legitimate churn plus headroom for further compression gains.
+
+The proportional protection is unchanged: previous_extreme_drop_ratio (25%)
+remains the guard against proportional collapses, and the absolute gate
+continues to catch raw-count catastrophes on top of it.
+
+This threshold was changed by maintainer decision with the validator constant,
+boundary tests in tests/test_release_validator.py, and this documentation
+updated in the same change set.
+
 ## Inspect-Only Evidence
 
 The release evidence sidecar at `reports/release-evidence.json` is diagnostic
