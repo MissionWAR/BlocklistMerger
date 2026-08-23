@@ -126,9 +126,7 @@ class TestApexCompilePlane:
         self._drive_once(ledger, "||*.autos^", "||autos^")
 
         matches = [
-            record
-            for record in ledger.records
-            if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
+            record for record in ledger.records if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
         ]
         assert len(matches) == 1
         record = matches[0]
@@ -170,10 +168,7 @@ class TestApexPipelineSpine:
         input_dir = tmp_path / "input"
         input_dir.mkdir()
         (input_dir / "list.txt").write_text(
-            "# apex flatten fixture\n"
-            "||example.com^\n"
-            "0.0.0.0 ads.example.net\n"
-            "||example.com^\n",
+            "# apex flatten fixture\n||example.com^\n0.0.0.0 ads.example.net\n||example.com^\n",
             encoding="utf-8",
         )
         output_file = tmp_path / "merged.txt"
