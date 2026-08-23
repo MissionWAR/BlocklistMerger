@@ -95,7 +95,6 @@ class TestApexCompilePlane:
             candidate=candidate,
             covering=covering,
         )
-        return candidate, covering
 
     def test_default_compile_is_byte_identical_with_zero_counter_and_no_apex_ledger_entries(self):
         """Default settings: output bytes unchanged, counter 0, reason absent."""
