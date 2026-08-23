@@ -1222,11 +1222,6 @@ def _exception_covers_block(exception: RuleEntry, block: RuleEntry) -> bool:
     )
 
 
-def _is_whitelisted(record: RuleEntry, exceptions: ExceptionRules) -> bool:
-    """Check whether any exception rule fully covers a block rule."""
-    return any(_exception_covers_block(exception, record) for exception in exceptions)
-
-
 def _find_covering_exception(record: RuleEntry, exceptions: ExceptionRules) -> RuleEntry | None:
     """Return the first exception that proves removal for a block rule."""
     for exception in exceptions:
