@@ -14,6 +14,7 @@ A tool that merges public DNS blocklists into a single, deduplicated file optimi
 - **Fetches** 80+ public DNS blocklists automatically
 - **Cleans** rules (removes comments, cosmetic rules, browser-only modifiers)
 - **Deduplicates** intelligently: subdomains covered by parent rules are removed
+- **Prunes** smarter since v1.2: rules made redundant by wildcard carriers are removed too — about 20% fewer rules with identical blocking
 - **Outputs** only AdGuard Home compatible rules
 - **Updates** every 12 hours via GitHub Actions
 
