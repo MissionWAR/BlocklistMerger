@@ -634,6 +634,8 @@ class TestSaveStatsJson:
             "trimmed": 10,
             "abp_subdomain_pruned": 200,
             "tld_wildcard_pruned": 50,
+            "denyallow_wildcard_pruned": 25,
+            "apex_covered_wildcard_pruned": 0,
             "duplicate_pruned": 50,
             "whitelist_conflict_pruned": 0,
             "local_hostname_pruned": 0,
