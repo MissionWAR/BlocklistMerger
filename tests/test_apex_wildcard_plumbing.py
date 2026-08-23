@@ -177,6 +177,53 @@ class TestApexPipelineSpine:
         assert stats["apex_covered_wildcard_pruned"] == 0
 
 
+class TestApexWildcardPruning:
+    """Both-flag-state legs for flag-gated apex-covered wildcard pruning."""
+
+    def _compile(self, lines, **compile_kwargs):
+        """Compile lines through the full pipeline, returning output and stats."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(lines, output, **compile_kwargs)
+            with open(output, encoding="utf-8") as f:
+                rules = [line.strip() for line in f if line.strip()]
+            return rules, stats
+
+    def test_tl03_golden_both_flag_states(self):
+        """TL-03 golden: identical input compiled under each flag state."""
+        ledger_off = CappedProofLedger()
+        ledger_on = CappedProofLedger()
+        lines = ["||autos^", "||*.autos^"]
+
+        rules_off, stats_off = self._compile(lines, proof_ledger=ledger_off)
+
+        assert rules_off == ["||*.autos^", "||autos^"]
+        assert stats_off.apex_covered_wildcard_pruned == 0
+        summary_off = ledger_off.summary()
+        assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_off["by_reason"]
+
+        rules_on, stats_on = self._compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_apex_pruning=True,
+        )
+
+        assert rules_on == ["||autos^"]
+        assert stats_on.apex_covered_wildcard_pruned == 1
+        matches = [
+            record
+            for record in ledger_on.records
+            if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
+        ]
+        assert len(matches) == 1
+        sample = matches[0].sample
+        assert sample["candidate_rule"] == "||*.autos^"
+        assert sample["covering_rule"] == "||autos^"
+        assert isinstance(sample["modifier_scope_proven"], bool)
+        assert sample["modifier_scope_proven"] is True
+        assert matches[0].fingerprint
+
+
 # ----------------------------------------------------------------------
 # Schema-era guards (Plan 15-02).
 #
