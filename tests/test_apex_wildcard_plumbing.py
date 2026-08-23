@@ -29,9 +29,12 @@ import tempfile
 # unit pinning; no Ruff-selected rule flags it.
 from scripts.compiler import (
     CompileStats,
+    _build_apex_survivor_index,
     _parse_abp_rule,
     _record_proven_pruning,
+    _rule_storage_key,
     compile_rules,
+    get_tld,
 )
 from scripts.pipeline import PipelineStats, _new_pipeline_stats, process_files
 from scripts.pruning_proof import (
@@ -222,6 +225,82 @@ class TestApexWildcardPruning:
         assert isinstance(sample["modifier_scope_proven"], bool)
         assert sample["modifier_scope_proven"] is True
         assert matches[0].fingerprint
+
+    # ------------------------------------------------------------------
+    # Builder-contract unit pins (Phase 16 plan 16-01, Task 2).
+    #
+    # These legs call _build_apex_survivor_index() DIRECTLY. Storages are
+    # built by parsing rule text through _parse_abp_rule and keying through
+    # the production derivations (_rule_storage_key for survivor buckets,
+    # the parse-time get_tld bucket key for wildcard buckets) so no pin
+    # ever exercises hand-invented keys.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _survivor_storage(rule_texts):
+        """Build pruned_abp-shaped storage via the real storage-key function."""
+        storage = {}
+        for text in rule_texts:
+            record = _parse_abp_rule(text)
+            assert record is not None
+            storage.setdefault(_rule_storage_key(record), []).append(record)
+        return storage
+
+    @staticmethod
+    def _wildcard_storage(rule_texts):
+        """Build abp_wildcards-shaped storage via the real parse-time bucketing."""
+        storage = {}
+        for text in rule_texts:
+            record = _parse_abp_rule(text)
+            assert record is not None
+            tld = get_tld(record.domain)
+            assert tld is not None
+            assert record.domain == tld  # fixture discipline: TLD-form wildcards only
+            storage.setdefault(tld, []).append(record)
+        return storage
+
+    def test_index_projects_same_key_survivors_only(self):
+        """Only wildcard keys holding same-key survivor buckets appear, by identity."""
+        survivors = self._survivor_storage(["||autos^", "||other^"])
+        wildcards = self._wildcard_storage(["||*.autos^"])
+        lone_survivor = survivors["autos"][0]
+
+        index = _build_apex_survivor_index(survivors, wildcards)
+
+        assert list(index) == ["autos"]
+        assert index["autos"] is survivors["autos"]
+        assert index["autos"][0] is lone_survivor
+        assert "other" not in index
+
+    def test_index_omits_keys_without_survivors(self):
+        """A wildcard key whose apex did not survive gets no index entry at all."""
+        unrelated = self._survivor_storage(["||other^"])
+        wildcards = self._wildcard_storage(["||*.autos^"])
+
+        index = _build_apex_survivor_index(unrelated, wildcards)
+
+        assert "autos" not in index
+        assert index == {}
+
+    def test_index_preserves_append_order_of_survivor_buckets(self):
+        """Projected buckets keep source insertion order element-for-element."""
+        survivors = self._survivor_storage(["||autos^", "||autos^$client=10.0.0.1"])
+        wildcards = self._wildcard_storage(["||*.autos^"])
+
+        index = _build_apex_survivor_index(survivors, wildcards)
+
+        assert len(index["autos"]) == 2
+        assert tuple(m.name for m in index["autos"][0].modifiers) == ()
+        assert tuple(m.name for m in index["autos"][1].modifiers) == ("client",)
+        assert index["autos"] == survivors["autos"]
+
+    def test_non_wildcard_storage_key_equals_record_domain(self):
+        """Non-wildcard storage keys equal record.domain (builder premise A4)."""
+        for text in ["||autos^", "||ads.example.com^", "||com^"]:
+            record = _parse_abp_rule(text)
+            assert record is not None
+            assert record.is_wildcard is False
+            assert _rule_storage_key(record) == record.domain
 
 
 # ----------------------------------------------------------------------
