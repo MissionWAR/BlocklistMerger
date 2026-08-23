@@ -847,8 +847,8 @@ def test_markdown_release_evidence_stays_compact(tmp_path: Path) -> None:
     [
         (74, 100, "previous_output_extreme_drop"),
         (201, 100, "previous_output_extreme_increase"),
-        (2_100_001, 1_000_000, "previous_output_extreme_absolute_delta"),
-        (100_000, 2_100_001, "previous_output_extreme_absolute_delta"),
+        (3_100_001, 1_000_000, "previous_output_extreme_absolute_delta"),
+        (100_000, 2_200_001, "previous_output_extreme_absolute_delta"),
     ],
     ids=["drop", "increase", "absolute-up", "absolute-down"],
 )
@@ -866,6 +866,24 @@ def test_previous_release_extreme_deltas_hard_fail(
 
     assert any(error["code"] == expected_code for error in summary.errors)
     assert not summary.warnings
+
+
+def test_previous_release_absolute_delta_within_recalibrated_guard_passes() -> None:
+    shrink = release_validator.validate_previous_output_delta(
+        current_count=3_624_096,
+        previous_count=4_698_794,
+        thresholds=release_validator.ReleaseThresholds(minimum_output_rules=1),
+    )
+    growth = release_validator.validate_previous_output_delta(
+        current_count=3_400_000,
+        previous_count=2_000_000,
+        thresholds=release_validator.ReleaseThresholds(minimum_output_rules=1),
+    )
+
+    assert not shrink.errors
+    assert not growth.errors
+    assert any(warning["code"] == "previous_output_moderate_delta" for warning in shrink.warnings)
+    assert any(warning["code"] == "previous_output_moderate_delta" for warning in growth.warnings)
 
 
 def test_previous_release_moderate_delta_and_missing_previous_warn_without_failure(
