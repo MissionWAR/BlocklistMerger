@@ -774,14 +774,14 @@ def print_summary(stats: PipelineStats) -> None:
     print(f"   Trimmed:           {stats['trimmed']:>10,}")
 
     print("\n🔧 Compilation pruned:")
-    print(f"   ABP subdomains:    {stats['abp_subdomain_pruned']:>10,}")
-    print(f"   TLD wildcards:     {stats['tld_wildcard_pruned']:>10,}")
-    print(f"   Denyallow wildcards:{stats['denyallow_wildcard_pruned']:>10,}")
-    print(f"   Apex-covered wildcards:{stats['apex_covered_wildcard_pruned']:>10,}")
-    print(f"   Duplicates:        {stats['duplicate_pruned']:>10,}")
-    print(f"   Whitelist conflict:{stats['whitelist_conflict_pruned']:>10,}")
-    print(f"   Local hostnames:   {stats['local_hostname_pruned']:>10,}")
-    print(f"   Malformed rules:   {stats['malformed_discarded']:>10,}")
+    print(f"   ABP subdomains:         {stats['abp_subdomain_pruned']:>10,}")
+    print(f"   TLD wildcards:          {stats['tld_wildcard_pruned']:>10,}")
+    print(f"   Denyallow wildcards:    {stats['denyallow_wildcard_pruned']:>10,}")
+    print(f"   Apex-covered wildcards: {stats['apex_covered_wildcard_pruned']:>10,}")
+    print(f"   Duplicates:             {stats['duplicate_pruned']:>10,}")
+    print(f"   Whitelist conflict:     {stats['whitelist_conflict_pruned']:>10,}")
+    print(f"   Local hostnames:        {stats['local_hostname_pruned']:>10,}")
+    print(f"   Malformed rules:        {stats['malformed_discarded']:>10,}")
 
     print("\n📦 Output breakdown:")
     print(
