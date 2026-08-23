@@ -2,6 +2,8 @@
 
 RUN-03 profiling uses a dedicated wrapper so the scheduled release pipeline stays compact.
 The default path uses only Python stdlib `cProfile` and `pstats`.
+For repeatable timed legs, cProfile hotspot captures, and tracked-baseline comparisons
+of the compiler itself, see [BENCHMARKS.md](BENCHMARKS.md).
 
 ## Stdlib Profile Run
 
