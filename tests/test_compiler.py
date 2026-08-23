@@ -598,13 +598,23 @@ class TestCompilerProofLedgerPlumbing:
         assert stats.formats_compressed == 2
         assert stats.compression_policy_broadened == 2
 
-    def test_compile_rules_signature_keeps_only_optional_proof_ledger(self):
+    def test_compile_rules_signature_keeps_optional_keywords_explicit(self):
+        """compile_rules() exposes only intentional keyword-only options.
+
+        proof_ledger stays the single optional instrumentation hook; the
+        Phase 14 denyallow flag joins it keyword-only with production-on
+        default True since v1.2 (D-04): the Plan B full-corpus shadow gate
+        proved the removal population exact before the default flipped, and
+        passing False explicitly restores pre-v1.2 keep-everything behavior.
+        """
         signature = inspect.signature(compile_rules)
         parameters = signature.parameters
 
-        assert list(parameters) == ["lines", "output_file", "proof_ledger"]
+        assert list(parameters) == ["lines", "output_file", "proof_ledger", "denyallow_pruning"]
         assert parameters["proof_ledger"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["proof_ledger"].default is None
+        assert parameters["denyallow_pruning"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters["denyallow_pruning"].default is True
         assert "stage_summaries" not in CompileStats.__dataclass_fields__
 
     def test_compiler_stage_summaries_are_aggregate_only_and_preserve_output(self):

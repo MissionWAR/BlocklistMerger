@@ -31,7 +31,9 @@ Modifier-Aware Pruning:
     $important    Child with $important must NOT be pruned by parent without it
     $badfilter    Never prune by a $badfilter parent (it disables rules, not blocks)
     $dnsrewrite   Never prune (has custom DNS response behavior)
-    $denyallow    Never prune (excludes specific domains)
+    $denyallow    A child CARRYING it is never pruned; children under a clean
+                  $denyallow TLD wildcard are pruned when provably disjoint
+                  (v1.2 denyallow-aware coverage, on by default)
     $dnstype      Only prune if parent blocks ALL types
     $client/$ctag Parent with restrictions can't prune unrestricted child
     ============  ================================================================
@@ -66,6 +68,7 @@ from scripts.pruning_proof import (
     PROOF_STATUS_UNCERTAIN,
     REASON_BADFILTER_DISABLED,
     REASON_CROSS_FORMAT_BROADENED,
+    REASON_DENYALLOW_COVERED,
     REASON_DNSREWRITE_CHANGED,
     REASON_DUPLICATE_RULE,
     REASON_EXCEPTION_COVERED,
@@ -88,6 +91,9 @@ from scripts.rule_semantics import (
     EFFECT_UNCERTAIN,
     EFFECT_UNSUPPORTED,
     ParsedModifier,
+    RuleEffect,
+    _denyallow_allow_set,
+    _domain_disjoint_from_all,
     canonical_modifier_signature,
     classify_rule_effect,
     modifier_names,
@@ -151,6 +157,8 @@ RuleDuplicateIndex = dict[RuleDuplicateKey, RuleEntry]
 RuleStorage = dict[str, list[RuleEntry]]
 WildcardStorage = dict[str, list[WildcardEntry]]
 ExceptionRules = list[RuleEntry]
+#: Exception domain -> append-ordered entries bucketed once per compile.
+ExceptionIndex = dict[str, list[RuleEntry]]
 
 # =============================================================================
 # CONFIGURATION CONSTANTS
@@ -220,26 +228,6 @@ LOCAL_HOSTNAMES: Final[frozenset[str]] = frozenset({
 })
 
 # =============================================================================
-# MODIFIER CONSTANTS
-# =============================================================================
-
-#: Modifiers with special behavior that should never be pruned.
-#: These modifiers have effects that can't be covered by a parent rule.
-SPECIAL_BEHAVIOR_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "badfilter",   # Disables other rules (meta-modifier)
-    "dnsrewrite",  # Custom DNS response (e.g., redirect to specific IP)
-    "denyallow",   # Excludes specific domains from blocking
-})
-
-#: Modifiers that restrict who is blocked (client-specific rules).
-#: A parent with these can't prune a child without them.
-CLIENT_RESTRICTION_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "client",  # Block only for specific client IP
-    "ctag",    # Block only for specific client tag
-})
-
-
-# =============================================================================
 # DATA STRUCTURES
 # =============================================================================
 
@@ -258,6 +246,7 @@ class CompileStats:
         other_kept: Other rules (regex, etc.) kept in output
         abp_subdomain_pruned: Subdomain rules pruned by parent rules
         tld_wildcard_pruned: Rules pruned by TLD wildcards (e.g., ||*.autos^)
+        denyallow_wildcard_pruned: Rules pruned by admissible $denyallow wildcard coverage
         duplicate_pruned: Exact duplicate rules removed
         whitelist_conflict_pruned: Rules removed due to whitelist conflicts
         local_hostname_pruned: Local hostnames (localhost, etc.) skipped
@@ -295,6 +284,7 @@ class CompileStats:
     # Pruning counts
     abp_subdomain_pruned: int = 0
     tld_wildcard_pruned: int = 0
+    denyallow_wildcard_pruned: int = 0
     duplicate_pruned: int = 0
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
@@ -353,6 +343,8 @@ def _parse_abp_rule(
     source_scope: str | None = None,
     source_reason: str | None = None,
     source_docs_source: str | None = None,
+    parsed_effect: RuleEffect | None = None,
+    parsed_syntax: RuleSyntax | None = None,
 ) -> AbpRuleRecord | None:
     """
     Parse an ABP domain rule into a structured compiler record.
@@ -360,15 +352,54 @@ def _parse_abp_rule(
     The public `extract_abp_info()` helper intentionally exposes the legacy
     names-only tuple. Compiler internals use this richer record so modifier
     values remain available for semantic duplicate and coverage decisions.
+
+    Args:
+        rule: ABP-style rule text to parse.
+        source_rule: Original cleaned input row before compression.
+        source_kind/source_effect/source_scope/source_reason/source_docs_source:
+            Precomputed provenance labels; any missing field falls back to a
+            fresh ``classify_rule_effect`` classification.
+        parsed_effect: Precomputed effect for ``source_rule or rule``. When
+            provided (and every source_* label is present), the internal
+            re-classification is skipped entirely — the hot pipeline path
+            always supplies it, so each row classifies exactly once.
+        parsed_syntax: Precomputed ``classify_rule_syntax(rule)`` result.
+            Only valid when ``rule`` is the exact same text that was
+            classified (the direct-ABP path); hosts/plain callers synthesize
+            a different rule string and must leave this as None.
+
+    Returns:
+        The structured record, or None when the rule has no ABP domain shape.
     """
-    pattern, modifier_text = split_pattern_and_modifiers(rule)
+    if parsed_syntax is not None:
+        # Same-text contract: pattern/modifier_text were split from `rule`.
+        pattern, modifier_text = parsed_syntax.pattern, parsed_syntax.modifier_text
+    else:
+        pattern, modifier_text = split_pattern_and_modifiers(rule)
     match = ABP_DOMAIN_PATTERN.match(pattern)
     if not match:
         return None
 
     modifiers = parse_modifier_text(modifier_text)
     names = modifier_names(modifiers)
-    proof_effect = classify_rule_effect(source_rule or rule)
+
+    # proof_effect feeds only the `or` fallbacks below; the pipeline path
+    # passes all six provenance labels plus parsed_effect, so it stays None
+    # there and the third full classification per row disappears. Falsy (not
+    # just None) labels trigger classification to preserve the legacy
+    # `source_x or proof_effect.x` fallback contract exactly.
+    needs_effect = (
+        not source_kind
+        or not source_effect
+        or not source_scope
+        or not source_reason
+        or not source_docs_source
+    )
+    proof_effect: RuleEffect | None
+    if parsed_effect is not None or not needs_effect:
+        proof_effect = parsed_effect
+    else:
+        proof_effect = classify_rule_effect(source_rule or rule)
 
     return AbpRuleRecord(
         rule=rule,
@@ -379,6 +410,9 @@ def _parse_abp_rule(
         is_exception=match.group(1) is not None,
         is_wildcard=match.group(2) is not None,
         source_rule=source_rule or rule,
+        # Runtime-safe by construction: whenever every explicit source_* label
+        # above is missing/empty, needs_effect forced a classification, so the
+        # fallbacks never dereference a None proof_effect.
         source_kind=source_kind or proof_effect.syntax_kind,
         source_effect=source_effect or proof_effect.effect,
         source_scope=source_scope or proof_effect.scope,
@@ -893,64 +927,6 @@ def walk_parent_domains(domain: str) -> tuple[str, ...]:
     return tuple(parents)
 
 
-def should_prune_by_modifiers(child_mods: frozenset[str], parent_mods: frozenset[str]) -> bool:
-    """
-    Determine if a child rule is redundant given the parent's modifiers.
-
-    This function implements the modifier-aware pruning logic that ensures
-    we don't incorrectly remove rules with special behavior.
-
-    Args:
-        child_mods: Modifiers on the child (subdomain) rule
-        parent_mods: Modifiers on the parent rule
-
-    Returns:
-        True if child can be safely pruned (parent covers it), False otherwise
-
-    Pruning Rules:
-        1. $badfilter parent → Never prune (it disables rules, doesn't block)
-        2. $important child → Keep if parent lacks $important
-        3. $dnsrewrite/$denyallow/$badfilter child → Never prune (special behavior)
-        4. $dnstype mismatch → Child blocking ALL types not covered by parent blocking ONE
-        5. $client/$ctag parent → Child without restrictions blocks more broadly
-
-    Example:
-        >>> should_prune_by_modifiers(frozenset(), frozenset())
-        True
-        >>> should_prune_by_modifiers(frozenset({'important'}), frozenset())
-        False  # Child's $important takes priority
-    """
-    # Fast path: no modifiers on either side (most common case ~90%+)
-    # This avoids all the set operations below
-    if not child_mods and not parent_mods:
-        return True
-
-    # Special-behavior parents are not broad blocking coverage.
-    if parent_mods & SPECIAL_BEHAVIOR_MODIFIERS:
-        return False
-
-    # Child's $important overrides non-important parent
-    if "important" in child_mods and "important" not in parent_mods:
-        return False
-
-    # Special behavior modifiers are never redundant
-    if child_mods & SPECIAL_BEHAVIOR_MODIFIERS:
-        return False
-
-    # Handle $dnstype: parent blocking ALL types covers child blocking specific type,
-    # but not vice versa (child blocking ALL not covered by parent blocking ONE)
-    if "dnstype" in child_mods:
-        if "dnstype" in parent_mods:
-            return False  # Can't compare values, be conservative
-        # else: parent blocks ALL types, covers child's specific type
-    elif "dnstype" in parent_mods:
-        return False  # Child blocks ALL types, parent only blocks one type
-
-    # $client/$ctag restrict WHO is blocked. Restricted parents cannot prove
-    # coverage for unrestricted children or differently restricted children.
-    return not parent_mods & CLIENT_RESTRICTION_MODIFIERS
-
-
 # =============================================================================
 # HELPER FUNCTIONS FOR COMPILATION PHASES
 # =============================================================================
@@ -972,10 +948,14 @@ def _parse_and_compress_lines(
         if not (line := line.strip()):
             continue
 
-        effect = classify_rule_effect(line)
+        # Classify the raw row once and thread the results everywhere below:
+        # effect consumes the syntax object, and _parse_abp_rule receives both
+        # instead of re-running the same splits/scans (profile-proven 3x/line
+        # parse concentration, Phase 14 PERF-01).
+        syntax = classify_rule_syntax(line)
+        effect = classify_rule_effect(line, syntax=syntax)
         _record_rule_effect(stats, effect.effect, effect.uncertain)
 
-        syntax = classify_rule_syntax(line)
         if syntax.has_url_path or syntax.is_invalid:
             _record_nonblocking_proof(
                 proof_ledger,
@@ -1007,6 +987,8 @@ def _parse_and_compress_lines(
                 source_scope=effect.scope,
                 source_reason=effect.reason,
                 source_docs_source=effect.docs_source,
+                parsed_effect=effect,
+                parsed_syntax=syntax,
             )
 
             if record is None:
@@ -1068,6 +1050,7 @@ def _parse_and_compress_lines(
                     source_scope=effect.scope,
                     source_reason=effect.reason,
                     source_docs_source=effect.docs_source,
+                    parsed_effect=effect,
                 )
                 if record is not None and _store_rule_variant(
                     abp_rules,
@@ -1102,6 +1085,7 @@ def _parse_and_compress_lines(
                     source_scope=effect.scope,
                     source_reason=effect.reason,
                     source_docs_source=effect.docs_source,
+                    parsed_effect=effect,
                 )
                 if record is not None and _store_rule_variant(
                     abp_rules,
@@ -1257,6 +1241,71 @@ def _find_domain_scope_exception(record: RuleEntry, exceptions: ExceptionRules) 
     return None
 
 
+# ---------------------------------------------------------------------------
+# Indexed exception lookups (Phase 14 PERF-01, profile-proven hotspot)
+#
+# The legacy helpers above scan every exception per candidate record —
+# O(records x exceptions) full-coverage predicate calls dominated the Phase 14
+# cProfile ranking (~1.6k cumulative seconds over ~3.55M candidates). The
+# domain-scope predicate reduces to block.domain == exception.domain OR
+# exception.domain in walk_parent_domains(block.domain), so bucketing each
+# exception under its own normalized domain makes every candidate's probe-key
+# set [domain, *walk_parent_domains(domain)] a superset of every possible
+# covering exception's key (exact set-equivalence by definition).
+# ---------------------------------------------------------------------------
+
+
+def _build_exception_index(exceptions: ExceptionRules) -> ExceptionIndex:
+    """Bucket exceptions under their own normalized domain, preserving append order."""
+    index: ExceptionIndex = {}
+    for exception in exceptions:
+        index.setdefault(exception.domain, []).append(exception)
+    return index
+
+
+def _exception_probe_keys(record: RuleEntry) -> tuple[str, ...]:
+    """Return index keys able to hold exceptions whose scope covers ``record``."""
+    return (record.domain, *walk_parent_domains(record.domain))
+
+
+def _find_covering_exception_indexed(
+    record: RuleEntry,
+    index: ExceptionIndex,
+) -> RuleEntry | None:
+    """Return the first fully-covering exception found through the index.
+
+    Buckets keep append order and probe keys run most-specific first, so the
+    returned WITNESS may differ from the legacy global-first scan when several
+    differently-keyed exceptions cover one candidate. Output bytes, all stats
+    counters, and ledger reason buckets are existence-based and unaffected;
+    only capped ledger samples could differ (accepted per assumption A5 and
+    re-verified by the slow corpus audit at the ship gate).
+    """
+    for key in _exception_probe_keys(record):
+        bucket = index.get(key)
+        if not bucket:
+            continue
+        for exception in bucket:
+            if _exception_covers_block(exception, record):
+                return exception
+    return None
+
+
+def _find_domain_scope_exception_indexed(
+    record: RuleEntry,
+    index: ExceptionIndex,
+) -> RuleEntry | None:
+    """Return the first domain-scope-matching exception via the index."""
+    for key in _exception_probe_keys(record):
+        bucket = index.get(key)
+        if not bucket:
+            continue
+        for exception in bucket:
+            if _exception_domain_scope_covers(exception, record):
+                return exception
+    return None
+
+
 def _any_parent_record_covers(child: RuleEntry, parents: list[RuleEntry]) -> bool:
     """Return True when any parent variant proves coverage for a child variant."""
     return any(
@@ -1270,6 +1319,27 @@ def _find_covering_parent_record(child: RuleEntry, parents: list[RuleEntry]) -> 
     for parent in parents:
         if modifier_scope_covers(parent.modifiers, child.modifiers):
             return parent
+    return None
+
+
+def _find_denyallow_covering_variant(
+    child: RuleEntry,
+    variants: list[RuleEntry],
+    tld: str,
+) -> RuleEntry | None:
+    """Return the first wildcard variant whose admissible $denyallow set covers a child.
+
+    Iterates variants in storage (append) order so multi-variant TLD keys
+    resolve deterministically. A variant proves coverage only when its parsed
+    modifiers reduce to exactly one clean $denyallow record (see
+    ``_denyallow_allow_set``) AND every allow-entry is fully disjoint from the
+    child's normalized domain under the three-way subtree test (see
+    ``_domain_disjoint_from_all``).
+    """
+    for variant in variants:
+        allow_set = _denyallow_allow_set(variant.modifiers, tld)
+        if allow_set is not None and _domain_disjoint_from_all(child.domain, allow_set):
+            return variant
     return None
 
 
@@ -1343,15 +1413,37 @@ def _prune_redundant_rules(
     exceptions: ExceptionRules,
     stats: CompileStats,
     proof_ledger: ProofLedger | None,
+    denyallow_pruning: bool = False,
+    *,
+    exception_index: ExceptionIndex | None = None,
 ) -> RuleStorage:
-    """Phase 3: Remove redundant subdomain and whitelist-conflicted rules."""
+    """Phase 3: Remove redundant subdomain and whitelist-conflicted rules.
+
+    Args:
+        abp_rules: Blocking ABP records keyed by storage domain.
+        abp_wildcards: TLD wildcard records keyed by suffix.
+        tld_wildcards: Set of wildcard suffix keys for O(1) membership checks.
+        exceptions: Exception (whitelist) records in input order.
+        stats: Mutable compilation statistics.
+        proof_ledger: Optional proof-decision ledger.
+        denyallow_pruning: Attempt last-resort denyallow coverage proofs.
+        exception_index: Prebuilt exception domain index; when provided both
+            exception lookups use indexed probes, otherwise the legacy linear
+            scans run so direct internal callers stay valid.
+
+    Returns:
+        Surviving blocking records keyed by domain.
+    """
     pruned_abp: RuleStorage = {}
 
     for domain, records in abp_rules.items():
         for record in records:
             clean_domain = record.domain
 
-            covering_exception = _find_covering_exception(record, exceptions)
+            if exception_index is not None:
+                covering_exception = _find_covering_exception_indexed(record, exception_index)
+            else:
+                covering_exception = _find_covering_exception(record, exceptions)
             if covering_exception is not None:
                 stats.whitelist_conflict_pruned += 1
                 _record_proven_pruning(
@@ -1368,7 +1460,13 @@ def _prune_redundant_rules(
                     ),
                 )
                 continue
-            uncertain_covering = _find_domain_scope_exception(record, exceptions)
+            if exception_index is not None:
+                uncertain_covering = _find_domain_scope_exception_indexed(
+                    record,
+                    exception_index,
+                )
+            else:
+                uncertain_covering = _find_domain_scope_exception(record, exceptions)
             uncertain_reason = "exception_domain_scope_matched_modifier_scope_unproven"
 
             tld = get_tld(clean_domain)
@@ -1436,6 +1534,35 @@ def _prune_redundant_rules(
                     covering=covering_parent,
                 )
             else:
+                # Last-resort denyallow proof (D-04 Plan A): attempted BEFORE
+                # recording the uncertain keep so the shadow-gate signature
+                # holds exactly — kept_because_uncertain drops by precisely
+                # the denyallow count with total_records unchanged, instead of
+                # double-counting one rule in both buckets. The gate on
+                # uncertain_reason == "tld_wildcard_modifier_scope_unproven"
+                # makes abp_wildcards[tld] safe to index: that reason is only
+                # set inside the TLD branch above where tld is non-empty, the
+                # key exists, and later walks cannot overwrite it because they
+                # only fire while uncertain_covering is still None.
+                if (
+                    denyallow_pruning
+                    and uncertain_reason == "tld_wildcard_modifier_scope_unproven"
+                    and modifier_scope_covers((), record.modifiers)
+                ):
+                    denyallow_variant = _find_denyallow_covering_variant(
+                        record,
+                        abp_wildcards[tld],
+                        tld,
+                    )
+                    if denyallow_variant is not None:
+                        stats.denyallow_wildcard_pruned += 1
+                        _record_proven_pruning(
+                            proof_ledger,
+                            reason=REASON_DENYALLOW_COVERED,
+                            candidate=record,
+                            covering=denyallow_variant,
+                        )
+                        continue
                 if uncertain_covering is not None:
                     _record_uncertain_keep(
                         proof_ledger,
@@ -1456,8 +1583,23 @@ def _write_output(
     exceptions: ExceptionRules,
     other_rules: set[str],
     proof_ledger: ProofLedger | None,
+    *,
+    exception_index: ExceptionIndex | None = None,
 ) -> None:
-    """Phase 4: Write deduplicated rules to output atomically."""
+    """Phase 4: Write deduplicated rules to output atomically.
+
+    Args:
+        output_file: Destination path for the merged list.
+        stats: Mutable compilation statistics.
+        abp_wildcards: TLD wildcard records keyed by suffix.
+        pruned_abp: Surviving blocking records from the pruning phase.
+        exceptions: Exception (whitelist) records in input order.
+        other_rules: Non-ABP rules preserved verbatim, sorted at write time.
+        proof_ledger: Optional proof-decision ledger.
+        exception_index: Prebuilt exception domain index; when provided the
+            write-time whitelist scan uses indexed probes, otherwise the
+            legacy linear scan runs so direct internal callers stay valid.
+    """
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_suffix(".tmp")
@@ -1465,7 +1607,10 @@ def _write_output(
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
         for records in abp_wildcards.values():
             for record in records:
-                covering_exception = _find_covering_exception(record, exceptions)
+                if exception_index is not None:
+                    covering_exception = _find_covering_exception_indexed(record, exception_index)
+                else:
+                    covering_exception = _find_covering_exception(record, exceptions)
                 if covering_exception is not None:
                     stats.whitelist_conflict_pruned += 1
                     _record_proven_pruning(
@@ -1507,6 +1652,7 @@ def compile_rules(
     output_file: str,
     *,
     proof_ledger: ProofLedger | None = None,
+    denyallow_pruning: bool = True,
 ) -> CompileStats:
     """
     Compile and deduplicate rules with format compression.
@@ -1520,6 +1666,12 @@ def compile_rules(
         lines: Iterable of rule strings to compile (e.g., list, generator, or file object)
         output_file: Path to write the compiled output
         proof_ledger: Optional append-only ledger for compiler proof decisions.
+        denyallow_pruning: Attempt last-resort denyallow coverage proofs at TLD
+            wildcards whose modifiers reduce to exactly one clean $denyallow record;
+            prunes only children fully disjoint from every allow-entry subtree.
+            Production-on since v1.2 (D-04): the full-corpus shadow gate proved
+            removals are exactly the provably-covered population before this default
+            flipped True. Pass False to restore pre-v1.2 keep-everything behavior.
 
     Returns:
         CompileStats with metrics about the compilation process
@@ -1557,6 +1709,11 @@ def compile_rules(
     # PHASE 2: Build coverage lookup set
     tld_wildcards = _build_coverage_lookups(abp_wildcards)
 
+    # PHASE 2b: Bucket exceptions by domain once so both exception scans
+    # (prune time and write time) probe O(depth) buckets instead of scanning
+    # the whole exception list per candidate (profile-proven PERF-01 slice).
+    exception_index = _build_exception_index(exceptions)
+
     # PHASE 3: Prune ABP subdomain rules
     pruned_abp = _prune_redundant_rules(
         abp_rules=abp_rules,
@@ -1565,6 +1722,8 @@ def compile_rules(
         exceptions=exceptions,
         stats=stats,
         proof_ledger=proof_ledger,
+        denyallow_pruning=denyallow_pruning,
+        exception_index=exception_index,
     )
 
     # PHASE 4: Output to file
@@ -1576,6 +1735,7 @@ def compile_rules(
         exceptions=exceptions,
         other_rules=other_rules,
         proof_ledger=proof_ledger,
+        exception_index=exception_index,
     )
 
     return stats

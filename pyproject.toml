@@ -41,3 +41,6 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: long-running full-corpus audit tests (deselected unless --run-slow is passed)",
+]

@@ -11,6 +11,39 @@ import pytest
 from scripts.compiler import clear_caches
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register the --run-slow flag that unlocks slow full-corpus audit tests."""
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="Run slow tests (full-corpus audits over lists/_raw/ that take minutes)",
+    )
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Deselect slow-marked tests unless --run-slow is passed.
+
+    The default suite must stay fast and runnable on checkouts without the
+    production corpus; slow-marked tests only join the run when explicitly
+    requested.
+    """
+    if config.getoption("--run-slow"):
+        return
+
+    remaining: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        if item.get_closest_marker("slow"):
+            deselected.append(item)
+        else:
+            remaining.append(item)
+
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = remaining
+
+
 @pytest.fixture(autouse=True)
 def _clear_lru_caches():
     """Clear compiler LRU caches between tests to prevent bleed."""

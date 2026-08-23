@@ -11,11 +11,13 @@ downstream code can keep rules instead of proving unsafe equivalence.
 from typing import Final, NamedTuple
 
 from scripts.rule_syntax import (
+    PLAIN_DOMAIN_PATTERN,
     RULE_KIND_ABP,
     RULE_KIND_HOSTS,
     RULE_KIND_INVALID,
     RULE_KIND_PLAIN_DOMAIN,
     RULE_KIND_REGEX,
+    RuleSyntax,
     classify_rule_syntax,
 )
 
@@ -458,19 +460,24 @@ def canonical_modifier_signature(modifiers: tuple[ParsedModifier, ...]) -> tuple
     return tuple(sorted(_modifier_signature(modifier) for modifier in modifiers))
 
 
-def classify_rule_effect(rule: str) -> RuleEffect:
+def classify_rule_effect(rule: str, *, syntax: RuleSyntax | None = None) -> RuleEffect:
     """
     Classify a raw rule's DNS effect before compression or pruning.
 
     Args:
         rule: Raw cleaned rule text.
+        syntax: Optional precomputed ``classify_rule_syntax(rule)`` result.
+            Callers that already classified the same raw line (the compiler's
+            parse phase) pass it here so the split/scan work runs exactly once
+            per row; the classification outcome is identical either way.
 
     Returns:
         A `RuleEffect` diagnostic record. The result explains syntax/effect
         semantics only; it does not resolve `badfilter`, delete exceptions, or
         prove structural pruning coverage.
     """
-    syntax = classify_rule_syntax(rule)
+    if syntax is None:
+        syntax = classify_rule_syntax(rule)
     modifiers = parse_modifier_text(syntax.modifier_text)
     names = modifier_names(modifiers)
 
@@ -675,3 +682,100 @@ def modifier_scope_covers(
             return False
 
     return True
+
+
+def _denyallow_allow_set(
+    modifiers: tuple[ParsedModifier, ...],
+    tld: str,
+) -> frozenset[str] | None:
+    """
+    Return the normalized `$denyallow` allow-set for an admissible wildcard variant.
+
+    A variant is denyallow-admissible only when its modifiers reduce to exactly
+    one clean record: `name == "denyallow"`, no name-level negation, no
+    uncertainty, a present raw value, and at least one value entry where every
+    decoded value is non-negated, non-empty, and a syntactically valid plain
+    domain. Any entry equal to the wildcard's TLD key makes the rule degenerate
+    (it would exempt everything it could match), so the variant is rejected.
+    Anything else returns None so callers keep the conservative uncertain-keep
+    behavior instead of proving coverage.
+
+    Args:
+        modifiers: Parsed modifier records of one candidate wildcard variant.
+        tld: The wildcard's TLD storage key (e.g., "com" for `||*.com^`).
+
+    Returns:
+        Frozenset of normalized allow-entry domains when admissible, else None.
+
+    Example:
+        >>> mods = parse_modifier_text("denyallow=A.Example.com")
+        >>> sorted(_denyallow_allow_set(mods, "com"))
+        ['a.example.com']
+    """
+    if len(modifiers) != 1:
+        return None
+
+    modifier = modifiers[0]
+    if (
+        modifier.name != "denyallow"
+        or modifier.negated
+        or modifier.uncertain
+        or modifier.raw_value is None
+        or not modifier.values
+    ):
+        return None
+
+    entries: set[str] = set()
+    for value in modifier.values:
+        if value.negated or not value.value:
+            # Undocumented value syntax can never prove coverage; keep instead.
+            return None
+        # Normalize with the same transform as compiler.normalize_domain() minus
+        # sys.intern: interning is memory-only and equality semantics are
+        # identical, but importing compiler here would be circular because
+        # compiler.py imports this module.
+        entry = value.value.lower().strip().rstrip(".")
+        if not PLAIN_DOMAIN_PATTERN.fullmatch(entry):
+            return None
+        if entry == tld:
+            # Degenerate self-referential exemption (`denyallow=com` on
+            # ||*.com^) exempts everything the wildcard could block.
+            return None
+        entries.add(entry)
+
+    return frozenset(entries)
+
+
+def _domain_disjoint_from_all(domain: str, entries: frozenset[str]) -> bool:
+    """
+    Return True when no allow-entry shares subtree overlap with the domain.
+
+    Implements the three-way disjointness test required by official AdGuard
+    `$denyallow` semantics: an entry exempts itself AND its entire subdomain
+    subtree, so coverage holds only when every entry is fully disjoint from
+    the candidate domain. Exact matches and ancestor entries share subtrees by
+    definition; descendant entries (strictly below the domain) are the safety
+    correction to FINDINGS §8 item 2's sketch — `||*.com^$denyallow=
+    safe.example.com` never covers `||example.com^` because safe.example.com
+    stays unblocked inside the child's blocked set.
+
+    Args:
+        domain: Normalized candidate domain (lowercase, no trailing dot).
+        entries: Normalized allow-set entries from `_denyallow_allow_set()`.
+
+    Returns:
+        True when no entry equals the domain or sits above/below it in the
+        DNS tree; False as soon as any overlap forces a KEEP decision.
+
+    Example:
+        >>> _domain_disjoint_from_all("adjust.world", frozenset({"boo.world"}))
+        True
+        >>> _domain_disjoint_from_all("example.com", frozenset({"safe.example.com"}))
+        False
+    """
+    return not any(
+        domain == entry
+        or domain.endswith("." + entry)
+        or entry.endswith("." + domain)
+        for entry in entries
+    )
