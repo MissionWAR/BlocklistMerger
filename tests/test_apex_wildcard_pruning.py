@@ -28,6 +28,7 @@ import pytest
 
 from scripts.compiler import compile_rules
 from scripts.pruning_proof import REASON_APEX_COVERS_TLD_WILDCARD, CappedProofLedger
+from scripts.stage_diagnostics import COMPILER_STAGE_PRUNE, compiler_stage_summaries_from_stats
 
 # ----------------------------------------------------------------------
 # D-16-03 six-row AW modifier-asymmetry matrix.
@@ -91,17 +92,25 @@ ROWS = (
 )
 
 
+# ----------------------------------------------------------------------
+# Shared both-state compile helper (hoisted to module level in Task 2 so
+# TestApexWildcardMatrix and TestApexStageReconciliation share ONE copy;
+# body verbatim from TestApexCompilePlane._compile in the plumbing module).
+# ----------------------------------------------------------------------
+
+
+def _compile(lines, **compile_kwargs):
+    """Compile lines through the full pipeline, returning output and stats."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = os.path.join(tmpdir, "output.txt")
+        stats = compile_rules(lines, output, **compile_kwargs)
+        with open(output, encoding="utf-8") as f:
+            rules = [line.strip() for line in f if line.strip()]
+        return rules, stats
+
+
 class TestApexWildcardMatrix:
     """D-16-03 six-row AW matrix asserted in BOTH flag states, plus deep dives."""
-
-    def _compile(self, lines, **compile_kwargs):
-        """Compile lines through the full pipeline, returning output and stats."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output = os.path.join(tmpdir, "output.txt")
-            stats = compile_rules(lines, output, **compile_kwargs)
-            with open(output, encoding="utf-8") as f:
-                rules = [line.strip() for line in f if line.strip()]
-            return rules, stats
 
     @pytest.mark.parametrize(
         (
@@ -149,14 +158,14 @@ class TestApexWildcardMatrix:
         ledger_off = CappedProofLedger()
         ledger_on = CappedProofLedger()
 
-        rules_off, stats_off = self._compile(lines, proof_ledger=ledger_off)
+        rules_off, stats_off = _compile(lines, proof_ledger=ledger_off)
 
         assert rules_off == expected_off_output
         assert stats_off.apex_covered_wildcard_pruned == expected_off_counter
         summary_off = ledger_off.summary()
         assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_off["by_reason"]
 
-        rules_on, stats_on = self._compile(
+        rules_on, stats_on = _compile(
             lines,
             proof_ledger=ledger_on,
             wildcard_apex_pruning=True,
@@ -174,7 +183,7 @@ class TestApexWildcardMatrix:
         """Row-2 deep dive: the one flagged removal carries exact D-04 witness detail."""
         ledger_on = CappedProofLedger()
 
-        _, stats_on = self._compile(
+        _, stats_on = _compile(
             ["||autos^$client=10.0.0.1", "||*.autos^$client=10.0.0.1"],
             proof_ledger=ledger_on,
             wildcard_apex_pruning=True,
@@ -204,12 +213,53 @@ class TestApexWildcardMatrix:
         """
         lines = ["||autos^$badfilter", "||*.autos^"]
 
-        rules_off, stats_off = self._compile(lines)
+        rules_off, stats_off = _compile(lines)
 
         assert stats_off.rule_effect_disable == 1
         assert "||autos^$badfilter" not in rules_off
 
-        rules_on, stats_on = self._compile(lines, wildcard_apex_pruning=True)
+        rules_on, stats_on = _compile(lines, wildcard_apex_pruning=True)
 
         assert stats_on.rule_effect_disable == 1
         assert "||autos^$badfilter" not in rules_on
+
+
+class TestApexStageReconciliation:
+    """OQ#3: close the 15-SECURITY Unregistered-Flags fence with evidence.
+
+    scripts/stage_diagnostics.py is READ-ONLY here BY DESIGN -- these legs
+    prove auto-pickup in BOTH directions (the apex bucket surfaces under a
+    nonzero flagged counter, stays absent by default) plus zero-safety on a
+    missing-key Mapping source, all through the missing-key-safe ``_stat``
+    getter (stage_diagnostics.py:102-108) feeding the prune-stage reasons
+    dict (:222-271). One byte of change to that module would defeat the point.
+    """
+
+    def test_flagged_prune_stage_surfaces_apex_covered_bucket(self):
+        """Flag ON: the nonzero apex counter surfaces as {"apex_covered": 1}."""
+        _, stats_on = _compile(["||autos^", "||*.autos^"], wildcard_apex_pruning=True)
+
+        summaries = compiler_stage_summaries_from_stats(stats_on)
+
+        assert summaries[COMPILER_STAGE_PRUNE]["reasons"] == {"apex_covered": 1}
+        assert summaries[COMPILER_STAGE_PRUNE]["discarded"] == 1
+        assert summaries[COMPILER_STAGE_PRUNE]["emitted"] == 1
+
+    def test_default_off_prune_stage_omits_apex_covered_bucket(self):
+        """Default OFF: prune-stage reasons stay empty; explicit absence companion."""
+        _, stats_off = _compile(["||autos^", "||*.autos^"])
+
+        summaries = compiler_stage_summaries_from_stats(stats_off)
+
+        assert summaries[COMPILER_STAGE_PRUNE]["reasons"] == {}
+        assert "apex_covered" not in summaries[COMPILER_STAGE_PRUNE]["reasons"]
+
+    def test_missing_key_mapping_projection_stays_zero_safe(self):
+        """An empty Mapping source projects cleanly with empty prune reasons.
+
+        Direct evidence for the missing-key-safe fence the 15-SECURITY
+        Unregistered-Flags finding asked this phase to reconcile.
+        """
+        summaries = compiler_stage_summaries_from_stats({})
+
+        assert summaries[COMPILER_STAGE_PRUNE]["reasons"] == {}
