@@ -40,6 +40,7 @@ from scripts.compiler import CompileStats, clear_caches, compile_rules
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
     OUTCOME_KEPT,
+    REASON_APEX_COVERS_TLD_WILDCARD,
     REASON_DENYALLOW_COVERED,
     REASON_EXCEPTION_COVERED,
     REASON_KEPT_BECAUSE_UNCERTAIN,
@@ -787,6 +788,25 @@ class TestShadowComparisonMachinery:
 
         assert first.off_lines == second.off_lines
         assert first.on_lines == second.on_lines
+
+    def test_apex_covers_tld_wildcard_zero_pairing_in_both_shadow_legs(self):
+        """Fast fixture twin of the corpus gate's apex zero-pairing pins.
+
+        Locks D-05 count-identity for the apex family — the ledger
+        by_reason tally equals the paired CompileStats counter — in BOTH
+        flag legs through the genuine _run_shadow_comparison() machinery,
+        both reading 0 until Phase 16 introduces the flag-gated emission
+        site. Four separate asserts, one claim each (never chained).
+        """
+        result = self._result()
+        off_by_reason = result.off_ledger.summary()["by_reason"]
+        on_by_reason = result.on_ledger.summary()["by_reason"]
+        apex_off = off_by_reason.get(REASON_APEX_COVERS_TLD_WILDCARD, 0)
+        apex_on = on_by_reason.get(REASON_APEX_COVERS_TLD_WILDCARD, 0)
+        assert apex_off == result.off_stats.apex_covered_wildcard_pruned
+        assert apex_off == 0
+        assert apex_on == result.on_stats.apex_covered_wildcard_pruned
+        assert apex_on == 0
 
 
 # ----------------------------------------------------------------------
