@@ -302,6 +302,157 @@ class TestApexWildcardPruning:
             assert record.is_wildcard is False
             assert _rule_storage_key(record) == record.domain
 
+    # ------------------------------------------------------------------
+    # Direction-safety negatives (Phase 16 plan 16-02, Task 1).
+    #
+    # Every leg drives the REAL compile_rules() twice -- default OFF vs
+    # wildcard_apex_pruning=True -- through the class _compile helper.
+    # Expectations are exact-per-fixture; one claim per assert. These legs
+    # prove what must NEVER happen: inverse pruning, witnessing from a
+    # non-survivor, cross-key licensing, whole-bucket collapse.
+    # ------------------------------------------------------------------
+
+    def test_inverse_negative_lone_wildcard_kept_in_both_states(self):
+        """F2a: a lone TLD wildcard has no witness and survives both flag states."""
+        ledger_off = CappedProofLedger()
+        ledger_on = CappedProofLedger()
+        lines = ["||*.autos^"]
+
+        rules_off, stats_off = self._compile(lines, proof_ledger=ledger_off)
+
+        assert rules_off == ["||*.autos^"]
+        assert stats_off.apex_covered_wildcard_pruned == 0
+        summary_off = ledger_off.summary()
+        assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_off["by_reason"]
+
+        rules_on, stats_on = self._compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_apex_pruning=True,
+        )
+
+        assert rules_on == ["||*.autos^"]
+        assert stats_on.apex_covered_wildcard_pruned == 0
+        summary_on = ledger_on.summary()
+        assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_on["by_reason"]
+
+    def test_pure_tld_same_key_pair_prunes_under_flag_on(self):
+        """F2b: a pure-TLD apex is an eligible same-key witness (TL-09 family)."""
+        ledger_off = CappedProofLedger()
+        ledger_on = CappedProofLedger()
+        lines = ["||com^", "||*.com^"]
+
+        rules_off, stats_off = self._compile(lines, proof_ledger=ledger_off)
+
+        assert rules_off == ["||*.com^", "||com^"]
+        assert stats_off.apex_covered_wildcard_pruned == 0
+
+        rules_on, stats_on = self._compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_apex_pruning=True,
+        )
+
+        assert rules_on == ["||com^"]
+        assert stats_on.apex_covered_wildcard_pruned == 1
+        matches = [
+            record
+            for record in ledger_on.records
+            if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
+        ]
+        assert len(matches) == 1
+        sample = matches[0].sample
+        assert sample["candidate_rule"] == "||*.com^"
+        assert sample["covering_rule"] == "||com^"
+        assert sample["modifier_scope_proven"] is True
+
+    def test_whitelisted_apex_isolation_survivor_only_witnessing(self):
+        """F3: a whitelisted-away apex can never license removing its wildcard."""
+        ledger_off = CappedProofLedger()
+        ledger_on = CappedProofLedger()
+        lines = [
+            "@@||autos^$client=10.0.0.1",
+            "||autos^$client=10.0.0.1",
+            "||*.autos^",
+        ]
+
+        rules_off, stats_off = self._compile(lines, proof_ledger=ledger_off)
+
+        assert rules_off == ["||*.autos^"]
+        assert stats_off.whitelist_conflict_pruned == 1
+        assert stats_off.apex_covered_wildcard_pruned == 0
+        summary_off = ledger_off.summary()
+        assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_off["by_reason"]
+
+        rules_on, stats_on = self._compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_apex_pruning=True,
+        )
+
+        assert rules_on == ["||*.autos^"]
+        assert stats_on.whitelist_conflict_pruned == 1
+        assert stats_on.apex_covered_wildcard_pruned == 0
+        summary_on = ledger_on.summary()
+        assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_on["by_reason"]
+
+    def test_partial_bucket_prunes_only_proven_variant(self):
+        """F4: multi-variant buckets lose exactly the individually proven variant."""
+        ledger_off = CappedProofLedger()
+        ledger_on = CappedProofLedger()
+        lines = ["||autos^", "||*.autos^", "||*.autos^$important"]
+
+        rules_off, stats_off = self._compile(lines, proof_ledger=ledger_off)
+
+        assert rules_off == ["||*.autos^", "||*.autos^$important", "||autos^"]
+        assert stats_off.apex_covered_wildcard_pruned == 0
+
+        rules_on, stats_on = self._compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_apex_pruning=True,
+        )
+
+        assert rules_on == ["||*.autos^$important", "||autos^"]
+        assert stats_on.apex_covered_wildcard_pruned == 1
+        matches = [
+            record
+            for record in ledger_on.records
+            if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
+        ]
+        assert len(matches) == 1
+        assert matches[0].sample["candidate_rule"] == "||*.autos^"
+        assert "||*.autos^$important" in rules_on
+
+    def test_cross_key_boundary_never_prunes_across_keys(self):
+        """F6: a cross-key apex never licenses removal under strict same-key witnessing."""
+        ledger_off = CappedProofLedger()
+        ledger_on = CappedProofLedger()
+        # The wildcard carries a narrowing $client scope so the cross-key apex
+        # ||example.co.uk^ survives Phase 3 (the pre-existing TLD-wildcard
+        # coverage branch cannot prove over it either) and is present in
+        # pruned_abp under key "example.co.uk" -- which the strict same-key
+        # index ("co.uk") must never gather as a witness.
+        lines = ["||*.co.uk^$client=10.0.0.1", "||example.co.uk^"]
+
+        rules_off, stats_off = self._compile(lines, proof_ledger=ledger_off)
+
+        assert rules_off == ["||*.co.uk^$client=10.0.0.1", "||example.co.uk^"]
+        assert stats_off.apex_covered_wildcard_pruned == 0
+        summary_off = ledger_off.summary()
+        assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_off["by_reason"]
+
+        rules_on, stats_on = self._compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_apex_pruning=True,
+        )
+
+        assert rules_on == ["||*.co.uk^$client=10.0.0.1", "||example.co.uk^"]
+        assert stats_on.apex_covered_wildcard_pruned == 0
+        summary_on = ledger_on.summary()
+        assert REASON_APEX_COVERS_TLD_WILDCARD not in summary_on["by_reason"]
+
 
 # ----------------------------------------------------------------------
 # Schema-era guards (Plan 15-02).
