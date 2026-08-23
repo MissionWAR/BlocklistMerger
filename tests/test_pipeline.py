@@ -562,7 +562,11 @@ class TestProcessFiles:
         }
 
     def test_print_summary_includes_new_cleaner_categories(self, capsys):
-        """Pipeline summary should make URL-path and invalid drops visible."""
+        """Pipeline summary should make URL-path and invalid drops visible.
+
+        Also pins the v1.2 IN-01 denyallow backfill line and the new
+        apex-covered surfacing (D-06/D-07) with a seeded denyallow magnitude.
+        """
         stats = {
             "files_processed": 1,
             "lines_raw": 7,
@@ -577,6 +581,8 @@ class TestProcessFiles:
             "trimmed": 0,
             "abp_subdomain_pruned": 0,
             "tld_wildcard_pruned": 0,
+            "denyallow_wildcard_pruned": 1234567,
+            "apex_covered_wildcard_pruned": 0,
             "duplicate_pruned": 0,
             "whitelist_conflict_pruned": 0,
             "local_hostname_pruned": 0,
@@ -603,6 +609,9 @@ class TestProcessFiles:
         assert "Semantic diagnostics:" in output
         assert "Rule effects:" in output
         assert "Compression policy:" in output
+        assert "Denyallow wildcards:" in output
+        assert "Apex-covered wildcards:" in output
+        assert "1,234,567" in output
 
 
 class TestSaveStatsJson:

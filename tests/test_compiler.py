@@ -8,6 +8,8 @@ Tests deduplication logic, TLD wildcards, and cross-format optimization.
 import inspect
 import json
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -2066,6 +2068,45 @@ class TestWildcardWhitelistHandling:
         rules, stats = self._compile(lines)
         # example.com should still be blocked (wildcard only covers subdomains)
         assert "||example.com^" in rules
+
+
+class TestCompilerCliSummary:
+    """Pin the standalone-CLI half of D-06/D-07 (symmetric surfacing, research Q2).
+
+    Drives the real ``python -m scripts.compiler`` entry point so the __main__
+    Pruned block is proven end-to-end, mirroring the capsys plane in
+    tests/test_pipeline.py for print_summary().
+    """
+
+    def _run_compiler(self, input_text, tmp_path):
+        """Write input_text to a temp file and compile it via python -m scripts.compiler."""
+        input_path = tmp_path / "input.txt"
+        output_path = tmp_path / "output.txt"
+        input_path.write_text(input_text, encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, "-m", "scripts.compiler", str(input_path), str(output_path)],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_cli_pruned_block_reports_denyallow_and_apex_lines(self, tmp_path):
+        """Standalone compiler CLI prints both Denyallow and Apex-covered lines."""
+        input_text = "\n".join(
+            [
+                "! comment line",
+                "||example.com^",
+                "||ads.example.net^$",
+                "0.0.0.0 trackers.example.org",
+            ]
+        )
+        result = self._run_compiler(input_text, tmp_path)
+
+        assert result.returncode == 0
+        assert "Pruned:" in result.stdout
+        assert "Apex-covered wildcards:" in result.stdout
+        assert "Denyallow wildcards:" in result.stdout
 
 
 if __name__ == "__main__":
