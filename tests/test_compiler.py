@@ -608,15 +608,25 @@ class TestCompilerProofLedgerPlumbing:
         default True since v1.2 (D-04): the Plan B full-corpus shadow gate
         proved the removal population exact before the default flipped, and
         passing False explicitly restores pre-v1.2 keep-everything behavior.
+        The Phase 16 apex flag joins keyword-only with production-off default
+        False until its own shadow gate sanctions the flip.
         """
         signature = inspect.signature(compile_rules)
         parameters = signature.parameters
 
-        assert list(parameters) == ["lines", "output_file", "proof_ledger", "denyallow_pruning"]
+        assert list(parameters) == [
+            "lines",
+            "output_file",
+            "proof_ledger",
+            "denyallow_pruning",
+            "wildcard_apex_pruning",
+        ]
         assert parameters["proof_ledger"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["proof_ledger"].default is None
         assert parameters["denyallow_pruning"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["denyallow_pruning"].default is True
+        assert parameters["wildcard_apex_pruning"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters["wildcard_apex_pruning"].default is False
         assert "stage_summaries" not in CompileStats.__dataclass_fields__
 
     def test_compiler_stage_summaries_are_aggregate_only_and_preserve_output(self):
