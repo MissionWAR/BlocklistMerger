@@ -850,6 +850,9 @@ class TestDenyallowShadowEquivalence:
         - denyallow_covered == stats.denyallow_wildcard_pruned (both legs,
           OFF pinning 0 == 0) AND == len(removed) — exact, not sampled,
           via the uncapped tally witness.
+        - apex ledger tally == stats.apex_covered_wildcard_pruned == 0 in
+          BOTH legs — Phase 15 plumbing must stay inert until Phase 16's
+          flag-gated emission site exists (D-05 zero-pairing).
         - kept_because_uncertain drops by EXACTLY the denyallow count;
           every other by_reason bucket byte-stable; total_records identical.
 
@@ -887,6 +890,17 @@ class TestDenyallowShadowEquivalence:
         exception_covered_on = on_by_reason.get(REASON_EXCEPTION_COVERED, 0)
         assert exception_covered_on == result.on_stats.whitelist_conflict_pruned
 
+        # Phase 15 plumbing-inertness (D-05): the apex reason/counter pair
+        # is wired end-to-end but has no emission site until Phase 16's flag
+        # exists — pin tally == counter == 0 in BOTH legs so same-leg firing
+        # (invisible to the byte-stability skip-loops below) fails loudly.
+        apex_off = off_by_reason.get(REASON_APEX_COVERS_TLD_WILDCARD, 0)
+        apex_on = on_by_reason.get(REASON_APEX_COVERS_TLD_WILDCARD, 0)
+        assert apex_off == result.off_stats.apex_covered_wildcard_pruned
+        assert apex_off == 0
+        assert apex_on == result.on_stats.apex_covered_wildcard_pruned
+        assert apex_on == 0
+
         # Every removed line carries an uncapped proof witness by identity.
         assert denyallow_on == len(removed)
         assert result.on_ledger.denyallow_candidates == removed
@@ -914,6 +928,7 @@ class TestDenyallowShadowEquivalence:
         print(f"\n[D-04 SHADOW] total_input={result.off_stats.total_input:,}")
         print(f"[D-04 SHADOW] removed={len(removed):,} (FINDINGS §4 upper bound: 518,754)")
         print(f"[D-04 SHADOW] denyallow_covered={denyallow_on:,}")
+        print(f"[D-04 SHADOW] apex_covered_wildcard_pruned={apex_on:,}")
         print(f"[D-04 SHADOW] kept_because_uncertain {kept_before:,} -> {kept_after:,}")
         print(f"[D-04 SHADOW] off_leg_seconds={result.off_seconds:.1f}")
         print(f"[D-04 SHADOW] on_leg_seconds={result.on_seconds:.1f}")
