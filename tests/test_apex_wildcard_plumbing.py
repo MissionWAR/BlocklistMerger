@@ -181,3 +181,31 @@ class TestApexPipelineSpine:
         stats = process_files(str(input_dir), str(output_file))
 
         assert stats["apex_covered_wildcard_pruned"] == 0
+
+
+# ----------------------------------------------------------------------
+# Schema-era guards (Plan 15-02).
+#
+# The drift guard protects the intentional D-09 duplication: the
+# pipeline-stats schema constant is deliberately duplicated between the
+# producer (scripts.pipeline) and the consumer (scripts.release_validator),
+# and release_validator stays standalone by design (no consolidation
+# import). These function-local imports keep the module header free of
+# schema-era identifiers, matching how Plan 15-01 authored this file.
+# ----------------------------------------------------------------------
+
+
+def test_pipeline_stats_schema_version_matches_release_validator():
+    """Guard the intentional D-09 duplication: producer and consumer must agree."""
+    from scripts.pipeline import PIPELINE_STATS_SCHEMA_VERSION as producer
+    from scripts.release_validator import PIPELINE_STATS_SCHEMA_VERSION as consumer
+
+    assert producer == consumer
+    assert producer == 5  # pin current era; update with each sanctioned bump
+
+
+def test_proof_report_schema_version_stays_at_one():
+    """Negative assertion (D-03): the proof-report era never moves with the stats era."""
+    from scripts.pruning_proof import PROOF_REPORT_SCHEMA_VERSION
+
+    assert PROOF_REPORT_SCHEMA_VERSION == 1
