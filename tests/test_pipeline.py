@@ -697,7 +697,7 @@ class TestSaveStatsJson:
         with open(json_path) as f:
             data = json.load(f)
 
-        assert data["schema_version"] == 4
+        assert data["schema_version"] == 5
         assert data["version"] == "1.5.0"
         assert data["timestamp"].endswith("Z")
         assert data["execution_time_seconds"] == 5.5
@@ -799,7 +799,7 @@ class TestPipelineCli:
         assert proof_data["report_type"] == "capped"
         assert proof_data["summary"]["total_records"] >= 1
         assert proof_sample["fingerprint"]
-        assert stats_data["schema_version"] == 4
+        assert stats_data["schema_version"] == 5
         assert "stage_summaries" in stats_data
         assert "coverage_proof" not in stats_data
         assert "coverage-proof" not in json.dumps(stats_data)

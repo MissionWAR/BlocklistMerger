@@ -54,7 +54,7 @@ from scripts.rule_syntax import classify_rule_syntax
 
 VALIDATION_SUMMARY_SCHEMA_VERSION: Final[int] = 1
 SOURCE_HEALTH_SCHEMA_VERSION: Final[int] = 1
-PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 4
+PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 5
 CANARY_SCHEMA_V1: Final[int] = 1
 CANARY_SCHEMA_V2: Final[int] = 2
 SUPPORTED_CANARY_SCHEMA_VERSIONS: Final[tuple[int, ...]] = (

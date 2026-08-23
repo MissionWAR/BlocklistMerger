@@ -60,7 +60,7 @@ from scripts.stage_diagnostics import (
 # CONFIGURATION CONSTANTS
 # =============================================================================
 
-PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 4
+PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 5
 
 # =============================================================================
 # DATA STRUCTURES

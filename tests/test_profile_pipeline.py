@@ -67,7 +67,7 @@ def test_profile_cli_writes_stdlib_artifacts_under_run_directory(
     assert "||example.com^" in merged_path.read_text(encoding="utf-8")
 
     stats = json.loads(stats_path.read_text(encoding="utf-8"))
-    assert stats["schema_version"] == 4
+    assert stats["schema_version"] == 5
     assert stats["statistics"]["lines_output"] >= 1
     assert "runtime_profile" in stats
     serialized_stats = json.dumps(stats, sort_keys=True)

@@ -67,7 +67,7 @@ def _source_health(statuses: list[str]) -> dict[str, object]:
 
 def _pipeline_stats(lines_output: int = 3) -> dict[str, object]:
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "version": "1.5.0",
         "timestamp": "2026-05-17T15:01:00Z",
         "execution_time_seconds": 1.25,
@@ -945,7 +945,7 @@ def test_pipeline_output_count_mismatch_hard_fails_with_diagnostics(tmp_path: Pa
         "scanned_output_rules": 2,
         "absolute_delta": 3,
         "pipeline_stats_path": str(paths["pipeline_stats"]),
-        "schema_version": 4,
+        "schema_version": 5,
         "field": "statistics.lines_output",
     }
 
