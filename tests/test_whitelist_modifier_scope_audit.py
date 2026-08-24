@@ -562,6 +562,64 @@ class DenyallowTallyingLedger(CappedProofLedger):
         )
 
 
+class ApexTallyingLedger(CappedProofLedger):
+    """CappedProofLedger that tallies every apex-covered wildcard candidate.
+
+    Phase 17 shadow-machinery twin of DenyallowTallyingLedger (same
+    tally-before-delegating pattern): when an incoming decision carries
+    REASON_APEX_COVERS_TLD_WILDCARD, the candidate facet is resolved
+    eagerly and its emitted rule text joins ``apex_candidates`` BEFORE
+    delegating to super() unchanged. Additionally records
+    ``(candidate, covering)`` normalized-rule pairs in ``apex_pairs`` so
+    signature element S8 (survivor-coverer membership) can be asserted
+    past any sample cap -- capped samples hold at most sample_cap records
+    per bucket and are display evidence only. Both sets are uncapped but
+    bounded by the wildcard-removal population itself (tiny vs millions
+    of input rows). ``normalized_rule`` equals the exact text
+    _write_output() emits, so set identity against output-file lines is
+    sound.
+    """
+
+    def __init__(self, sample_cap: int = DEFAULT_SAMPLE_CAP) -> None:
+        super().__init__(sample_cap=sample_cap)
+        self.apex_candidates: set[str] = set()
+        self.apex_pairs: set[tuple[str, str]] = set()
+
+    def append_decision(
+        self,
+        *,
+        decision_id: str,
+        decision_type: str,
+        outcome: str,
+        proof_status: str,
+        reason: str,
+        candidate_factory: Callable[[], RuleFacet],
+        covering_factory: Callable[[], RuleFacet | None],
+        strict_agh_delta: str,
+        project_policy_delta: str,
+        sample_factory: Callable[[], dict[str, object] | None] | None = None,
+    ) -> None:
+        """Tally apex candidates and pairs uncapped, then delegate unchanged."""
+        if reason == REASON_APEX_COVERS_TLD_WILDCARD:
+            candidate_rule = candidate_factory().normalized_rule
+            self.apex_candidates.add(candidate_rule)
+            covering_facet = covering_factory()
+            if covering_facet is not None:
+                self.apex_pairs.add((candidate_rule, covering_facet.normalized_rule))
+        super().append_decision(
+            decision_id=decision_id,
+            decision_type=decision_type,
+            outcome=outcome,
+            proof_status=proof_status,
+            reason=reason,
+            candidate_factory=candidate_factory,
+            covering_factory=covering_factory,
+            strict_agh_delta=strict_agh_delta,
+            project_policy_delta=project_policy_delta,
+            sample_factory=sample_factory,
+        )
+
+
 class ShadowComparisonResult(NamedTuple):
     """Paired flag-OFF/flag-ON compile outcomes for shadow-gate assertions.
 
@@ -576,6 +634,27 @@ class ShadowComparisonResult(NamedTuple):
     on_stats: CompileStats
     off_ledger: DenyallowTallyingLedger
     on_ledger: DenyallowTallyingLedger
+    off_seconds: float
+    on_seconds: float
+
+
+class ApexShadowComparisonResult(NamedTuple):
+    """Paired apex-flag-OFF/ON compile outcomes for apex shadow-gate assertions.
+
+    Same shape as ShadowComparisonResult, typed to ApexTallyingLedger so
+    the uncapped ``apex_candidates``/``apex_pairs`` witnesses travel with
+    each leg. Per D-16-01 both legs run production-default denyallow
+    pruning, making ``wildcard_apex_pruning`` the ONLY moving part; per
+    16-RESEARCH Derived Implication 3 the ON leg's total_records exceeds
+    OFF by exactly the removal count (deliberate S4 delta direction).
+    """
+
+    off_lines: list[str]
+    on_lines: list[str]
+    off_stats: CompileStats
+    on_stats: CompileStats
+    off_ledger: ApexTallyingLedger
+    on_ledger: ApexTallyingLedger
     off_seconds: float
     on_seconds: float
 
@@ -612,16 +691,28 @@ def _compile_shadow_leg(
     line_source: Callable[[], Iterable[str]],
     output_path: Path,
     *,
-    denyallow_pruning: bool,
-) -> tuple[CompileStats, DenyallowTallyingLedger, float]:
-    """Run one shadow leg with a fresh ledger and fresh lines iterator."""
-    ledger = DenyallowTallyingLedger(sample_cap=10_000)
+    ledger_factory: Callable[..., CappedProofLedger] | None = None,
+    **compile_kwargs: object,
+) -> tuple[CompileStats, CappedProofLedger, float]:
+    """Run one shadow leg with a fresh ledger and fresh lines iterator.
+
+    Generalized per the 16-02 handoff (Phase 17 designated first task):
+    arbitrary compile_rules kwargs forward verbatim, so the denyallow
+    family keeps passing ``denyallow_pruning=`` exactly as before while
+    the apex family adds ``wildcard_apex_pruning=True`` on its ON leg.
+    When ``ledger_factory`` is None the legacy default applies unchanged:
+    a fresh DenyallowTallyingLedger with a 10,000-entry sample cap.
+    """
+    if ledger_factory is None:
+        ledger: CappedProofLedger = DenyallowTallyingLedger(sample_cap=10_000)
+    else:
+        ledger = ledger_factory(sample_cap=10_000)
     leg_start = time.perf_counter()
     stats = compile_rules(
         line_source(),
         str(output_path),
         proof_ledger=ledger,
-        denyallow_pruning=denyallow_pruning,
+        **compile_kwargs,
     )
     return stats, ledger, time.perf_counter() - leg_start
 
@@ -677,6 +768,65 @@ def _run_shadow_comparison(
         on_lines = _read_output_lines(on_output)
 
     return ShadowComparisonResult(
+        off_lines=off_lines,
+        on_lines=on_lines,
+        off_stats=off_stats,
+        on_stats=on_stats,
+        off_ledger=off_ledger,
+        on_ledger=on_ledger,
+        off_seconds=off_seconds,
+        on_seconds=on_seconds,
+    )
+
+
+def _run_apex_shadow_comparison(
+    lines: Callable[[], Iterable[str]] | Iterable[str],
+) -> ApexShadowComparisonResult:
+    """Compile the same rule stream twice (apex flag OFF, then ON) in one process.
+
+    Phase 17 apex shadow machinery. Each leg receives its own fresh
+    ApexTallyingLedger and its own fresh lines iterator; the OFF leg passes
+    NO extra compile kwargs so it runs the production defaults
+    (denyallow_pruning=True, wildcard_apex_pruning=False), and the ON leg
+    adds ONLY ``wildcard_apex_pruning=True`` -- per D-16-01 both apex legs
+    ride production-default denyallow pruning so the apex flag is the sole
+    moving part between legs. compiler.clear_caches() runs BETWEEN legs
+    because the module LRU caches are process-global and conftest's autouse
+    fixture only clears between tests, never mid-test.
+
+    Signature note (S4): the ON leg's ledger total_records DELIBERATELY
+    exceeds the OFF leg's by exactly the removal count -- a to-be-pruned
+    wildcard has no OFF-leg record because write-time keeps emit nothing
+    (D-16-01 write-time placement, D-16-02 strict same-key witnessing).
+    Callers must assert the delta, never totals equality.
+    """
+    line_source = _shadow_line_factory(lines)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_path = Path(tmpdir)
+
+        off_output = tmp_path / "apex_shadow_off.txt"
+        off_stats, off_ledger, off_seconds = _compile_shadow_leg(
+            line_source,
+            off_output,
+            ledger_factory=ApexTallyingLedger,
+        )
+        off_lines = _read_output_lines(off_output)
+
+        # Cache hygiene between legs: the ON leg must not inherit warmed
+        # domain/TLD caches from the OFF leg.
+        clear_caches()
+
+        on_output = tmp_path / "apex_shadow_on.txt"
+        on_stats, on_ledger, on_seconds = _compile_shadow_leg(
+            line_source,
+            on_output,
+            ledger_factory=ApexTallyingLedger,
+            wildcard_apex_pruning=True,
+        )
+        on_lines = _read_output_lines(on_output)
+
+    return ApexShadowComparisonResult(
         off_lines=off_lines,
         on_lines=on_lines,
         off_stats=off_stats,
@@ -998,9 +1148,12 @@ APEX_SHADOW_FIXTURE_LINES: Final[list[str]] = [
     "||autos^",
     "||*.autos^",
     "||*.autos^$important",
-    # Uncertain keep control: no ||com^ apex present, so this wildcard's
-    # coverage stays undecided and it is kept in both legs.
+    # Uncertain keep control pair: no ||com^ apex present, and the
+    # $important child cannot have its scope proven against the plain
+    # ||*.com^ wildcard -- so exactly one kept_because_uncertain record
+    # lands in BOTH legs (mirrors the proven 16-02 composite).
     "||*.com^",
+    "||foo.com^$important",
     # Whitelist-conflict control: identical exception_covered count in both legs.
     "@@||whi.test^",
     "||whi.test^",
@@ -1044,9 +1197,10 @@ class TestApexShadowMachinery:
 
         removed = set(result.off_lines) - set(result.on_lines)
         added = set(result.on_lines) - set(result.off_lines)
-        expected_removed = {
-            f"||*.{tld}^" for tld in APEX_SHADOW_PAIR_TLDS
-        } | {"||*.autos^", "||*.co.uk^"}
+        expected_removed = {f"||*.{tld}^" for tld in APEX_SHADOW_PAIR_TLDS} | {
+            "||*.autos^",
+            "||*.co.uk^",
+        }
 
         # S2: added-lines empty -- wildcards can only vanish.
         assert not added
