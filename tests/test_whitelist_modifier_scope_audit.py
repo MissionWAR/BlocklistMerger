@@ -27,6 +27,8 @@ Evidence layers:
 Pattern source: tests/test_cross_format_audit.py (Phase 12 audit suites).
 """
 
+import copy
+import hashlib
 import json
 import os
 import tempfile
@@ -1895,3 +1897,287 @@ class TestShadowManifestWriter:
 
         guards = manifest["proposed_guards"]
         assert guards["binding"] is False
+
+
+# ----------------------------------------------------------------------
+# Pre-freeze source-health reconciliation (Phase 17, D-17-13 / Pitfall P3).
+#
+# A totally-failed upstream fetch records byte_size=0 / sha256=None in
+# the downloader's health report (scripts/downloader.py failed-fetch
+# shape), while freeze_dataset's fail-closed consumer
+# (_source_health_manifest_entry) refuses any health row lacking
+# non-empty identity -- so one dead source would block the entire
+# canonical run, contradicting D-17-13's "degraded sources proceed".
+# The reconciliation helper bridges producer shape to consumer shape:
+# identity is filled FROM the on-disk raw file while status stays
+# honestly "failed", the original report is never mutated in place, and
+# a reconciled copy is ALWAYS atomically written. OQ#2 resolution: the
+# helper lives in this gate layer BY DESIGN -- scripts/benchmark_pipeline.py
+# stays byte-untouched, and the twins below import the REAL production
+# consumer to prove the contract end-to-end (never a mock).
+# ----------------------------------------------------------------------
+
+
+class TestSourceHealthReconciliation:
+    """Fail-closed contract twins for the pre-freeze reconciliation helper.
+
+    Every contract here is proven against the REAL production consumer
+    ``scripts.benchmark_pipeline._source_health_manifest_entry``
+    (imported deliberately inside the twins): reconciliation must produce
+    exactly the shape that consumer accepts while preserving the honest
+    ``failed`` status and leaving its disk re-verification fully intact.
+    """
+
+    DEAD_FILENAME = "dead.txt"
+    LIVE_FILENAME = "live.txt"
+    GHOST_FILENAME = "ghost.txt"
+    DEAD_BYTES = b"||dead.example^\n||ads.dead.example^\n"
+    LIVE_BYTES = b"||live.example^\n"
+
+    def _seed_raw_dir(self, raw_dir: Path) -> None:
+        """Create the tiny on-disk raw corpus (dead + live; ghost missing)."""
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        (raw_dir / self.DEAD_FILENAME).write_bytes(self.DEAD_BYTES)
+        (raw_dir / self.LIVE_FILENAME).write_bytes(self.LIVE_BYTES)
+
+    def _failed_row(self, filename: str, url: str) -> dict[str, object]:
+        """Return the downloader's exact failed-fetch health shape."""
+        return {
+            "url": url,
+            "filename": filename,
+            "status": "failed",
+            "changed": False,
+            "byte_size": 0,
+            "sha256": None,
+            "cache_age_seconds": None,
+            "failure_reason": "download timed out",
+        }
+
+    def _fresh_fetch_row(self, raw_path: Path, filename: str, url: str) -> dict[str, object]:
+        """Return a fully-valid fresh_fetch row with correct disk identity."""
+        return {
+            "url": url,
+            "filename": filename,
+            "status": "fresh_fetch",
+            "changed": True,
+            "byte_size": raw_path.stat().st_size,
+            "sha256": hashlib.sha256(raw_path.read_bytes()).hexdigest(),
+            "cache_age_seconds": None,
+            "failure_reason": None,
+        }
+
+    def _write_report(
+        self,
+        report_path: Path,
+        sources: list[dict[str, object]],
+        *,
+        generated_at: str = "2026-08-24T00:00:00Z",
+    ) -> None:
+        """Write a source-health report carrying an unknown top-level key."""
+        document = {
+            "generated_at": generated_at,
+            "sources": sources,
+        }
+        report_path.write_text(json.dumps(document), encoding="utf-8")
+
+    def _reconciled_sources(self, output_path: Path) -> list[dict[str, object]]:
+        """Load the sources list back out of a reconciled report copy."""
+        loaded = json.loads(output_path.read_text(encoding="utf-8"))
+        return loaded["sources"]
+
+    def test_reconciled_row_satisfies_real_freeze_consumer(self, tmp_path):
+        """THE load-bearing twin: reconciled rows pass the REAL consumer.
+
+        After reconciliation, calling the production
+        ``_source_health_manifest_entry`` against the failed-no-identity
+        row and its on-disk raw file must succeed WITHOUT raising and must
+        return an entry whose source_health_status stays honestly
+        ``failed`` with byte_size/sha256 equal to the file's actual
+        identity on disk.
+        """
+        from scripts.benchmark_pipeline import _source_health_manifest_entry
+
+        raw_dir = tmp_path / "raw"
+        report_path = tmp_path / "source-health.json"
+        output_path = tmp_path / "reconciled-source-health.json"
+        self._seed_raw_dir(raw_dir)
+        self._write_report(
+            report_path,
+            [
+                self._failed_row(self.DEAD_FILENAME, "https://dead.example/list"),
+                self._fresh_fetch_row(
+                    raw_dir / self.LIVE_FILENAME,
+                    self.LIVE_FILENAME,
+                    "https://live.example/list",
+                ),
+            ],
+        )
+
+        fills = _reconcile_source_health_for_freeze(report_path, raw_dir, output_path)
+
+        dead_row = self._reconciled_sources(output_path)[0]
+        entry = _source_health_manifest_entry(raw_dir / self.DEAD_FILENAME, dead_row)
+
+        # Exactly the one failed-no-identity row was filled.
+        assert fills == 1
+        assert entry["source_health_status"] == "failed"
+        assert entry["byte_size"] == len(self.DEAD_BYTES)
+        assert entry["sha256"] == hashlib.sha256(self.DEAD_BYTES).hexdigest()
+        # Our streaming hasher agrees byte-for-byte with production hashing.
+        assert entry["sha256"] == _streaming_sha256(raw_dir / self.DEAD_FILENAME)
+
+    def test_failed_status_url_and_extra_keys_survive_byte_for_byte(self, tmp_path):
+        """Reconciliation fills ONLY identity; every other key stays verbatim."""
+        raw_dir = tmp_path / "raw"
+        report_path = tmp_path / "source-health.json"
+        output_path = tmp_path / "reconciled-source-health.json"
+        self._seed_raw_dir(raw_dir)
+        before = self._failed_row(self.DEAD_FILENAME, "https://dead.example/list")
+        self._write_report(report_path, [before])
+
+        _reconcile_source_health_for_freeze(report_path, raw_dir, output_path)
+
+        after = self._reconciled_sources(output_path)[0]
+
+        assert after["status"] == "failed"
+        assert after["url"] == before["url"]
+        assert after["filename"] == before["filename"]
+        assert after["failure_reason"] == before["failure_reason"]
+        assert after["changed"] is False
+        assert after["cache_age_seconds"] is None
+        # The ONLY intended changes are the two identity fields.
+        assert after["byte_size"] == len(self.DEAD_BYTES)
+        assert after["sha256"] == hashlib.sha256(self.DEAD_BYTES).hexdigest()
+
+    def test_valid_identity_rows_pass_through_untouched(self, tmp_path):
+        """A fully-valid fresh_fetch row is deep-equal before and after."""
+        raw_dir = tmp_path / "raw"
+        report_path = tmp_path / "source-health.json"
+        output_path = tmp_path / "reconciled-source-health.json"
+        self._seed_raw_dir(raw_dir)
+        live_before = self._fresh_fetch_row(
+            raw_dir / self.LIVE_FILENAME,
+            self.LIVE_FILENAME,
+            "https://live.example/list",
+        )
+        live_snapshot = copy.deepcopy(live_before)
+        dead_row = self._failed_row(self.DEAD_FILENAME, "https://dead.example/list")
+        self._write_report(report_path, [dead_row, live_before])
+
+        fills = _reconcile_source_health_for_freeze(report_path, raw_dir, output_path)
+
+        sources_after = self._reconciled_sources(output_path)
+        live_after = next(
+            source for source in sources_after if source["filename"] == self.LIVE_FILENAME
+        )
+
+        assert fills == 1
+        assert live_after == live_snapshot
+
+    def test_missing_raw_file_rows_left_untouched_and_uncounted(self, tmp_path):
+        """A failed-no-identity row without an on-disk file passes through.
+
+        freeze_dataset only consults health rows for raw files PRESENT on
+        disk, so a ghost row needs no fill and contributes zero to the
+        return count.
+        """
+        raw_dir = tmp_path / "raw"
+        report_path = tmp_path / "source-health.json"
+        output_path = tmp_path / "reconciled-source-health.json"
+        self._seed_raw_dir(raw_dir)
+        ghost_row = self._failed_row(self.GHOST_FILENAME, "https://ghost.example/list")
+        dead_row = self._failed_row(self.DEAD_FILENAME, "https://dead.example/list")
+        self._write_report(report_path, [ghost_row, dead_row])
+
+        fills = _reconcile_source_health_for_freeze(report_path, raw_dir, output_path)
+
+        sources_after = {
+            source["filename"]: source for source in self._reconciled_sources(output_path)
+        }
+        ghost_after = sources_after[self.GHOST_FILENAME]
+
+        assert fills == 1
+        assert ghost_after["byte_size"] == 0
+        assert ghost_after["sha256"] is None
+        assert ghost_after["status"] == "failed"
+
+    def test_post_reconciliation_content_drift_still_fails_closed(self, tmp_path):
+        """Reconciliation fills identity; it never relaxes verification.
+
+        Overwriting the raw file AFTER reconciliation must trip the real
+        consumer's stat+sha re-verification, proving the helper does not
+        launder content drift into the freezer.
+        """
+        from scripts.benchmark_pipeline import _source_health_manifest_entry
+
+        raw_dir = tmp_path / "raw"
+        report_path = tmp_path / "source-health.json"
+        output_path = tmp_path / "reconciled-source-health.json"
+        self._seed_raw_dir(raw_dir)
+        self._write_report(
+            report_path,
+            [self._failed_row(self.DEAD_FILENAME, "https://dead.example/list")],
+        )
+
+        _reconcile_source_health_for_freeze(report_path, raw_dir, output_path)
+        dead_raw = raw_dir / self.DEAD_FILENAME
+        dead_raw.write_bytes(b"||tampered.after.reconciliation^\n")
+
+        reconciled_dead = self._reconciled_sources(output_path)[0]
+        with pytest.raises(ValueError):
+            _source_health_manifest_entry(dead_raw, reconciled_dead)
+
+    def test_malformed_report_rejected_before_any_write(self, tmp_path):
+        """A document without a sources list fails closed pre-write."""
+        raw_dir = tmp_path / "raw"
+        report_path = tmp_path / "source-health.json"
+        output_path = tmp_path / "reconciled-source-health.json"
+        self._seed_raw_dir(raw_dir)
+        report_path.write_text(json.dumps({"generated_at": "2026-08-24T00:00:00Z"}), encoding="utf-8")
+
+        with pytest.raises(ValueError) as excinfo:
+            _reconcile_source_health_for_freeze(report_path, raw_dir, output_path)
+
+        assert "sources" in str(excinfo.value)
+        assert not output_path.exists()
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_non_dict_document_rejected_before_any_write(self, tmp_path):
+        """A non-object JSON document also fails closed pre-write."""
+        raw_dir = tmp_path / "raw"
+        report_path = tmp_path / "source-health.json"
+        output_path = tmp_path / "reconciled-source-health.json"
+        self._seed_raw_dir(raw_dir)
+        report_path.write_text(json.dumps([{"sources": []}]), encoding="utf-8")
+
+        with pytest.raises(ValueError) as excinfo:
+            _reconcile_source_health_for_freeze(report_path, raw_dir, output_path)
+
+        assert "object" in str(excinfo.value)
+        assert not output_path.exists()
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_atomic_write_hygiene_and_return_count(self, tmp_path):
+        """Output parses, unknown keys survive, no .tmp residue, count exact."""
+        raw_dir = tmp_path / "raw"
+        report_path = tmp_path / "source-health.json"
+        output_path = tmp_path / "reconciled-source-health.json"
+        self._seed_raw_dir(raw_dir)
+        original_text = json.dumps(
+            {
+                "generated_at": "2026-08-24T00:00:00Z",
+                "sources": [self._failed_row(self.DEAD_FILENAME, "https://dead.example/list")],
+            }
+        )
+        report_path.write_text(original_text, encoding="utf-8")
+
+        fills = _reconcile_source_health_for_freeze(report_path, raw_dir, output_path)
+
+        loaded = json.loads(output_path.read_text(encoding="utf-8"))
+
+        assert fills == 1
+        assert output_path.is_file()
+        assert loaded["generated_at"] == "2026-08-24T00:00:00Z"
+        assert list(tmp_path.glob("*.tmp")) == []
+        # The ORIGINAL report file is never mutated in place.
+        assert report_path.read_text(encoding="utf-8") == original_text
