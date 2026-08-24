@@ -51,6 +51,13 @@ from scripts.pruning_proof import (
     CappedProofLedger,
     RuleFacet,
 )
+from scripts.release_validator import (
+    DEFAULT_MINIMUM_OUTPUT_RULES,
+    DEFAULT_PREVIOUS_EXTREME_ABSOLUTE_DELTA,
+    DEFAULT_PREVIOUS_EXTREME_DROP_RATIO,
+    DEFAULT_PREVIOUS_EXTREME_INCREASE_RATIO,
+    DEFAULT_PREVIOUS_MODERATE_DELTA_RATIO,
+)
 from scripts.rule_semantics import modifier_scope_covers, parse_modifier_text
 
 # ----------------------------------------------------------------------
@@ -2276,3 +2283,409 @@ class TestSourceHealthReconciliation:
         assert list(tmp_path.glob("*.tmp")) == []
         # The ORIGINAL report file is never mutated in place.
         assert report_path.read_text(encoding="utf-8") == original_text
+
+
+# ----------------------------------------------------------------------
+# Proposed-guards derivation + timing-merge contract (Phase 17, D-17-09
+# / D-17-10 / D-17-11 / FA-2 / FA-3).
+#
+# _derive_proposed_guards is pure arithmetic over three ints producing
+# the E2-shaped NON-BINDING draft over exactly the five flip-trippable
+# release_validator thresholds (source-health guards are NOT
+# flip-trippable and must never appear). _timing_block_from_reports
+# merges the canonical benchmark timing reports with precision
+# boundaries pinned here: the <=10% bar evaluates INCLUSIVELY on the
+# RAW unrounded quotient (mirroring 17-02's pinned improvement >= -10.0
+# floor in reciprocal form), rounding is display-only and can never
+# flip a verdict, foreign-corpus evidence can never bless the run, and
+# malformed reports fail closed naming the missing field instead of
+# merging partially.
+# ----------------------------------------------------------------------
+
+
+class TestProposedGuardsDraft:
+    """Arithmetic pins for the headroom-banded proposed_guards draft."""
+
+    def test_representative_population_derives_window_and_ratios(self):
+        """off=1000/on=970/removed=30 pins every derived field."""
+        guards = _derive_proposed_guards(
+            off_rule_count=1000,
+            on_rule_count=970,
+            removed_count=30,
+        )
+
+        minimum = guards["minimum_output_rules"]
+        drop = guards["previous_extreme_drop_ratio"]
+        absolute = guards["previous_extreme_absolute_delta"]
+        window = guards["removal_count_window"]
+
+        assert minimum["proposed"] == 970
+        assert drop["expected_first_post_flip_drop"] == 0.03
+        assert absolute["observed_first_flip_absolute_rule_delta"] == 30
+        assert window["expected_apex_covered_wildcard_pruned"] == 30
+        assert window["headroom_low"] == 15
+        assert window["headroom_high"] == 45
+
+    def test_near_zero_population_collapses_window_to_zero_one(self):
+        """R=0 is a healthy calibration fact: clamped low, unit-high band."""
+        guards = _derive_proposed_guards(
+            off_rule_count=1000,
+            on_rule_count=1000,
+            removed_count=0,
+        )
+
+        window = guards["removal_count_window"]
+
+        assert window["headroom_low"] == 0
+        assert window["headroom_high"] == 1
+        assert guards["previous_extreme_drop_ratio"]["expected_first_post_flip_drop"] == 0.0
+
+    def test_single_removal_clamps_low_bound_at_zero(self):
+        """R=1 keeps the max(R//2, 1) band without going negative."""
+        guards = _derive_proposed_guards(
+            off_rule_count=1000,
+            on_rule_count=999,
+            removed_count=1,
+        )
+
+        window = guards["removal_count_window"]
+
+        assert window["headroom_low"] == 0
+        assert window["headroom_high"] == 2
+
+    def test_block_is_explicitly_non_binding_data_only(self):
+        """D-17-09: binding False + note deferring policy to Phase 18."""
+        guards = _derive_proposed_guards(
+            off_rule_count=10,
+            on_rule_count=9,
+            removed_count=1,
+        )
+
+        assert guards["binding"] is False
+        assert "data-only" in str(guards["note"])
+        assert "Phase 18" in str(guards["note"])
+
+    def test_all_five_release_validator_thresholds_carry_current_values(self):
+        """Every flip-trippable constant appears via the imported name."""
+        guards = _derive_proposed_guards(
+            off_rule_count=10,
+            on_rule_count=9,
+            removed_count=1,
+        )
+
+        assert guards["minimum_output_rules"]["current"] == DEFAULT_MINIMUM_OUTPUT_RULES
+        assert (
+            guards["previous_extreme_drop_ratio"]["current"]
+            == DEFAULT_PREVIOUS_EXTREME_DROP_RATIO
+        )
+        assert (
+            guards["previous_extreme_increase_ratio"]["current"]
+            == DEFAULT_PREVIOUS_EXTREME_INCREASE_RATIO
+        )
+        assert (
+            guards["previous_moderate_delta_ratio"]["current"]
+            == DEFAULT_PREVIOUS_MODERATE_DELTA_RATIO
+        )
+        assert (
+            guards["previous_extreme_absolute_delta"]["current"]
+            == DEFAULT_PREVIOUS_EXTREME_ABSOLUTE_DELTA
+        )
+
+    def test_no_non_flippable_source_health_guards_appear(self):
+        """Source-health guards are not flip-trippable; they never surface."""
+        guards = _derive_proposed_guards(
+            off_rule_count=10,
+            on_rule_count=9,
+            removed_count=1,
+        )
+        serialized = json.dumps(guards)
+
+        assert "source_failed_stale_minimum" not in serialized
+        assert "source_fallback_stale_minimum" not in serialized
+        assert "source_hard_ratio" not in serialized
+
+    def test_counter_ledger_equality_and_uncertain_stasis_expectations(self):
+        """Equality/stasis expectation texts ride the draft verbatim."""
+        guards = _derive_proposed_guards(
+            off_rule_count=10,
+            on_rule_count=9,
+            removed_count=1,
+        )
+        equality_expectation = guards["counter_ledger_equality"]["expected"]
+
+        assert equality_expectation == "tally == counter == removed, both directions"
+        assert guards["uncertain_keeps_stasis"]["expected_delta"] == 0
+
+
+class TestTimingMergeContract:
+    """Precision-boundary twins for the timing-report merge contract."""
+
+    FROZEN_DIGEST = "f" * 64
+    OFF_FINAL_SHA = "a" * 64
+    ON_FINAL_SHA = "b" * 64
+
+    @staticmethod
+    def _timing_document(
+        *,
+        median: float,
+        final_sha: str,
+        digest: str,
+        compile_flags: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Build one synthetic benchmark timing report document."""
+        per_run: list[dict[str, object]] = [
+            {
+                "index": index + 1,
+                "elapsed_seconds": median,
+                "output_byte_size": 43_000_000,
+                "output_sha256": final_sha,
+            }
+            for index in range(3)
+        ]
+        document: dict[str, object] = {
+            "schema_version": 1,
+            "report_type": "corpus_benchmark",
+            "mode": "timing",
+            "created_at": "2026-08-24T00:00:00Z",
+            "corpus": {
+                "dir": "reports/benchmarks/frozen/apex-shadow-v1/raw",
+                "manifest_sha256": digest,
+            },
+            "runs": 3,
+            "durations_seconds": [median - 0.5, median, median + 0.5],
+            "summary": {
+                "min_seconds": median - 0.5,
+                "median_seconds": median,
+                "max_seconds": median + 0.5,
+            },
+            "output_sha256_stable": True,
+            "per_run": per_run,
+        }
+        if compile_flags is not None:
+            document["compile_flags"] = compile_flags
+        return document
+
+    def _merged_block(
+        self,
+        *,
+        off_median: float,
+        on_median: float,
+        off_digest: str | None = None,
+        on_digest: str | None = None,
+    ) -> dict[str, object]:
+        """Merge two synthetic reports through the contract under test."""
+        off_doc = self._timing_document(
+            median=off_median,
+            final_sha=self.OFF_FINAL_SHA,
+            digest=off_digest or self.FROZEN_DIGEST,
+        )
+        on_doc = self._timing_document(
+            median=on_median,
+            final_sha=self.ON_FINAL_SHA,
+            digest=on_digest or self.FROZEN_DIGEST,
+            compile_flags={"wildcard_apex_pruning": True},
+        )
+        return _timing_block_from_reports(
+            off_doc,
+            on_doc,
+            frozen_digest=self.FROZEN_DIGEST,
+            off_sha=self.OFF_FINAL_SHA,
+            on_sha=self.ON_FINAL_SHA,
+        )
+
+    def test_overhead_percent_is_reciprocal_of_improvement_form(self):
+        """ON slower by 10% reads as -10.0 (benchmark.improvement_percent mirror)."""
+        assert _overhead_percent(100.0, 110.0) == pytest.approx(-10.0, abs=1e-9)
+
+    def test_overhead_percent_positive_when_on_leg_faster(self):
+        """ON faster by 10% reads as +10.0 -- reciprocal direction preserved."""
+        assert _overhead_percent(100.0, 90.0) == pytest.approx(10.0, abs=1e-9)
+
+    def test_non_positive_off_median_raises_divide_by_zero_guard(self):
+        """Zero/negative OFF medians have no definable overhead percent."""
+        with pytest.raises(ValueError):
+            _overhead_percent(0.0, 110.0)
+        with pytest.raises(ValueError):
+            _overhead_percent(-5.0, 90.0)
+
+    def test_inclusive_boundary_evaluates_on_raw_unrounded_value(self):
+        """Raw -10.0 passes INCLUSIVELY (D-17-11 / 17-02 floor mirror)."""
+        at_bar = self._merged_block(off_median=100.0, on_median=110.0)
+
+        assert at_bar["passes"] is True
+        assert at_bar["relative_overhead_percent"] == -10.0
+
+    def test_rounding_can_never_flip_verdict_direction(self):
+        """FA-2 hazard pin: raw -10.004 fails while DISPLAY rounds to -10.0."""
+        over_bar = self._merged_block(off_median=100.0, on_median=110.004)
+
+        assert over_bar["passes"] is False
+        assert over_bar["relative_overhead_percent"] == -10.0
+
+    def test_foreign_corpus_digest_never_blesses_the_run(self):
+        """A mismatched corpus digest voids overhead AND the pass verdict."""
+        block = self._merged_block(
+            off_median=100.0,
+            on_median=105.0,
+            on_digest="e" * 64,
+        )
+
+        assert block["same_corpus"] is False
+        assert block["passes"] is False
+        assert block["relative_overhead_percent"] is None
+
+    @pytest.mark.parametrize(
+        ("key_path", "label"),
+        [
+            pytest.param(("runs",), "runs", id="missing-runs"),
+            pytest.param(("durations_seconds",), "durations_seconds", id="missing-durations"),
+            pytest.param(
+                ("summary", "median_seconds"), "median_seconds", id="missing-summary-median"
+            ),
+            pytest.param(
+                ("output_sha256_stable",), "output_sha256_stable", id="missing-stable-flag"
+            ),
+            pytest.param(
+                ("corpus", "manifest_sha256"), "manifest_sha256", id="missing-corpus-digest"
+            ),
+        ],
+    )
+    def test_missing_required_keys_fail_closed_naming_the_field(self, key_path, label):
+        """Malformed reports fail closed naming the first missing field."""
+        off_doc = self._timing_document(
+            median=100.0,
+            final_sha=self.OFF_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+        )
+        on_doc = self._timing_document(
+            median=105.0,
+            final_sha=self.ON_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+            compile_flags={"wildcard_apex_pruning": True},
+        )
+        if len(key_path) == 1:
+            del off_doc[key_path[0]]
+        else:
+            del off_doc[key_path[0]][key_path[1]]
+
+        with pytest.raises(ValueError) as excinfo:
+            _timing_block_from_reports(
+                off_doc,
+                on_doc,
+                frozen_digest=self.FROZEN_DIGEST,
+                off_sha=self.OFF_FINAL_SHA,
+                on_sha=self.ON_FINAL_SHA,
+            )
+
+        assert label in str(excinfo.value)
+
+    def test_missing_required_key_in_on_report_also_fails_closed(self):
+        """Both documents are validated, not just the OFF leg."""
+        off_doc = self._timing_document(
+            median=100.0,
+            final_sha=self.OFF_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+        )
+        on_doc = self._timing_document(
+            median=105.0,
+            final_sha=self.ON_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+        )
+        del on_doc["output_sha256_stable"]
+
+        with pytest.raises(ValueError) as excinfo:
+            _timing_block_from_reports(
+                off_doc,
+                on_doc,
+                frozen_digest=self.FROZEN_DIGEST,
+                off_sha=self.OFF_FINAL_SHA,
+                on_sha=self.ON_FINAL_SHA,
+            )
+
+        assert "output_sha256_stable" in str(excinfo.value)
+
+    def test_cross_tie_booleans_bind_to_equivalence_leg_outputs(self):
+        """Cross-ties compare each report's FINAL per_run sha to gate legs."""
+        matching = self._merged_block(off_median=100.0, on_median=110.0)
+
+        assert matching["cross_tie_off"] is True
+        assert matching["cross_tie_on"] is True
+
+        off_mismatched = self._timing_document(
+            median=100.0,
+            final_sha="c" * 64,
+            digest=self.FROZEN_DIGEST,
+        )
+        on_doc = self._timing_document(
+            median=110.0,
+            final_sha=self.ON_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+            compile_flags={"wildcard_apex_pruning": True},
+        )
+        mismatched_block = _timing_block_from_reports(
+            off_mismatched,
+            on_doc,
+            frozen_digest=self.FROZEN_DIGEST,
+            off_sha=self.OFF_FINAL_SHA,
+            on_sha=self.ON_FINAL_SHA,
+        )
+
+        assert mismatched_block["cross_tie_off"] is False
+        assert mismatched_block["cross_tie_on"] is True
+
+    def test_absent_per_run_records_cross_tie_false_honestly(self):
+        """Absent per-run evidence records cross-tie False, never True-ish."""
+        off_doc = self._timing_document(
+            median=100.0,
+            final_sha=self.OFF_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+        )
+        del off_doc["per_run"]
+        on_doc = self._timing_document(
+            median=110.0,
+            final_sha=self.ON_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+            compile_flags={"wildcard_apex_pruning": True},
+        )
+        block = _timing_block_from_reports(
+            off_doc,
+            on_doc,
+            frozen_digest=self.FROZEN_DIGEST,
+            off_sha=self.OFF_FINAL_SHA,
+            on_sha=self.ON_FINAL_SHA,
+        )
+
+        assert block["cross_tie_off"] is False
+        assert block["cross_tie_on"] is True
+
+    def test_block_assembly_carries_methodology_passthrough_and_provenance(self):
+        """E2 inventory fields assemble verbatim from the source reports."""
+        off_doc = self._timing_document(
+            median=123.456789,
+            final_sha=self.OFF_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+        )
+        on_doc = self._timing_document(
+            median=130.0,
+            final_sha=self.ON_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+            compile_flags={"wildcard_apex_pruning": True},
+        )
+        block = _timing_block_from_reports(
+            off_doc,
+            on_doc,
+            frozen_digest=self.FROZEN_DIGEST,
+            off_sha=self.OFF_FINAL_SHA,
+            on_sha=self.ON_FINAL_SHA,
+        )
+
+        assert "median-of-3" in str(block["methodology"])
+        assert block["bar_percent"] == 10.0
+        assert block["off"]["runs"] == 3
+        # durations_seconds pass through VERBATIM (absolute seconds kept).
+        assert block["off"]["durations_seconds"] == off_doc["durations_seconds"]
+        # Median display rounding is 2dp at assembly time (FA-2).
+        assert block["off"]["median_seconds"] == 123.46
+        assert block["on"]["median_seconds"] == 130.0
+        assert block["off"]["output_sha256_stable"] is True
+        assert block["on_compile_flags"] == {"wildcard_apex_pruning": True}
