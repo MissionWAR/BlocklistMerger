@@ -1302,3 +1302,252 @@ class TestApexShadowMachinery:
         assert ledger.denyallow_candidates == set()
         assert isinstance(stats, CompileStats)
         assert seconds >= 0.0
+
+
+# ----------------------------------------------------------------------
+# Shadow manifest writer unit layer (Phase 17, D-17-02/05/06/07/08/09).
+#
+# The in-gate always-write manifest machinery that 17-03's corpus gate
+# and 17-04's canonical run reuse verbatim: evidence computed -> checks
+# evaluated into an explicit verdict FIELD -> JSON+MD written ATOMICALLY
+# -> only then assertions (D-17-08 write-before-assert ordering, so a
+# red run still leaves forensic artifacts recording observed deltas).
+#
+# Population math implements the D-01 bucket classifier operationalized
+# by witness-key label count (research A1): single-label public-suffix
+# keys vs multi-label keys. The >=1.0% split bar is INCLUSIVE per
+# FA-1/D-17-06 and near-zero populations are a calibration fact handled
+# by the divide-by-zero guard, never a verdict input (Pitfall 11).
+# ----------------------------------------------------------------------
+
+
+class TestShadowManifestWriter:
+    """Unit-proven manifest writer: classifier, population, forensics."""
+
+    def test_classifier_splits_single_label_and_multipart_keys(self):
+        """Witness-key label count is the only bucket axis (D-17-05/A1)."""
+        assert _classify_apex_bucket("com") == "single_label_suffix_apex"
+        assert _classify_apex_bucket("co.uk") == "multipart_suffix_apex"
+
+    def test_classifier_rejects_empty_and_dotted_keys(self):
+        """Malformed keys fail loudly instead of misclassifying silently."""
+        with pytest.raises(ValueError):
+            _classify_apex_bucket("")
+        with pytest.raises(ValueError):
+            _classify_apex_bucket(".com")
+        with pytest.raises(ValueError):
+            _classify_apex_bucket("com.")
+
+    def test_population_summary_partitions_counts_and_shares(self):
+        """Buckets partition total exactly; shares follow the FA-2 contract."""
+        candidates = {"||*.com^", "||*.net^", "||*.org^", "||*.co.uk^"}
+        pairs = {(candidate, candidate.replace("*.", "")) for candidate in candidates}
+        samples = [
+            {"decision_id": "d-single", "decision_type": "t", "fingerprint": "f1",
+             "candidate_rule": "||*.com^", "candidate_domain": "",
+             "covering_rule": "||com^", "sample": None},
+        ]
+
+        summary = _summarize_population(candidates, pairs, capped_samples=samples)
+
+        assert summary["total"] == 4
+        assert summary["buckets"]["single_label_suffix_apex"]["count"] == 3
+        assert summary["buckets"]["multipart_suffix_apex"]["count"] == 1
+        assert summary["buckets_partition_total"] is True
+        assert summary["pure_tld_share_percent"] == 75.0
+        assert summary["split_bar_percent"] == 1.0
+        assert summary["reason_split_triggered"] is True
+
+    def test_population_summary_places_capped_samples_in_own_bucket(self):
+        """Samples ride the bucket their candidate key classifies into."""
+        candidates = {"||*.co.uk^"}
+        pairs = {("||*.co.uk^", "||co.uk^")}
+        samples = [
+            {"decision_id": "d-multipart", "decision_type": "t", "fingerprint": "f2",
+             "candidate_rule": "||*.co.uk^", "candidate_domain": "",
+             "covering_rule": "||co.uk^", "sample": None},
+        ]
+
+        summary = _summarize_population(candidates, pairs, capped_samples=samples)
+
+        bucket_samples = summary["buckets"]["multipart_suffix_apex"]["samples"]
+        assert len(bucket_samples) == 1
+        assert bucket_samples[0]["candidate_rule"] == "||*.co.uk^"
+        assert bucket_samples[0]["covering_rule"] == "||co.uk^"
+
+    def test_population_summary_handles_zero_removal_population(self):
+        """Divide-by-zero guard: zero removals yield 0.0 shares and no split."""
+        summary = _summarize_population(set(), set())
+
+        assert summary["total"] == 0
+        assert summary["buckets"]["single_label_suffix_apex"]["count"] == 0
+        assert summary["buckets"]["single_label_suffix_apex"]["share_percent"] == 0.0
+        assert summary["buckets"]["multipart_suffix_apex"]["share_percent"] == 0.0
+        assert summary["buckets_partition_total"] is True
+        assert summary["pure_tld_share_percent"] == 0.0
+        assert summary["reason_split_triggered"] is False
+
+    def test_split_bar_boundary_is_inclusive_at_one_percent(self):
+        """FA-1/D-17-06: exactly 1.0% triggers; 0.99% does not."""
+        at_bar = {
+            f"||*.d{i:03d}^" for i in range(99)
+        } | {"||*.com^"}
+        below_bar = {
+            f"||*.m{i:04d}.co.uk^" for i in range(9901)
+        } | {f"||*.s{i:02d}^" for i in range(99)}
+
+        summary_at_bar = _summarize_population(at_bar, set())
+        summary_below = _summarize_population(below_bar, set())
+
+        assert summary_at_bar["total"] == 100
+        assert summary_at_bar["pure_tld_share_percent"] == 1.0
+        assert summary_at_bar["reason_split_triggered"] is True
+        assert summary_below["total"] == 10000
+        assert summary_below["pure_tld_share_percent"] == 0.99
+        assert summary_below["reason_split_triggered"] is False
+
+    def test_writer_round_trip_writes_json_and_md_siblings(self, tmp_path):
+        """Passing run leaves schema-versioned JSON+MD twins, no .tmp residue."""
+        checks = {"removed_identity": (True, True)}
+        evidence = {"input_rows": 67, "added_count": 0, "removed_count": 30}
+        population = _summarize_population(
+            {"||*.co.uk^"},
+            {("||*.co.uk^", "||co.uk^")},
+        )
+
+        verdict, manifest = _evaluate_and_write_manifest(
+            checks=checks,
+            evidence=evidence,
+            population=population,
+            output_dir=tmp_path,
+        )
+
+        json_path = tmp_path / "apex-shadow-v1.json"
+        md_path = tmp_path / "apex-shadow-v1.md"
+
+        assert verdict == "pass"
+        assert json_path.is_file()
+        assert md_path.is_file()
+        assert list(tmp_path.glob("*.tmp")) == []
+
+        loaded = json.loads(json_path.read_text(encoding="utf-8"))
+        assert loaded["schema_version"] == SHADOW_REPORT_SCHEMA_VERSION
+        assert loaded["schema_version"] == 1
+        assert loaded["report_type"] == "apex_shadow_gate"
+        assert loaded["verdict"] == "pass"
+        for key in (
+            "created_at",
+            "identity",
+            "corpus",
+            "flags",
+            "signature",
+            "population",
+            "checks",
+            "timing",
+            "source_health",
+            "proposed_guards",
+        ):
+            assert key in loaded
+        assert loaded["identity"] is None
+        assert loaded["corpus"] is None
+        assert loaded["timing"] is None
+        assert loaded["source_health"] is None
+        assert isinstance(manifest, dict)
+
+    def test_red_run_still_writes_manifest_with_observed_delta(self, tmp_path):
+        """D-17-08 core: a failing check records observed deltas on disk."""
+        checks = {"delta_equals_removed": (31, 30)}
+        evidence = {"input_rows": 67, "added_count": 0, "removed_count": 30}
+        population = _summarize_population(set(), set())
+
+        verdict, _ = _evaluate_and_write_manifest(
+            checks=checks,
+            evidence=evidence,
+            population=population,
+            output_dir=tmp_path,
+        )
+
+        json_path = tmp_path / "apex-shadow-v1.json"
+        md_path = tmp_path / "apex-shadow-v1.md"
+
+        assert verdict == "fail"
+        assert json_path.is_file()
+        assert md_path.is_file()
+
+        loaded = json.loads(json_path.read_text(encoding="utf-8"))
+        assert loaded["verdict"] == "fail"
+        assert loaded["checks"]["delta_equals_removed"]["ok"] is False
+        assert loaded["checks"]["delta_equals_removed"]["observed"] == 31
+        assert loaded["checks"]["delta_equals_removed"]["expected"] == 30
+
+    def test_versioned_stems_do_not_clobber_each_other(self, tmp_path):
+        """D-17-07: v1 and v2 stems leave four distinct files in one home."""
+        common = dict(
+            checks={"check": (True, True)},
+            evidence={"removed_count": 0},
+            population=_summarize_population(set(), set()),
+            output_dir=tmp_path,
+        )
+        _evaluate_and_write_manifest(**common, filename_stem="apex-shadow-v1")
+        _evaluate_and_write_manifest(**common, filename_stem="apex-shadow-v2")
+
+        written = sorted(path.name for path in tmp_path.iterdir())
+        assert written == [
+            "apex-shadow-v1.json",
+            "apex-shadow-v1.md",
+            "apex-shadow-v2.json",
+            "apex-shadow-v2.md",
+        ]
+
+    def test_markdown_sibling_carries_verdict_sections_and_buckets(self):
+        """MD mirrors the manifest: banner, signature, buckets, timing, guards."""
+        passing_manifest = {
+            "schema_version": 1,
+            "report_type": "apex_shadow_gate",
+            "verdict": "pass",
+            "created_at": "2026-08-24T00:00:00Z",
+            "signature": {"removed_count": 30},
+            "population": {
+                "total": 30,
+                "buckets": {
+                    "single_label_suffix_apex": {
+                        "count": 29,
+                        "share_percent": 96.67,
+                        "samples": [],
+                    },
+                    "multipart_suffix_apex": {
+                        "count": 1,
+                        "share_percent": 3.33,
+                        "samples": [],
+                    },
+                },
+            },
+            "timing": None,
+            "source_health": None,
+            "proposed_guards": {"binding": False},
+        }
+
+        markdown_pass = _render_shadow_markdown(passing_manifest)
+        assert "PASS" in markdown_pass
+        assert "## Signature" in markdown_pass
+        assert "single_label_suffix_apex" in markdown_pass
+        assert "multipart_suffix_apex" in markdown_pass
+        assert "96.67" in markdown_pass
+        assert "not measured" in markdown_pass.lower()
+        assert "NON-BINDING" in markdown_pass
+
+        failing_manifest = dict(passing_manifest, verdict="fail")
+        markdown_fail = _render_shadow_markdown(failing_manifest)
+        assert "FAIL" in markdown_fail
+
+    def test_default_proposed_guards_carry_explicit_non_binding_marker(self, tmp_path):
+        """D-17-09: the reserved slot is explicitly data-only/non-binding."""
+        _, manifest = _evaluate_and_write_manifest(
+            checks={"check": (True, True)},
+            evidence={"removed_count": 0},
+            population=_summarize_population(set(), set()),
+            output_dir=tmp_path,
+        )
+
+        guards = manifest["proposed_guards"]
+        assert guards["binding"] is False
