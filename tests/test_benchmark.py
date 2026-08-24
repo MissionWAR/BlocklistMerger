@@ -248,6 +248,179 @@ class TestMemoryTop:
         assert "top_allocations" not in data
 
 
+def _make_autos_pair_corpus(raw_dir: Path) -> None:
+    """Create a tiny corpus holding a real-gTLD apex/wildcard pair.
+
+    Synthetic TLD names never reach ``abp_wildcards`` (PSL parse bucketing),
+    so the same-key pair uses ``autos`` — a genuine gTLD per the 16-02
+    recipe — to exercise Direction-A pruning end-to-end.
+    """
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "autos.txt").write_text(
+        "||autos^\n||*.autos^\n||example.com^\n",
+        encoding="utf-8",
+    )
+
+
+class TestApexTimingFlag:
+    """--wildcard-apex-pruning turns one timing leg into the Direction-A ON config."""
+
+    def test_off_report_has_no_compile_flags_key(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Default OFF leg: absent-key backward compatibility (never emits false)."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/apex-off-smoke.json")
+
+        monkeypatch.chdir(tmp_path)
+        return_code = main(
+            ["--corpus", str(raw_dir), "--runs", "1", "--json", str(report_path)]
+        )
+
+        assert return_code == 0
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        assert data["mode"] == "timing"
+        assert "compile_flags" not in data
+        assert data["output_sha256_stable"] is True
+        assert len(data["durations_seconds"]) == 1
+        assert data["summary"]["median_seconds"] > 0
+
+    def test_on_report_records_compile_flags(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """ON leg stamps compile_flags == {"wildcard_apex_pruning": True}."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/apex-on-smoke.json")
+
+        monkeypatch.chdir(tmp_path)
+        return_code = main(
+            [
+                "--corpus",
+                str(raw_dir),
+                "--runs",
+                "1",
+                "--wildcard-apex-pruning",
+                "--json",
+                str(report_path),
+            ]
+        )
+
+        assert return_code == 0
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        assert data["compile_flags"] == {"wildcard_apex_pruning": True}
+        assert data["output_sha256_stable"] is True
+
+    def test_flag_observably_reaches_compile_rules(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """ON leg output is strictly smaller than OFF on the same-key pair fixture."""
+        raw_dir = tmp_path / "raw"
+        _make_autos_pair_corpus(raw_dir)
+        off_report = Path("reports/benchmarks/runs/apex-behavior-off.json")
+        on_report = Path("reports/benchmarks/runs/apex-behavior-on.json")
+
+        monkeypatch.chdir(tmp_path)
+        assert main(["--corpus", str(raw_dir), "--runs", "1", "--json", str(off_report)]) == 0
+        assert (
+            main(
+                [
+                    "--corpus",
+                    str(raw_dir),
+                    "--runs",
+                    "1",
+                    "--wildcard-apex-pruning",
+                    "--json",
+                    str(on_report),
+                ]
+            )
+            == 0
+        )
+
+        off_data = json.loads(off_report.read_text(encoding="utf-8"))
+        on_data = json.loads(on_report.read_text(encoding="utf-8"))
+        off_bytes = off_data["per_run"][0]["output_byte_size"]
+        on_bytes = on_data["per_run"][0]["output_byte_size"]
+
+        # ||*.autos^ vanishes only under the flag: the wildcard line is gone.
+        assert on_bytes < off_bytes
+
+    def test_flag_with_track_memory_rejected_upfront(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """flag + --track-memory dies at argparse with exit 2 and no artifacts."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/apex-reject-memory.json")
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "--corpus",
+                    str(raw_dir),
+                    "--wildcard-apex-pruning",
+                    "--track-memory",
+                    "--json",
+                    str(report_path),
+                ]
+            )
+
+        assert exc_info.value.code == 2
+        assert not report_path.exists()
+
+    def test_flag_with_profile_rejected_upfront(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """flag + --profile dies at argparse with exit 2 and no artifacts."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/apex-reject-profile.json")
+        stats_path = report_path.with_suffix(".pstats")
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "--corpus",
+                    str(raw_dir),
+                    "--wildcard-apex-pruning",
+                    "--profile",
+                    "--json",
+                    str(report_path),
+                ]
+            )
+
+        assert exc_info.value.code == 2
+        assert not report_path.exists()
+        assert not stats_path.exists()
+
+    def test_flag_with_compare_rejected_upfront(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """flag + --compare dies at argparse: document-only mode compiles nothing."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        pre_doc = tmp_path / "unused-pre.json"
+        post_doc = tmp_path / "unused-post.json"
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "--corpus",
+                    str(raw_dir),
+                    "--wildcard-apex-pruning",
+                    "--compare",
+                    str(pre_doc),
+                    str(post_doc),
+                ]
+            )
+
+        assert exc_info.value.code == 2
+
+
 class TestCompareMath:
     """Pure delta math and document-shape tolerance on synthetic numbers only."""
 
