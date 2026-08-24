@@ -2285,6 +2285,193 @@ class TestSourceHealthReconciliation:
         assert report_path.read_text(encoding="utf-8") == original_text
 
 
+def _derive_proposed_guards(
+    *,
+    off_rule_count: int,
+    on_rule_count: int,
+    removed_count: int,
+) -> dict[str, object]:
+    """Derive the NON-BINDING proposed_guards draft from measured population.
+
+    Pure arithmetic over three ints (D-17-09/D-17-10): every
+    flip-trippable release_validator threshold appears with its CURRENT
+    imported value plus the expectation the flip implies, while policy
+    judgments stay ``None`` because Phase 18 wires values atomically with
+    the flip (SAFE-04). The ON leg IS the deterministic post-flip
+    preview, so ``minimum_output_rules.proposed`` is simply the ON rule
+    count. Near-zero removal populations are healthy calibration facts:
+    the headroom window uses a symmetric ``max(R // 2, 1)`` band with a
+    zero-clamped low bound (collapses to [0, 1] at R=0), and nothing
+    divides by zero (drop ratio guarded on ``off > 0``). Non-flippable
+    source-health guards are excluded by construction.
+
+    Asserts NOTHING here -- twins own the arithmetic pins and the corpus
+    gate owns the corpus-scale claims.
+    """
+    headroom_band = max(removed_count // 2, 1)
+    first_flip_drop_ratio = round(removed_count / off_rule_count, 6) if off_rule_count > 0 else 0.0
+    return {
+        "binding": False,
+        "note": (
+            "data-only draft for Phase 18 review (D-17-09/D-17-10); "
+            "values derive from measured population plus headroom and bind nothing"
+        ),
+        "minimum_output_rules": {
+            "current": DEFAULT_MINIMUM_OUTPUT_RULES,
+            "proposed": on_rule_count,
+            "basis": (
+                "the ON leg IS the deterministic post-flip preview; "
+                "expected floor = off_rule_count - removed_count"
+            ),
+        },
+        "previous_extreme_drop_ratio": {
+            "current": DEFAULT_PREVIOUS_EXTREME_DROP_RATIO,
+            "expected_first_post_flip_drop": first_flip_drop_ratio,
+            "proposed": None,
+        },
+        "previous_extreme_increase_ratio": {
+            "current": DEFAULT_PREVIOUS_EXTREME_INCREASE_RATIO,
+            "expected_first_post_flip_increase": 0.0,
+            "proposed": None,
+        },
+        "previous_moderate_delta_ratio": {
+            "current": DEFAULT_PREVIOUS_MODERATE_DELTA_RATIO,
+            "observed_first_flip_relative_delta": first_flip_drop_ratio,
+            "proposed": None,
+        },
+        "previous_extreme_absolute_delta": {
+            "current": DEFAULT_PREVIOUS_EXTREME_ABSOLUTE_DELTA,
+            "observed_first_flip_absolute_rule_delta": removed_count,
+            "proposed": None,
+        },
+        "removal_count_window": {
+            "expected_apex_covered_wildcard_pruned": removed_count,
+            "headroom_low": max(removed_count - headroom_band, 0),
+            "headroom_high": removed_count + headroom_band,
+        },
+        "counter_ledger_equality": {
+            "expected": "tally == counter == removed, both directions",
+        },
+        "uncertain_keeps_stasis": {
+            "expected_delta": 0,
+        },
+    }
+
+
+TIMING_BAR_FLOOR_PERCENT: Final[float] = -10.0
+"""Inclusive D-17-11 floor on the improvement-form overhead quotient.
+
+Mirrors benchmark.meets_floor(improvement, -10.0) exactly (17-02's
+pinned contract in reciprocal form): passes iff raw >= -10.0, i.e.
+ON-leg wall-clock <= OFF-leg x 1.10.
+"""
+
+
+def _overhead_percent(off_median: float, on_median: float) -> float:
+    """Return the unrounded OFF-to-ON relative quotient (improvement form).
+
+    Sign convention mirrors scripts/benchmark.improvement_percent
+    verbatim -- negative means the ON leg is slower -- so the D-17-11
+    <=10% overhead bar reads INCLUSIVELY as
+    ``value >= TIMING_BAR_FLOOR_PERCENT``, the same predicate as 17-02's
+    pinned ``improvement >= -10.0`` floor in reciprocal form. Callers
+    MUST evaluate the bar on this RAW value; rounding is display-only
+    and can never flip a verdict (TestTimingMergeContract pins the
+    hazard direction).
+
+    Raises:
+        ValueError: When ``off_median`` is not strictly positive, since
+            no relative percent is definable over a zero baseline.
+    """
+    if off_median <= 0:
+        raise ValueError(f"off_median must be > 0 to compute overhead percent (got {off_median!r})")
+    return (off_median - on_median) / off_median * 100
+
+
+def _timing_block_from_reports(
+    off_doc: Mapping[str, object],
+    on_doc: Mapping[str, object],
+    *,
+    frozen_digest: str,
+    off_sha: str,
+    on_sha: str,
+) -> dict[str, object]:
+    """Merge the canonical timing reports into the manifest timing slot.
+
+    Contract (T-17-03-B): merge proceeds only when BOTH documents carry
+    the required fields (ValueError naming the first missing field
+    otherwise -- malformed reports fail closed instead of merging
+    partially) and BOTH corpus digests equal ``frozen_digest``
+    (foreign-corpus evidence forces ``same_corpus False`` AND
+    ``passes False`` regardless of medians; overhead stays None). The
+    <=10% bar computes on the RAW unrounded improvement-form quotient;
+    ``relative_overhead_percent`` stores the display-only 2dp rounding.
+    Cross-tie booleans bind each timing leg to THIS gate run's output
+    files by comparing the reports' FINAL per_run ``output_sha256``
+    against the supplied equivalence-leg digests (absent/empty per_run
+    records honestly False). On-leg provenance echoes through
+    ``on_compile_flags`` so an OFF report can never masquerade as ON.
+    """
+    leg_blocks: dict[str, dict[str, object]] = {}
+    same_corpus = True
+    for leg_name, report in (("off", off_doc), ("on", on_doc)):
+        for required_field in ("runs", "durations_seconds", "output_sha256_stable"):
+            if required_field not in report:
+                raise ValueError(f"timing report missing required field {required_field!r}")
+        summary = report.get("summary")
+        if not isinstance(summary, Mapping) or "median_seconds" not in summary:
+            raise ValueError("timing report missing required field 'summary.median_seconds'")
+        corpus = report.get("corpus")
+        if not isinstance(corpus, Mapping) or "manifest_sha256" not in corpus:
+            raise ValueError("timing report missing required field 'corpus.manifest_sha256'")
+
+        durations = report["durations_seconds"]
+        leg_blocks[leg_name] = {
+            "runs": report["runs"],
+            # Verbatim passthrough keeps absolute seconds for CI budget
+            # context (D-17-11); no rounding on this field.
+            "durations_seconds": list(durations),
+            "median_seconds": round(float(summary["median_seconds"]), 2),
+            "output_sha256_stable": report["output_sha256_stable"],
+        }
+        if corpus["manifest_sha256"] != frozen_digest:
+            same_corpus = False
+
+    def _cross_tie(report: Mapping[str, object], expected_sha: str) -> bool:
+        """True when the report's final per-run digest equals the gate leg's."""
+        per_run = report.get("per_run")
+        if not isinstance(per_run, list) or not per_run:
+            return False
+        last_entry = per_run[-1]
+        if not isinstance(last_entry, Mapping):
+            return False
+        return bool(last_entry.get("output_sha256") == expected_sha)
+
+    raw_overhead_percent: float | None = None
+    passes = False
+    if same_corpus:
+        off_median = float(off_doc["summary"]["median_seconds"])
+        on_median = float(on_doc["summary"]["median_seconds"])
+        raw_overhead_percent = _overhead_percent(off_median, on_median)
+        # Inclusive <=10% overhead bar evaluated ONLY on the raw quotient.
+        passes = raw_overhead_percent >= TIMING_BAR_FLOOR_PERCENT
+
+    return {
+        "methodology": "median-of-3 per leg, one kind per invocation",
+        "off": leg_blocks["off"],
+        "on": leg_blocks["on"],
+        "relative_overhead_percent": (
+            round(raw_overhead_percent, 2) if raw_overhead_percent is not None else None
+        ),
+        "bar_percent": 10.0,
+        "passes": passes,
+        "same_corpus": same_corpus,
+        "cross_tie_off": _cross_tie(off_doc, off_sha),
+        "cross_tie_on": _cross_tie(on_doc, on_sha),
+        "on_compile_flags": on_doc.get("compile_flags"),
+    }
+
+
 # ----------------------------------------------------------------------
 # Proposed-guards derivation + timing-merge contract (Phase 17, D-17-09
 # / D-17-10 / D-17-11 / FA-2 / FA-3).
@@ -2375,8 +2562,7 @@ class TestProposedGuardsDraft:
 
         assert guards["minimum_output_rules"]["current"] == DEFAULT_MINIMUM_OUTPUT_RULES
         assert (
-            guards["previous_extreme_drop_ratio"]["current"]
-            == DEFAULT_PREVIOUS_EXTREME_DROP_RATIO
+            guards["previous_extreme_drop_ratio"]["current"] == DEFAULT_PREVIOUS_EXTREME_DROP_RATIO
         )
         assert (
             guards["previous_extreme_increase_ratio"]["current"]
