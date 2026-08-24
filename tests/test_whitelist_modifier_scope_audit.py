@@ -27,10 +27,12 @@ Evidence layers:
 Pattern source: tests/test_cross_format_audit.py (Phase 12 audit suites).
 """
 
+import json
 import os
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, NamedTuple
 
@@ -1320,6 +1322,338 @@ class TestApexShadowMachinery:
 # by the divide-by-zero guard, never a verdict input (Pitfall 11).
 # ----------------------------------------------------------------------
 
+SHADOW_REPORT_SCHEMA_VERSION: Final[int] = 1
+"""Shadow-manifest schema version; consumers fail closed on unknown versions.
+
+House versioned-schema pattern mirroring PROOF_REPORT_SCHEMA_VERSION
+(scripts/pruning_proof.py); a future sanctioned bump must move every
+consumer pin atomically.
+"""
+
+SPLIT_BAR_PERCENT: Final[float] = 1.0
+"""Pre-registered D-17-06 reason-split bar (INCLUSIVE >= comparison)."""
+
+BUCKET_SINGLE_LABEL_SUFFIX_APEX: Final[str] = "single_label_suffix_apex"
+BUCKET_MULTIPART_SUFFIX_APEX: Final[str] = "multipart_suffix_apex"
+"""Manifest population bucket names (RESEARCH E2 inventory verbatim)."""
+
+
+def _classify_apex_bucket(key: str) -> str:
+    """Classify one witness key into its D-01 apex-form bucket.
+
+    Args:
+        key: The wildcard storage key the compiler witnessed (e.g. ``com``
+            or ``co.uk``).
+
+    Returns:
+        ``single_label_suffix_apex`` for single-label suffix keys,
+        ``multipart_suffix_apex`` for multi-label public-suffix keys.
+
+    Raises:
+        ValueError: When the key is empty or carries leading/trailing dots.
+
+    Note:
+        Research A1 operationalization: witness-key label count is the
+        only measurable axis distinguishing D-01's exemplars because
+        every removal pair is mechanically same-key under D-16-02 strict
+        witnessing. Cites D-17-05 (bucket granularity) and D-17-06
+        (inclusive split bar consumed downstream).
+    """
+    if not key:
+        raise ValueError("witness key must be non-empty")
+    if key.startswith(".") or key.endswith("."):
+        raise ValueError(f"witness key must not have leading/trailing dots: {key!r}")
+    if len(key.split(".")) >= 2:
+        return BUCKET_MULTIPART_SUFFIX_APEX
+    return BUCKET_SINGLE_LABEL_SUFFIX_APEX
+
+
+def _apex_candidate_storage_key(candidate_rule: str) -> str:
+    """Extract the wildcard storage key from emitted apex-candidate text.
+
+    Under D-16-02 strict same-key witnessing every removal pair is
+    mechanically (candidate ``||*.K^``, witness ``||K^``), so the key
+    parsed from the candidate's emitted text IS the witness key the
+    compiler recorded. Strips the ``||*.`` prefix, any ``$...`` modifier
+    tail, and the trailing ``^`` anchor.
+    """
+    body = candidate_rule.removeprefix("||*.")
+    body = body.split("$", 1)[0]
+    return body.removesuffix("^")
+
+
+def _summarize_population(
+    candidates: set[str],
+    pairs: set[tuple[str, str]],
+    *,
+    capped_samples: Iterable[Mapping[str, object]] = (),
+    sample_cap: int = DEFAULT_SAMPLE_CAP,
+) -> dict[str, object]:
+    """Aggregate an uncapped apex removal population into D-01 buckets.
+
+    Pure aggregation: classifies each uncapped candidate by its witness
+    key, computes guarded share percentages (FA-2:
+    ``round(count * 100.0 / total, 2)`` with a divide-by-zero guard that
+    yields ``0.0`` shares and no split for near-zero populations), and
+    places capped sample records into the bucket their candidate key
+    classifies into, honoring ``sample_cap`` per bucket.
+
+    Args:
+        candidates: Uncapped removed-candidate rule texts
+            (``ApexTallyingLedger.apex_candidates``).
+        pairs: Uncapped ``(candidate, covering)`` witnesses
+            (``ApexTallyingLedger.apex_pairs``). Accepted alongside
+            ``candidates`` so callers pass the full ledger witness pair;
+            classification needs only candidate keys because pairs are
+            mechanically same-key.
+        capped_samples: Display-evidence sample dicts already mapped to
+            the ``_capped_sample_record`` field names; capped per bucket
+            at ``sample_cap`` so bulk rule text never lands in git
+            (T-17-01-B).
+        sample_cap: Per-bucket display cap (mirrors the ledger's own cap).
+
+    Returns:
+        Population dict following RESEARCH E2: total, both buckets with
+        count/share_percent/samples, partition boolean, inclusive
+        split-bar fields. Asserts nothing -- the partition claim is
+        asserted by twins and later by the corpus gate (Pitfall 9 lives
+        at the assertion sites).
+    """
+    single_count = 0
+    multipart_count = 0
+    for candidate in candidates:
+        bucket_name = _classify_apex_bucket(_apex_candidate_storage_key(candidate))
+        if bucket_name == BUCKET_SINGLE_LABEL_SUFFIX_APEX:
+            single_count += 1
+        else:
+            multipart_count += 1
+
+    total = len(candidates)
+
+    def _share(count: int) -> float:
+        """Guarded FA-2 share percentage."""
+        return round(count * 100.0 / total, 2) if total > 0 else 0.0
+
+    bucket_samples: dict[str, list[dict[str, object]]] = {
+        BUCKET_SINGLE_LABEL_SUFFIX_APEX: [],
+        BUCKET_MULTIPART_SUFFIX_APEX: [],
+    }
+    for sample_record in capped_samples:
+        sample_candidate = str(sample_record.get("candidate_rule", ""))
+        sample_bucket = _classify_apex_bucket(_apex_candidate_storage_key(sample_candidate))
+        samples_list = bucket_samples[sample_bucket]
+        if len(samples_list) < sample_cap:
+            samples_list.append(dict(sample_record))
+
+    pure_tld_share_percent = _share(single_count)
+    return {
+        "total": total,
+        "buckets": {
+            BUCKET_SINGLE_LABEL_SUFFIX_APEX: {
+                "count": single_count,
+                "share_percent": _share(single_count),
+                "samples": bucket_samples[BUCKET_SINGLE_LABEL_SUFFIX_APEX],
+            },
+            BUCKET_MULTIPART_SUFFIX_APEX: {
+                "count": multipart_count,
+                "share_percent": _share(multipart_count),
+                "samples": bucket_samples[BUCKET_MULTIPART_SUFFIX_APEX],
+            },
+        },
+        "buckets_partition_total": single_count + multipart_count == total,
+        "pure_tld_share_percent": pure_tld_share_percent,
+        "split_bar_percent": SPLIT_BAR_PERCENT,
+        "reason_split_triggered": pure_tld_share_percent >= SPLIT_BAR_PERCENT,
+    }
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text through an atomic sibling temp file.
+
+    Idiom copied from scripts/release_validator.py (test-module standalone
+    copy keeps this module import-light per house isolation).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+    temp_path.replace(path)
+
+
+def _atomic_write_json(path: Path, data: Mapping[str, object]) -> None:
+    """Write JSON through an atomic sibling temp file (release_validator idiom)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temp_path.replace(path)
+
+
+def _default_non_binding_guards() -> dict[str, object]:
+    """Return the reserved non-binding proposed-guards slot (D-17-09).
+
+    The real headroom-derived draft over flip-trippable release_validator
+    guards is 17-04 scope; this stub only reserves the schema slot and
+    marks the block explicitly data-only/non-binding.
+    """
+    return {
+        "binding": False,
+        "note": "data-only draft; headroom derivation lands in Phase 17 plan 04",
+        "proposals": {},
+    }
+
+
+def _render_shadow_markdown(manifest: Mapping[str, object]) -> str:
+    """Render the human-readable MD sibling of a shadow manifest.
+
+    Mirrors render_markdown_summary's list-append + section-header
+    structure. Renders values straight from the assembled manifest dict
+    so JSON and MD can never drift apart (FA-2 single-formatting-source
+    discipline).
+    """
+    verdict = str(manifest.get("verdict", "unknown"))
+    banner = "PASS" if verdict == "pass" else "FAIL"
+    population = manifest.get("population") or {}
+    buckets = population.get("buckets") or {}
+
+    lines: list[str] = [
+        f"# Apex Shadow Gate: {banner}",
+        "",
+        f"- Verdict: {verdict}",
+        f"- Schema version: {manifest.get('schema_version')}",
+        f"- Report type: {manifest.get('report_type')}",
+        f"- Created at: {manifest.get('created_at')}",
+        "",
+        "## Signature",
+    ]
+    signature = manifest.get("signature") or {}
+    for key, value in signature.items():
+        lines.append(f"- {key}: {value}")
+
+    lines.append("")
+    lines.append("## Population")
+    lines.append(f"- Total removals: {population.get('total', 0)}")
+    lines.append(f"- Pure-TLD share percent: {population.get('pure_tld_share_percent')}")
+    lines.append(
+        f"- Split bar percent: {population.get('split_bar_percent')} "
+        f"(triggered: {population.get('reason_split_triggered')})"
+    )
+    for bucket_name in (BUCKET_SINGLE_LABEL_SUFFIX_APEX, BUCKET_MULTIPART_SUFFIX_APEX):
+        bucket = buckets.get(bucket_name) or {}
+        lines.append(
+            f"- {bucket_name}: {bucket.get('count', 0)} ({bucket.get('share_percent', 0.0)}%)"
+        )
+        for sample_record in bucket.get("samples", []):
+            lines.append(f"  - sample: {sample_record.get('candidate_rule')}")
+
+    lines.append("")
+    lines.append("## Timing")
+    timing = manifest.get("timing")
+    if timing is None:
+        lines.append("- Not measured (timing legs run as separate invocations).")
+    else:
+        for key, value in timing.items():
+            lines.append(f"- {key}: {value}")
+
+    source_health = manifest.get("source_health")
+    if source_health is not None:
+        lines.append("")
+        lines.append("## Source Health")
+        for key, value in source_health.items():
+            lines.append(f"- {key}: {value}")
+
+    guards = manifest.get("proposed_guards")
+    if guards is not None:
+        lines.append("")
+        lines.append("## Proposed Guards (NON-BINDING)")
+        lines.append("- Data-only draft; Phase 18 wires values atomically with the flip.")
+        for key, value in guards.items():
+            lines.append(f"- {key}: {value}")
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _evaluate_and_write_manifest(
+    *,
+    checks: Mapping[str, tuple[object, object]],
+    evidence: Mapping[str, object],
+    population: Mapping[str, object],
+    output_dir: Path,
+    filename_stem: str = "apex-shadow-v1",
+    identity: Mapping[str, object] | None = None,
+    corpus: Mapping[str, object] | None = None,
+    timing: Mapping[str, object] | None = None,
+    source_health: Mapping[str, object] | None = None,
+    proposed_guards: Mapping[str, object] | None = None,
+) -> tuple[str, dict[str, object]]:
+    """Evaluate checks into an explicit verdict FIELD and always write both siblings.
+
+    D-17-08 write-before-assert ordering: evidence is computed by the
+    caller, checks are evaluated into a verdict HERE, and BOTH files are
+    written unconditionally before any caller assertion runs -- a red run
+    leaves forensic artifacts recording each failing check's observed and
+    expected values (no early returns before the writes).
+
+    Args:
+        checks: Mapping of check name to ``(observed, expected)`` pairs;
+            ``ok`` is computed as equality and drives the verdict.
+        evidence: Computed signature evidence serialized under
+            ``signature`` (input rows, diff counts, ledger deltas...).
+        population: ``_summarize_population()`` output (already rounded
+            at assembly per FA-2 so JSON and MD render identical values).
+        output_dir: Caller-supplied destination directory; paths derive
+            ONLY from this parameter plus the fixed stem (T-17-01-A).
+        filename_stem: Versioned stem without extension (D-17-07;
+            default ``apex-shadow-v1``, flip-day re-run writes v2).
+        identity: Optional provenance block (python/platform/git revision).
+        corpus: Optional frozen-corpus provenance incl. manifest SHA-256.
+        timing: Optional timing block; serializes as null until measured
+            (FA-3 -- this plan reserves the slot only).
+        source_health: Optional per-source health summary (D-17-13).
+        proposed_guards: Optional non-binding guard draft; defaults to
+            the reserved data-only stub (D-17-09).
+
+    Returns:
+        ``(verdict, manifest)`` where manifest is the assembled dict both
+        siblings were rendered from.
+    """
+    evaluated_checks = {
+        name: {"observed": observed, "expected": expected, "ok": observed == expected}
+        for name, (observed, expected) in checks.items()
+    }
+    all_ok = all(check["ok"] for check in evaluated_checks.values())
+    verdict = "pass" if all_ok else "fail"
+
+    manifest: dict[str, object] = {
+        "schema_version": SHADOW_REPORT_SCHEMA_VERSION,
+        "report_type": "apex_shadow_gate",
+        "verdict": verdict,
+        "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "identity": dict(identity) if identity is not None else None,
+        "corpus": dict(corpus) if corpus is not None else None,
+        "flags": {
+            "denyallow_pruning": True,
+            "wildcard_apex_pruning_off": False,
+            "wildcard_apex_pruning_on": True,
+        },
+        "signature": dict(evidence),
+        "population": dict(population),
+        "checks": evaluated_checks,
+        "timing": dict(timing) if timing is not None else None,
+        "source_health": dict(source_health) if source_health is not None else None,
+        "proposed_guards": (
+            dict(proposed_guards) if proposed_guards is not None else _default_non_binding_guards()
+        ),
+    }
+
+    json_path = output_dir / f"{filename_stem}.json"
+    md_path = output_dir / f"{filename_stem}.md"
+    _atomic_write_json(json_path, manifest)
+    _atomic_write_text(md_path, _render_shadow_markdown(manifest))
+    return verdict, manifest
+
 
 class TestShadowManifestWriter:
     """Unit-proven manifest writer: classifier, population, forensics."""
@@ -1343,9 +1677,15 @@ class TestShadowManifestWriter:
         candidates = {"||*.com^", "||*.net^", "||*.org^", "||*.co.uk^"}
         pairs = {(candidate, candidate.replace("*.", "")) for candidate in candidates}
         samples = [
-            {"decision_id": "d-single", "decision_type": "t", "fingerprint": "f1",
-             "candidate_rule": "||*.com^", "candidate_domain": "",
-             "covering_rule": "||com^", "sample": None},
+            {
+                "decision_id": "d-single",
+                "decision_type": "t",
+                "fingerprint": "f1",
+                "candidate_rule": "||*.com^",
+                "candidate_domain": "",
+                "covering_rule": "||com^",
+                "sample": None,
+            },
         ]
 
         summary = _summarize_population(candidates, pairs, capped_samples=samples)
@@ -1363,9 +1703,15 @@ class TestShadowManifestWriter:
         candidates = {"||*.co.uk^"}
         pairs = {("||*.co.uk^", "||co.uk^")}
         samples = [
-            {"decision_id": "d-multipart", "decision_type": "t", "fingerprint": "f2",
-             "candidate_rule": "||*.co.uk^", "candidate_domain": "",
-             "covering_rule": "||co.uk^", "sample": None},
+            {
+                "decision_id": "d-multipart",
+                "decision_type": "t",
+                "fingerprint": "f2",
+                "candidate_rule": "||*.co.uk^",
+                "candidate_domain": "",
+                "covering_rule": "||co.uk^",
+                "sample": None,
+            },
         ]
 
         summary = _summarize_population(candidates, pairs, capped_samples=samples)
@@ -1389,12 +1735,10 @@ class TestShadowManifestWriter:
 
     def test_split_bar_boundary_is_inclusive_at_one_percent(self):
         """FA-1/D-17-06: exactly 1.0% triggers; 0.99% does not."""
-        at_bar = {
-            f"||*.d{i:03d}^" for i in range(99)
-        } | {"||*.com^"}
-        below_bar = {
-            f"||*.m{i:04d}.co.uk^" for i in range(9901)
-        } | {f"||*.s{i:02d}^" for i in range(99)}
+        at_bar = {f"||*.m{i:03d}.co.uk^" for i in range(99)} | {"||*.com^"}
+        below_bar = {f"||*.m{i:04d}.co.uk^" for i in range(9901)} | {
+            f"||*.s{i:02d}^" for i in range(99)
+        }
 
         summary_at_bar = _summarize_population(at_bar, set())
         summary_below = _summarize_population(below_bar, set())
