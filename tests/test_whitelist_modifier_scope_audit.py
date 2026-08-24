@@ -932,3 +932,219 @@ class TestDenyallowShadowEquivalence:
         print(f"[D-04 SHADOW] kept_because_uncertain {kept_before:,} -> {kept_after:,}")
         print(f"[D-04 SHADOW] off_leg_seconds={result.off_seconds:.1f}")
         print(f"[D-04 SHADOW] on_leg_seconds={result.on_seconds:.1f}")
+
+
+# ----------------------------------------------------------------------
+# Apex shadow-comparison machinery unit layer (Phase 17, SAFE-03).
+#
+# Fixture-scale twin layer for the apex OFF/ON shadow gate that Phase
+# 17-03 feeds the frozen corpus. Proves the generalized kwargs-forwarding
+# leg helper, the uncapped-witnessing ApexTallyingLedger (candidates AND
+# (candidate, covering) pairs past any sample cap), and the
+# placement-specific signature S1-S8 locked by Phase 16 composites --
+# INCLUDING the deliberate S4 DELTA direction (ON total_records exceeds
+# OFF by exactly the removal count; a to-be-pruned wildcard has no
+# OFF-leg record) and S6 uncertain-keeps STASIS that distinguish this
+# gate from the v1.2 denyallow precedent.
+#
+# Fixture recipe extends the proven 16-02 composite (28 real single-label
+# public-suffix pairs + autos) with ONE multi-label public-suffix pair
+# (||*.co.uk^ / ||co.uk^ -- genuine same-key prune, exercising the
+# multipart bucket end-to-end), ONE $important keep control, ONE
+# uncertain keep control, ONE whitelist-conflict control, and ONE
+# $denyallow control whose two children are pruned identically in BOTH
+# legs because both legs run production-default denyallow_pruning=True
+# (D-16-01 lineage): the apex flag is the only moving part.
+# ----------------------------------------------------------------------
+
+# Real single-label public suffixes ONLY: synthetic TLD names never reach
+# abp_wildcards (PSL parse bucketing), so composite removal populations
+# must use real suffixes (16-02 decision).
+APEX_SHADOW_PAIR_TLDS: Final[tuple[str, ...]] = (
+    "xyz",
+    "online",
+    "site",
+    "top",
+    "icu",
+    "club",
+    "shop",
+    "store",
+    "tech",
+    "cloud",
+    "space",
+    "website",
+    "fun",
+    "pro",
+    "cyou",
+    "live",
+    "life",
+    "world",
+    "today",
+    "email",
+    "link",
+    "zone",
+    "agency",
+    "digital",
+    "global",
+    "network",
+    "media",
+    "systems",
+)
+
+APEX_SHADOW_FIXTURE_LINES: Final[list[str]] = [
+    *[line_part for tld in APEX_SHADOW_PAIR_TLDS for line_part in (f"||{tld}^", f"||*.{tld}^")],
+    # Apex pair + $important keep control: the important-carrying wildcard
+    # must survive BOTH legs (narrower priority never qualifies).
+    "||autos^",
+    "||*.autos^",
+    "||*.autos^$important",
+    # Uncertain keep control: no ||com^ apex present, so this wildcard's
+    # coverage stays undecided and it is kept in both legs.
+    "||*.com^",
+    # Whitelist-conflict control: identical exception_covered count in both legs.
+    "@@||whi.test^",
+    "||whi.test^",
+    # $denyallow control: children are NOT named in the exemption list, so
+    # both legs denyallow-prune them identically under production defaults.
+    # (Naming them inside $denyallow would exempt exactly those domains.)
+    "||*.buzz^$denyallow=safe.buzz|keep.buzz",
+    "||one.buzz^",
+    "||two.buzz^",
+    # Multi-label public-suffix pair: exercises the multipart_suffix_apex
+    # bucket end-to-end through a genuine strict same-key prune.
+    "||*.co.uk^",
+    "||co.uk^",
+]
+
+
+class TestApexShadowMachinery:
+    """Unit-proven apex two-leg shadow comparison over synthetic fixture lines.
+
+    Fast twins proving the generalized shadow machinery reproduces the
+    placement-specific apex signature BEFORE the corpus gate consumes the
+    same components against the frozen dataset.
+    """
+
+    def _result(self):
+        return _run_apex_shadow_comparison(list(APEX_SHADOW_FIXTURE_LINES))
+
+    def test_apex_delta_signature_exact_on_fixture_lines(self):
+        """Flag ON removes exactly the apex-proven wildcards; nothing else moves.
+
+        Pins signature elements S1-S8 as separate asserts over computed
+        values (never chained comparisons). S4 asserts the DELTA direction
+        and S6 asserts uncertain-keeps STASIS per 16-RESEARCH Derived
+        Implications 3-4 -- deliberately unlike the denyallow gate where
+        totals stayed stable and uncertain dropped by the prune count.
+        """
+        result = self._result()
+
+        # S1: input identity across legs.
+        assert result.off_stats.total_input == result.on_stats.total_input
+
+        removed = set(result.off_lines) - set(result.on_lines)
+        added = set(result.on_lines) - set(result.off_lines)
+        expected_removed = {
+            f"||*.{tld}^" for tld in APEX_SHADOW_PAIR_TLDS
+        } | {"||*.autos^", "||*.co.uk^"}
+
+        # S2: added-lines empty -- wildcards can only vanish.
+        assert not added
+
+        # Exact removed population on this fixture (locked computed values).
+        assert len(removed) == len(expected_removed)
+        assert removed == expected_removed
+
+        # S3: uncapped witness identity trio -- ledger set, stats counter,
+        # removed set all agree past the sample cap.
+        assert result.on_ledger.apex_candidates == removed
+        assert result.on_stats.apex_covered_wildcard_pruned == len(removed)
+
+        # S4: ON total_records exceeds OFF by EXACTLY the removal count
+        # (a to-be-pruned wildcard has NO OFF-leg record; write-time keeps
+        # emit nothing). Never assert totals equality across these legs.
+        off_total_records = result.off_ledger.summary()["total_records"]
+        on_total_records = result.on_ledger.summary()["total_records"]
+        assert on_total_records - off_total_records == len(removed)
+
+        off_by_reason = result.off_ledger.summary()["by_reason"]
+        on_by_reason = result.on_ledger.summary()["by_reason"]
+
+        # S5a: whitelist-conflict bucket bit-identical across legs.
+        whitelist_off = off_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+        whitelist_on = on_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+        assert whitelist_off == whitelist_on
+
+        # S5b: denyallow bucket identical across legs -- both legs run the
+        # production default denyallow_pruning=True so the apex flag is the
+        # only moving part.
+        denyallow_off = off_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+        denyallow_on = on_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+        assert denyallow_off == denyallow_on
+
+        # S6: uncertain-keeps STASIS (equality is correct here).
+        kept_before = off_by_reason[REASON_KEPT_BECAUSE_UNCERTAIN]
+        kept_after = on_by_reason[REASON_KEPT_BECAUSE_UNCERTAIN]
+        assert kept_before == kept_after
+
+        # S7: every other attribution bucket byte-stable, both directions.
+        # The buckets that may differ are skipped because each is pinned
+        # EXACTLY above: apex by S3/S4, kept_because_uncertain by S6.
+        skipped_reasons = {REASON_APEX_COVERS_TLD_WILDCARD, REASON_KEPT_BECAUSE_UNCERTAIN}
+        for reason, off_count in off_by_reason.items():
+            if reason in skipped_reasons:
+                continue
+            assert on_by_reason.get(reason, 0) == off_count
+        for reason, on_count in on_by_reason.items():
+            if reason in skipped_reasons:
+                continue
+            assert off_by_reason.get(reason, 0) == on_count
+
+        # S8: survivor-coverer membership via the UNCAPPED pairs set --
+        # never via capped samples (samples cap at DEFAULT_SAMPLE_CAP per
+        # bucket and are display evidence only).
+        on_line_set = set(result.on_lines)
+        pairs = result.on_ledger.apex_pairs
+        assert len(pairs) == len(removed)
+        for candidate_rule, covering_rule in sorted(pairs):
+            assert candidate_rule in removed
+            assert covering_rule in on_line_set
+
+        # OFF-side witnessing stays empty: the flag-OFF leg emits nothing.
+        assert result.off_ledger.apex_candidates == set()
+        assert result.off_ledger.apex_pairs == set()
+
+        # Informational evidence block (asserts nothing about magnitude).
+        print(f"\n[APEX SHADOW] total_input={result.off_stats.total_input:,}")
+        print(f"[APEX SHADOW] removed={len(removed):,}")
+        print(f"[APEX SHADOW] apex_pairs={len(pairs):,}")
+        print(f"[APEX SHADOW] off_leg_seconds={result.off_seconds:.3f}")
+        print(f"[APEX SHADOW] on_leg_seconds={result.on_seconds:.3f}")
+
+    def test_apex_shadow_reruns_are_byte_deterministic(self):
+        """Two invocations over the same lines yield identical off/on outputs."""
+        first = self._result()
+        second = self._result()
+
+        assert first.off_lines == second.off_lines
+        assert first.on_lines == second.on_lines
+
+    def test_generalized_leg_helper_preserves_default_denyallow_ledger(self):
+        """Omitting ledger_factory reproduces the legacy denyallow contract.
+
+        Behavior-preservation twin of the 16-02 handoff generalization:
+        existing callers pass exactly what they passed before and receive
+        a DenyallowTallyingLedger-backed leg unchanged.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = Path(tmpdir) / "legacy_leg.txt"
+            stats, ledger, seconds = _compile_shadow_leg(
+                lambda: iter(["||unrelated.example^"]),
+                output_path,
+                denyallow_pruning=False,
+            )
+
+        assert isinstance(ledger, DenyallowTallyingLedger)
+        assert ledger.denyallow_candidates == set()
+        assert isinstance(stats, CompileStats)
+        assert seconds >= 0.0
