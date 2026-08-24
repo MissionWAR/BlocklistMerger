@@ -694,3 +694,198 @@ class TestTimingMedianContract:
         data = json.loads(report_path.read_text(encoding="utf-8"))
         assert data["durations_seconds"] == [0.3, 0.1]
         assert abs(data["summary"]["median_seconds"] - 0.2) < 1e-9
+
+
+def _write_slim_baseline(path: Path, median: float, digest: str) -> None:
+    """Write a slim pinned-baseline document with the loader-required header.
+
+    Mirrors tests/fixtures/benchmarks/corpus-baseline.json: top-level
+    ``median_seconds``/``manifest_sha256`` (the slim extract_perf_fields
+    path) plus ``report_type``/``mode``, which run_compare's PRE-side
+    ``_load_timing_report`` gate requires on both compared documents.
+    """
+    path.write_text(
+        json.dumps(
+            {
+                "report_type": "corpus_benchmark",
+                "mode": "timing",
+                "median_seconds": median,
+                "manifest_sha256": digest,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+class TestUpfrontValidation:
+    """IN-04: invalid mode/suffix combos die at argparse before any corpus work.
+
+    Usage errors must never depend on corpus state and must leave zero
+    artifacts behind — neither a report JSON nor an orphaned .pstats dump.
+    """
+
+    def test_profile_with_compare_baseline_rejected_before_leg(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """--profile x --compare-baseline exits 2 with no report and no .pstats."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        digest = manifest_digest(build_corpus_manifest(raw_dir))
+        baseline = tmp_path / "baseline.json"
+        _write_slim_baseline(baseline, 999.0, digest)
+        report_path = Path("reports/benchmarks/runs/in04-profile.json")
+        stats_path = report_path.with_suffix(".pstats")
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "--corpus",
+                    str(raw_dir),
+                    "--profile",
+                    "--json",
+                    str(report_path),
+                    "--compare-baseline",
+                    str(baseline),
+                ]
+            )
+
+        assert exc_info.value.code == 2
+        assert not report_path.exists()
+        assert not stats_path.exists()
+
+    def test_track_memory_with_compare_baseline_rejected_before_leg(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """--track-memory x --compare-baseline exits 2 with no report written."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        digest = manifest_digest(build_corpus_manifest(raw_dir))
+        baseline = tmp_path / "baseline.json"
+        _write_slim_baseline(baseline, 999.0, digest)
+        report_path = Path("reports/benchmarks/runs/in04-memory.json")
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "--corpus",
+                    str(raw_dir),
+                    "--track-memory",
+                    "--json",
+                    str(report_path),
+                    "--compare-baseline",
+                    str(baseline),
+                ]
+            )
+
+        assert exc_info.value.code == 2
+        assert not report_path.exists()
+
+    def test_non_json_suffix_timing_rejected_before_compile(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A non-.json --json target exits 2 before the corpus leg compiles."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/in04-timing.txt")
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--corpus", str(raw_dir), "--runs", "1", "--json", str(report_path)])
+
+        assert exc_info.value.code == 2
+        assert not report_path.exists()
+
+    def test_non_json_suffix_profile_leaves_no_pstats_orphan(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The review's exact scenario b: invalid target must not strand a .pstats."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/in04-profile.txt")
+        stats_path = report_path.with_suffix(".pstats")
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as exc_info:
+            main(["--corpus", str(raw_dir), "--profile", "--json", str(report_path)])
+
+        assert exc_info.value.code == 2
+        assert not stats_path.exists()
+        assert not report_path.exists()
+
+
+class TestCompareBaselineSmoke:
+    """End-to-end flagship --compare-baseline flow (named gap in 14-REVIEW).
+
+    Baseline documents live in tmp_path on purpose: compare READ paths
+    intentionally accept anywhere; only WRITER paths are root-confined.
+    """
+
+    def test_happy_path_fresh_leg_beats_generous_baseline(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Slim baseline (median 999.0, matched digest) loses to a fresh tiny leg."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        digest = manifest_digest(build_corpus_manifest(raw_dir))
+        baseline = tmp_path / "baseline-generous.json"
+        _write_slim_baseline(baseline, 999.0, digest)
+        report_path = Path("reports/benchmarks/runs/baseline-happy.json")
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main(
+            [
+                "--corpus",
+                str(raw_dir),
+                "--runs",
+                "1",
+                "--json",
+                str(report_path),
+                "--compare-baseline",
+                str(baseline),
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        verdict_line = captured.out.strip().splitlines()[-1]
+        verdict = json.loads(verdict_line)
+        assert verdict["pre_seconds"] == 999.0
+        assert verdict["passes"] is True
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        assert data["mode"] == "timing"
+
+    def test_failure_direction_when_baseline_far_faster(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Baseline median 0.0001 loses to the fresh leg: exit 1, passes False."""
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        digest = manifest_digest(build_corpus_manifest(raw_dir))
+        baseline = tmp_path / "baseline-fast.json"
+        _write_slim_baseline(baseline, 0.0001, digest)
+        report_path = Path("reports/benchmarks/runs/baseline-fail.json")
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main(
+            [
+                "--corpus",
+                str(raw_dir),
+                "--runs",
+                "1",
+                "--json",
+                str(report_path),
+                "--compare-baseline",
+                str(baseline),
+            ]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        verdict_line = captured.out.strip().splitlines()[-1]
+        verdict = json.loads(verdict_line)
+        assert verdict["passes"] is False
+        # The fresh timing report is still written even when the verdict fails.
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        assert data["mode"] == "timing"
