@@ -943,6 +943,11 @@ def main(argv: list[str] | None = None) -> int:
                 "profile/memory legs do not consume the flag and would "
                 "silently misreport the measurement configuration"
             )
+        if args.compare_baseline is not None and (args.profile or args.track_memory):
+            parser.error(
+                "--compare-baseline cannot combine with --profile/--track-memory: "
+                "baseline comparison consumes timing-mode documents only"
+            )
         if not corpus_dir.is_dir():
             raise BenchmarkError(
                 f"corpus directory not found: {corpus_dir}; run `python run.py fetch` first"
@@ -954,6 +959,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.json is None:
             parser.error("--json is required for benchmark runs")
+        if args.json.suffix != ".json":
+            parser.error(
+                "--json report target must end in .json; invalid suffixes are "
+                "rejected up front so no instrumented leg work or .pstats "
+                "artifact is ever wasted on an unwritable target"
+            )
 
         if args.profile:
             run_profile_leg(corpus_dir, args.json)
