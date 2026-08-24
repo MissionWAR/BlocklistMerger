@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.benchmark
 from scripts.benchmark import (
     build_corpus_manifest,
     extract_perf_fields,
@@ -468,3 +469,228 @@ class TestCompareMath:
         assert "improvement_percent" not in captured.out
         assert "PASS" not in captured.out and "FAIL" not in captured.out
         assert "PASS" not in captured.err and "FAIL" not in captured.err
+
+
+class _ScriptedNanoClock:
+    """Stand-in for the ``time`` module whose ``perf_counter_ns`` is scripted.
+
+    Characterization of the median contract needs measured durations that are
+    EXACT post-rounding: real ``time.sleep`` overshoots its nominal duration
+    (OS scheduling), which would break a 1e-9 assertion against 0.2. Scripted
+    perf_counter_ns readings pin elapsed seconds deterministically; every
+    other attribute delegates to the real module (strftime/gmtime stay live).
+    """
+
+    def __init__(self, readings: list[int]) -> None:
+        self._readings = iter(readings)
+        self._real = time
+
+    def perf_counter_ns(self) -> int:
+        return next(self._readings)
+
+    def __getattr__(self, name: str):
+        return getattr(self._real, name)
+
+
+def _fake_compile(lines: object, output_file: str, **_kwargs: object) -> None:
+    """Honor the (iterable, output-path-string) compile signature; write nothing."""
+    del lines
+    del output_file
+    return None
+
+
+class TestDiag11BarMechanics:
+    """D-17-11's <=10% overhead bar expressed exactly as shipped compare machinery.
+
+    Equivalence chain (17-RESEARCH E4): on <= off * 1.10 ⟺ improvement >= -10.0
+    ⟺ --min-improve-percent -10.0 with the inclusive meets_floor predicate.
+    """
+
+    def test_improvement_at_exact_minus_ten_boundary(self) -> None:
+        # pre 100.0 / post 110.0 is exactly +10% overhead.
+        assert abs(improvement_percent(100.0, 110.0) - (-10.0)) < 1e-9
+
+    def test_meets_floor_inclusive_at_diag11_bar(self) -> None:
+        # The <=10%-overhead bar PASSES at exactly +10% overhead (inclusive).
+        assert meets_floor(-10.0, -10.0) is True
+
+    def test_just_over_bar_fails_floor(self) -> None:
+        assert meets_floor(improvement_percent(100.0, 110.0001), -10.0) is False
+
+    def test_headroom_clears_floor(self) -> None:
+        assert meets_floor(improvement_percent(100.0, 90.0), -10.0) is True
+
+    def test_run_compare_fail_direction_exits_one(self, tmp_path: Path, capsys) -> None:
+        digest = "a" * 64
+        pre_path = tmp_path / "off.json"
+        post_path = tmp_path / "on.json"
+        pre_path.write_text(json.dumps(_full_timing_document(100.0, digest)), encoding="utf-8")
+        post_path.write_text(json.dumps(_full_timing_document(112.0, digest)), encoding="utf-8")
+
+        exit_code = run_compare(pre_path, post_path, -10.0)
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        verdict_line = captured.out.strip().splitlines()[-1]
+        verdict = json.loads(verdict_line)
+        assert verdict["floor_percent"] == -10.0
+        assert verdict["passes"] is False
+
+    def test_run_compare_pass_direction_exits_zero(self, tmp_path: Path, capsys) -> None:
+        digest = "a" * 64
+        pre_path = tmp_path / "off.json"
+        post_path = tmp_path / "on.json"
+        pre_path.write_text(json.dumps(_full_timing_document(100.0, digest)), encoding="utf-8")
+        post_path.write_text(json.dumps(_full_timing_document(108.0, digest)), encoding="utf-8")
+
+        exit_code = run_compare(pre_path, post_path, -10.0)
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        verdict_line = captured.out.strip().splitlines()[-1]
+        verdict = json.loads(verdict_line)
+        assert verdict["passes"] is True
+
+    def test_cli_accepts_bare_negative_floor_value(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """Pins the exact canonical command shape incl. argparse negative handling."""
+        digest = "a" * 64
+        pre_path = tmp_path / "off.json"
+        post_path = tmp_path / "on.json"
+        pre_path.write_text(json.dumps(_full_timing_document(100.0, digest)), encoding="utf-8")
+        post_path.write_text(json.dumps(_full_timing_document(90.0, digest)), encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main(
+            ["--compare", str(pre_path), str(post_path), "--min-improve-percent", "-10.0"]
+        )
+        captured = capsys.readouterr()
+
+        assert exit_code == 0
+        verdict_line = captured.out.strip().splitlines()[-1]
+        verdict = json.loads(verdict_line)
+        assert verdict["floor_percent"] == -10.0
+
+    def test_drift_refusal_dominates_diag11_verdict(self, tmp_path: Path, capsys) -> None:
+        """Mismatched digests refuse EVEN THOUGH improvement (+50%) clears -10.0."""
+        pre_path = tmp_path / "off.json"
+        post_path = tmp_path / "on.json"
+        pre_path.write_text(json.dumps(_full_timing_document(100.0, "c" * 64)), encoding="utf-8")
+        post_path.write_text(json.dumps(_full_timing_document(50.0, "d" * 64)), encoding="utf-8")
+
+        exit_code = run_compare(pre_path, post_path, -10.0)
+        captured = capsys.readouterr()
+
+        assert exit_code == 1
+        assert "passes" not in captured.out
+        assert "PASS" not in captured.out and "FAIL" not in captured.out
+
+    def test_relative_within_run_off_on_compare_rehearsal(
+        self, tmp_path: Path, monkeypatch, capsys
+    ) -> None:
+        """17-04 stage-4 dry run: OFF leg → ON leg → compare at floor -10.0.
+
+        Asserts STRUCTURE only (parseable verdict JSON, floor value, passes ==
+        exit-code-zero). Millisecond-scale fixtures are noise-dominated, so the
+        verdict DIRECTION belongs to 17-04's hardware-stable canonical run.
+        """
+        raw_dir = tmp_path / "raw"
+        _make_autos_pair_corpus(raw_dir)
+        off_report = Path("reports/benchmarks/runs/rehearsal-off.json")
+        on_report = Path("reports/benchmarks/runs/rehearsal-on.json")
+
+        monkeypatch.chdir(tmp_path)
+        assert main(["--corpus", str(raw_dir), "--runs", "1", "--json", str(off_report)]) == 0
+        assert (
+            main(
+                [
+                    "--corpus",
+                    str(raw_dir),
+                    "--runs",
+                    "1",
+                    "--wildcard-apex-pruning",
+                    "--json",
+                    str(on_report),
+                ]
+            )
+            == 0
+        )
+
+        compare_exit = main(
+            [
+                "--compare",
+                str(off_report),
+                str(on_report),
+                "--min-improve-percent",
+                "-10.0",
+            ]
+        )
+        captured = capsys.readouterr()
+
+        verdict_line = captured.out.strip().splitlines()[-1]
+        verdict = json.loads(verdict_line)
+        assert verdict["floor_percent"] == -10.0
+        assert verdict["passes"] == (compare_exit == 0)
+
+
+class TestTimingMedianContract:
+    """Median-of-N tie/interpolation contract pinned by characterization (FA-2).
+
+    Odd sample counts report the exact middle observation (no interpolation);
+    even counts average the two middle values; summary rounds to 6 decimals.
+    This is the tie contract the 17-04 manifest merge inherits.
+    """
+
+    def test_median_of_three_reports_exact_middle_observation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Controlled durations [0.30, 0.10, 0.20] s in call order.
+        readings = [
+            0,
+            300_000_000,
+            1_000_000_000,
+            1_100_000_000,
+            2_000_000_000,
+            2_200_000_000,
+        ]
+        monkeypatch.setattr(scripts.benchmark, "time", _ScriptedNanoClock(readings))
+        monkeypatch.setattr(scripts.benchmark, "compile_rules", _fake_compile)
+
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/median-three.json")
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main(["--corpus", str(raw_dir), "--runs", "3", "--json", str(report_path)])
+
+        assert exit_code == 0
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        assert data["durations_seconds"] == [0.3, 0.1, 0.2]
+        assert abs(data["summary"]["median_seconds"] - 0.2) < 1e-9
+        # Fake writes no output file: sha-stable path tolerates absence via
+        # empty-string fingerprints.
+        assert data["output_sha256_stable"] is True
+
+    def test_median_of_two_averages_middle_pair(self, tmp_path: Path, monkeypatch) -> None:
+        # Controlled durations [0.30, 0.10] s: mean of the middle pair = 0.2.
+        readings = [
+            0,
+            300_000_000,
+            1_000_000_000,
+            1_100_000_000,
+        ]
+        monkeypatch.setattr(scripts.benchmark, "time", _ScriptedNanoClock(readings))
+        monkeypatch.setattr(scripts.benchmark, "compile_rules", _fake_compile)
+
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        report_path = Path("reports/benchmarks/runs/median-two.json")
+
+        monkeypatch.chdir(tmp_path)
+        exit_code = main(["--corpus", str(raw_dir), "--runs", "2", "--json", str(report_path)])
+
+        assert exit_code == 0
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        assert data["durations_seconds"] == [0.3, 0.1]
+        assert abs(data["summary"]["median_seconds"] - 0.2) < 1e-9
