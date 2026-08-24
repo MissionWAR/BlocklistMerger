@@ -1918,6 +1918,99 @@ class TestShadowManifestWriter:
 # ----------------------------------------------------------------------
 
 
+def _streaming_sha256(path: Path) -> str:
+    """Return a chunked SHA-256 hex digest for a file.
+
+    Local mirror of the streaming hashing idiom used by
+    scripts/benchmark_pipeline._sha256 and the downloader so file
+    identities compare equal across modules regardless of which helper
+    computed them (the Stage-A provenance chain hashes the same raw
+    files in several places; identical idiom keeps digests comparable).
+    """
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _reconcile_source_health_for_freeze(
+    report_path: Path,
+    raw_dir: Path,
+    output_path: Path,
+) -> int:
+    """Fill failed-no-identity health rows from disk; touch nothing else.
+
+    Closes the D-17-13 hole (research Pitfall P3 / Open Question #2): a
+    totally-failed fetch records ``byte_size=0`` and ``sha256=None``
+    (scripts/downloader.py failed-fetch shape), which would make the
+    fail-closed freezer raise "metadata incomplete" and abort the whole
+    canonical run. For every row with ``status == "failed"`` and a falsy
+    ``sha256`` whose named raw file EXISTS on disk, this helper fills
+    ``byte_size``/``sha256`` FROM that file while keeping ``status``
+    honestly ``failed``. Reconciliation bridges producer shape to
+    consumer shape WITHOUT weakening the consumer's disk re-verification:
+    post-reconciliation content drift still fails closed, proven by
+    TestSourceHealthReconciliation against the REAL
+    ``_source_health_manifest_entry``.
+
+    Args:
+        report_path: Downloader-written source-health JSON report.
+        raw_dir: Directory holding the on-disk raw files rows name.
+        output_path: Destination for the reconciled COPY (the original
+            report file is never mutated in place).
+
+    Returns:
+        The number of rows actually filled from disk.
+
+    Raises:
+        ValueError: When the document is not a JSON object or lacks a
+            list-shaped ``sources`` member -- fail-closed BEFORE any
+            filesystem or write activity.
+
+    Note:
+        OQ#2 resolution: this helper lives in the gate layer BY DESIGN so
+        scripts/benchmark_pipeline.py semantics stay byte-untouched;
+        freeze's traversal/symlink/drift fail-closed validation is never
+        relaxed here.
+    """
+    document = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError("source-health report must be a JSON object")
+    sources = document.get("sources")
+    if not isinstance(sources, list):
+        raise ValueError("source-health report must contain a sources list")
+
+    reconciled_sources = copy.deepcopy(sources)
+    filled_count = 0
+    for row in reconciled_sources:
+        if not isinstance(row, dict):
+            continue
+        filename = row.get("filename")
+        if not isinstance(filename, str) or not filename:
+            continue
+        if row.get("status") != "failed" or row.get("sha256"):
+            continue
+        candidate = raw_dir / filename
+        if not candidate.is_file():
+            continue
+        row["byte_size"] = candidate.stat().st_size
+        row["sha256"] = _streaming_sha256(candidate)
+        filled_count += 1
+
+    # ALWAYS write the full reconciled document atomically, even when zero
+    # rows were filled, so callers get one consistent artifact path.
+    output_document = dict(document)
+    output_document["sources"] = reconciled_sources
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(".tmp")
+    with open(temp_path, "w", encoding="utf-8", newline="\n") as handle:
+        json.dump(output_document, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    temp_path.replace(output_path)
+    return filled_count
+
+
 class TestSourceHealthReconciliation:
     """Fail-closed contract twins for the pre-freeze reconciliation helper.
 
@@ -2133,7 +2226,9 @@ class TestSourceHealthReconciliation:
         report_path = tmp_path / "source-health.json"
         output_path = tmp_path / "reconciled-source-health.json"
         self._seed_raw_dir(raw_dir)
-        report_path.write_text(json.dumps({"generated_at": "2026-08-24T00:00:00Z"}), encoding="utf-8")
+        report_path.write_text(
+            json.dumps({"generated_at": "2026-08-24T00:00:00Z"}), encoding="utf-8"
+        )
 
         with pytest.raises(ValueError) as excinfo:
             _reconcile_source_health_for_freeze(report_path, raw_dir, output_path)
