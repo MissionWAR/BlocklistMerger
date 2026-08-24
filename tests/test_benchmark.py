@@ -782,6 +782,58 @@ class TestUpfrontValidation:
         assert exc_info.value.code == 2
         assert not report_path.exists()
 
+    @pytest.mark.parametrize(
+        ("mode_flags", "flag_label"),
+        [
+            pytest.param(["--profile"], "--profile", id="profile"),
+            pytest.param(["--track-memory"], "--track-memory", id="track-memory"),
+            pytest.param(["--memory-top", "5"], "--memory-top", id="memory-top"),
+            pytest.param(["--compare-baseline"], "--compare-baseline", id="compare-baseline"),
+        ],
+    )
+    def test_compare_with_mode_flags_rejected_before_dispatch(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        capsys,
+        mode_flags: list[str],
+        flag_label: str,
+    ) -> None:
+        """--compare x measurement flags die at argparse naming the conflict.
+
+        Document-only compare compiles nothing, so a silent early return
+        would let --profile/--track-memory measure nothing while the user
+        believes evidence was produced, and would ignore --compare-baseline.
+        The message assertion proves THIS guard fired (exit 2 alone could
+        come from an unrelated memory-top rule).
+        """
+        raw_dir = tmp_path / "raw"
+        _make_tiny_corpus(raw_dir)
+        baseline = tmp_path / "baseline.json"
+        if "--compare-baseline" in mode_flags:
+            digest = manifest_digest(build_corpus_manifest(raw_dir))
+            _write_slim_baseline(baseline, 999.0, digest)
+        report_path = Path("reports/benchmarks/runs/in04-compare-guard.json")
+        stats_path = report_path.with_suffix(".pstats")
+
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(SystemExit) as exc_info:
+            main(
+                [
+                    "--corpus",
+                    str(raw_dir),
+                    *mode_flags,
+                    "--compare",
+                    str(tmp_path / "unused-pre.json"),
+                    str(tmp_path / "unused-post.json"),
+                ]
+            )
+
+        assert exc_info.value.code == 2
+        assert f"--compare cannot combine with {flag_label}" in capsys.readouterr().err
+        assert not report_path.exists()
+        assert not stats_path.exists()
+
     def test_non_json_suffix_timing_rejected_before_compile(
         self, tmp_path: Path, monkeypatch
     ) -> None:

@@ -907,6 +907,27 @@ def main(argv: list[str] | None = None) -> int:
                 "--wildcard-apex-pruning cannot combine with --compare: "
                 "document-only mode compiles nothing"
             )
+        # Same rationale for the rest of the measurement surface: a
+        # document-only compare invocation compiles nothing, so
+        # profiling/memory flags would silently measure nothing while the
+        # user believes evidence was produced, and --compare-baseline would
+        # be ignored entirely (pre/post win).
+        if args.compare is not None:
+            conflicting = [
+                flag
+                for flag, present in (
+                    ("--profile", args.profile),
+                    ("--track-memory", args.track_memory),
+                    ("--memory-top", args.memory_top is not None),
+                    ("--compare-baseline", args.compare_baseline is not None),
+                )
+                if present
+            ]
+            if conflicting:
+                parser.error(
+                    f"--compare cannot combine with {', '.join(conflicting)}: "
+                    "document-only mode compiles nothing"
+                )
 
         # Document-only mode: never touches the corpus directory.
         if args.compare is not None:
