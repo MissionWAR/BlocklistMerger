@@ -40,6 +40,7 @@ from typing import Final, NamedTuple
 
 import pytest
 
+from scripts.benchmark import _python_identity, build_corpus_manifest, manifest_digest
 from scripts.compiler import CompileStats, clear_caches, compile_rules
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
@@ -50,6 +51,7 @@ from scripts.pruning_proof import (
     REASON_KEPT_BECAUSE_UNCERTAIN,
     CappedProofLedger,
     RuleFacet,
+    _capped_sample_record,
 )
 from scripts.release_validator import (
     DEFAULT_MINIMUM_OUTPUT_RULES,
@@ -2875,3 +2877,503 @@ class TestTimingMergeContract:
         assert block["on"]["median_seconds"] == 130.0
         assert block["off"]["output_sha256_stable"] is True
         assert block["on_compile_flags"] == {"wildcard_apex_pruning": True}
+
+
+# ----------------------------------------------------------------------
+# Apex full-corpus shadow gate over the FROZEN dataset (Phase 17,
+# SAFE-03).
+#
+# THE production-flip instrument: streams ONLY the frozen hash-pinned
+# dataset (reports/benchmarks/frozen/<id>/raw/) -- never lists/_raw --
+# so corpus.manifest_sha256 in the emitted manifest pins exactly what
+# ran (research Pitfall 4). Asserts the placement-specific signature
+# S1-S9 one-claim-per-assert with the DELTA direction on ledger totals
+# (16-RESEARCH Derived Implication 3: a to-be-pruned wildcard has no
+# OFF-leg record) and uncertain-keeps EQUALITY stasis (Derived
+# Implication 4), then emits the versioned verdict-bearing manifest
+# BEFORE any claim is checked (D-17-08 write-before-assert) so even a
+# red run leaves named-check forensics Phase 18 can read.
+#
+# Timing merges from the canonical benchmark reports ONLY when both
+# parse AND their corpus digests match this frozen dataset; otherwise a
+# NAMED FAILING timing_evidence_present check enters the verdict inputs
+# -- a pass verdict is structurally unreachable without merged green
+# timing (checker W-2: never silently passing). The ~25-minute corpus
+# execution belongs to 17-04's canonical run; scheduled CI never sees
+# it thanks to the slow marker + --run-slow double gate (D-17-01).
+# ----------------------------------------------------------------------
+
+APEX_SHADOW_DATASET_ID: Final[str] = os.environ.get("APEX_SHADOW_DATASET_ID", "apex-shadow-v1")
+"""Versioned frozen-dataset id (D-17-07): env-overridable so Phase 18's
+flip-day re-run writes -v2 manifests without editing this gate."""
+
+REPO_ROOT: Final[Path] = Path(__file__).resolve().parent.parent
+
+FROZEN_CORPUS_DIR: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "frozen" / APEX_SHADOW_DATASET_ID / "raw"
+)
+FROZEN_MANIFEST_PATH: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "frozen" / APEX_SHADOW_DATASET_ID / "manifest.json"
+)
+SHADOW_GATE_OUTPUT_DIR: Final[Path] = REPO_ROOT / "reports" / "shadow-gate"
+TIMING_OFF_REPORT_PATH: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "runs" / "apex-off.json"
+)
+TIMING_ON_REPORT_PATH: Final[Path] = REPO_ROOT / "reports" / "benchmarks" / "runs" / "apex-on.json"
+
+FROZEN_CORPUS_PRESENT: Final[bool] = FROZEN_CORPUS_DIR.is_dir() and any(
+    FROZEN_CORPUS_DIR.glob("*.txt")
+)
+
+_FROZEN_SKIP_REASON: Final[str] = (
+    f"frozen dataset reports/benchmarks/frozen/{APEX_SHADOW_DATASET_ID}/raw is absent; "
+    "Stage-A it first: py -3.14 -m scripts.downloader --sources config/sources.txt "
+    "--outdir lists/_raw --cache .cache --health-report reports/source-health.json && "
+    "py -3.14 -m scripts.benchmark_pipeline freeze --input-dir lists/_raw "
+    "--source-health-report reports/source-health.json "
+    f"--dataset-id {APEX_SHADOW_DATASET_ID}"
+)
+
+DEGRADED_SOURCE_STATUSES: Final[frozenset[str]] = frozenset(
+    {"failed", "stale_cache", "fallback_cache"}
+)
+
+
+def _load_frozen_corpus_summary(manifest_path: Path) -> dict[str, object]:
+    """Summarize the frozen-dataset manifest for source-health evidence.
+
+    Tallies per-source ``source_health_status`` values (D-17-13 honesty:
+    degradation stays visible in the manifest), computes
+    ``degraded_sources`` as the failed + stale_cache + fallback_cache
+    sum, and derives file_count/total_bytes from per-source sums. A
+    missing manifest degrades gracefully to a ``present: False`` summary
+    (the slow gate's skipif independently requires the raw dir); a
+    manifest that EXISTS must parse -- malformed frozen state raises
+    instead of silently weakening provenance.
+    """
+    if not manifest_path.is_file():
+        return {
+            "present": False,
+            "file_count": 0,
+            "total_bytes": 0,
+            "totals_by_status": {},
+            "degraded_sources": 0,
+        }
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    sources = document.get("sources")
+    if not isinstance(sources, list):
+        raise ValueError(f"frozen manifest has no sources list: {manifest_path}")
+    totals_by_status: dict[str, int] = {}
+    file_count = 0
+    total_bytes = 0
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        file_count += 1
+        byte_size = source.get("byte_size")
+        if isinstance(byte_size, int) and not isinstance(byte_size, bool):
+            total_bytes += byte_size
+        status = str(source.get("source_health_status", "unknown"))
+        totals_by_status[status] = totals_by_status.get(status, 0) + 1
+    return {
+        "present": True,
+        "file_count": file_count,
+        "total_bytes": total_bytes,
+        "totals_by_status": totals_by_status,
+        "degraded_sources": sum(
+            totals_by_status.get(status_name, 0) for status_name in DEGRADED_SOURCE_STATUSES
+        ),
+    }
+
+
+class ApexCorpusLegs(NamedTuple):
+    """Paired apex-flag legs over the FROZEN dataset plus output digests.
+
+    off_output_sha256/on_output_sha256 capture each leg's real output
+    FILE digest BEFORE the temporary workdir tears down, giving S9 the
+    cross-process comparand that the benchmark timing reports'
+    per_run[].output_sha256 values must equal (SC3/S9 cross-tie without
+    extra compiles).
+    """
+
+    off_lines: list[str]
+    on_lines: list[str]
+    off_stats: CompileStats
+    on_stats: CompileStats
+    off_ledger: ApexTallyingLedger
+    on_ledger: ApexTallyingLedger
+    off_seconds: float
+    on_seconds: float
+    off_output_sha256: str
+    on_output_sha256: str
+
+
+def _run_apex_corpus_legs(
+    line_source: Callable[[], Iterable[str]],
+    workdir: Path,
+) -> ApexCorpusLegs:
+    """Run the apex OFF/ON shadow legs over the frozen dataset in-process.
+
+    The OFF leg passes NO extra compile kwargs (production defaults:
+    denyallow_pruning=True, wildcard_apex_pruning=False); the ON leg adds
+    ONLY ``wildcard_apex_pruning=True`` so the apex flag is the sole
+    moving part (D-16-01). compiler.clear_caches() runs BETWEEN legs
+    because the module LRU caches are process-global and conftest only
+    clears between tests (research Pitfall 6). Each leg's output FILE is
+    hashed BEFORE ``workdir`` teardown so both digests survive for the
+    S9 cross-tie assertions. Fresh-iterator discipline rides
+    _compile_shadow_leg via _shadow_line_factory.
+    """
+    off_output = workdir / "apex_off.txt"
+    off_stats, off_ledger, off_seconds = _compile_shadow_leg(
+        line_source,
+        off_output,
+        ledger_factory=ApexTallyingLedger,
+    )
+    off_lines = _read_output_lines(off_output)
+    off_output_sha256 = _streaming_sha256(off_output)
+
+    # Cache hygiene between legs: the ON leg must not inherit warmed
+    # domain/TLD caches from the OFF leg.
+    clear_caches()
+
+    on_output = workdir / "apex_on.txt"
+    on_stats, on_ledger, on_seconds = _compile_shadow_leg(
+        line_source,
+        on_output,
+        ledger_factory=ApexTallyingLedger,
+        wildcard_apex_pruning=True,
+    )
+    on_lines = _read_output_lines(on_output)
+    on_output_sha256 = _streaming_sha256(on_output)
+
+    return ApexCorpusLegs(
+        off_lines=off_lines,
+        on_lines=on_lines,
+        off_stats=off_stats,
+        on_stats=on_stats,
+        off_ledger=off_ledger,
+        on_ledger=on_ledger,
+        off_seconds=off_seconds,
+        on_seconds=on_seconds,
+        off_output_sha256=off_output_sha256,
+        on_output_sha256=on_output_sha256,
+    )
+
+
+@pytest.mark.slow
+class TestApexShadowEquivalence:
+    """SAFE-03 production-flip gate over the FROZEN apex-shadow dataset.
+
+    Component correctness is twin-proven (Tasks 1-2 plus 17-01); this
+    class wires the corpus-scale consumer with one-claim-per-assert
+    discipline and D-17-08 write-before-assert manifest emission.
+    """
+
+    def _frozen_corpus_lines(self):
+        """Stream frozen dataset rows lazily (denyallow-gate glob idiom)."""
+        for corpus_file in sorted(FROZEN_CORPUS_DIR.glob("*.txt")):
+            with open(corpus_file, encoding="utf-8-sig", errors="replace") as handle:
+                yield from handle
+
+    @pytest.mark.skipif(not FROZEN_CORPUS_PRESENT, reason=_FROZEN_SKIP_REASON)
+    def test_apex_full_corpus_shadow_equivalence(self):
+        """Prove flag ON removes ONLY the apex-proven population at scale.
+
+        Signature elements S1-S8 assert from computed values; S9 rides
+        the timing reports' output_sha256_stable plus the cross-tie
+        against THIS run's leg-output digests. The manifest is written
+        before any claim is checked so a red run leaves forensics.
+        """
+        corpus_summary = _load_frozen_corpus_summary(FROZEN_MANIFEST_PATH)
+        corpus_entries = build_corpus_manifest(FROZEN_CORPUS_DIR)
+        frozen_digest = manifest_digest(corpus_entries)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_apex_corpus_legs(self._frozen_corpus_lines, Path(tmpdir))
+
+        removed = set(legs.off_lines) - set(legs.on_lines)
+        added = set(legs.on_lines) - set(legs.off_lines)
+        on_line_set = set(legs.on_lines)
+
+        off_total_records = legs.off_ledger.summary()["total_records"]
+        on_total_records = legs.on_ledger.summary()["total_records"]
+        off_by_reason = legs.off_ledger.summary()["by_reason"]
+        on_by_reason = legs.on_ledger.summary()["by_reason"]
+
+        whitelist_off = off_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+        whitelist_on = on_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+        denyallow_off = off_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+        denyallow_on = on_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+        kept_before = off_by_reason[REASON_KEPT_BECAUSE_UNCERTAIN]
+        kept_after = on_by_reason[REASON_KEPT_BECAUSE_UNCERTAIN]
+
+        # S7 scan: skip EXACTLY {apex reason, uncertain reason}; whitelist
+        # and denyallow ride their own dedicated equality claims below and
+        # trivially double-cover inside these loops.
+        skipped_reasons = {REASON_APEX_COVERS_TLD_WILDCARD, REASON_KEPT_BECAUSE_UNCERTAIN}
+        mismatches_other_buckets: list[tuple[str, str]] = []
+        for reason, off_count in off_by_reason.items():
+            if reason in skipped_reasons:
+                continue
+            if on_by_reason.get(reason, 0) != off_count:
+                mismatches_other_buckets.append(("off-to-on", reason))
+        for reason, on_count in on_by_reason.items():
+            if reason in skipped_reasons:
+                continue
+            if off_by_reason.get(reason, 0) != on_count:
+                mismatches_other_buckets.append(("on-to-off", reason))
+
+        # S8 uses the UNCAPPED pairs set -- never capped samples.
+        pairs = legs.on_ledger.apex_pairs
+        uncovered_pairs = [
+            (candidate_rule, covering_rule)
+            for candidate_rule, covering_rule in pairs
+            if candidate_rule not in removed or covering_rule not in on_line_set
+        ]
+
+        population = _summarize_population(
+            legs.on_ledger.apex_candidates,
+            legs.on_ledger.apex_pairs,
+            capped_samples=[
+                _capped_sample_record(record)
+                for record in legs.on_ledger.records
+                if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
+            ],
+        )
+
+        checks: dict[str, tuple[object, object]] = {
+            "input_identity": (
+                legs.off_stats.total_input == legs.on_stats.total_input,
+                True,
+            ),
+            "input_rows_sanity": (legs.off_stats.total_input > 1_000_000, True),
+            "added_empty": (added == set(), True),
+            "removed_equals_uncapped_tally": (
+                legs.on_ledger.apex_candidates == removed,
+                True,
+            ),
+            "removed_equals_counter": (
+                legs.on_stats.apex_covered_wildcard_pruned == len(removed),
+                True,
+            ),
+            "total_records_delta_equals_removed": (
+                on_total_records - off_total_records == len(removed),
+                True,
+            ),
+            "whitelist_bucket_identical": (
+                (
+                    whitelist_off == whitelist_on
+                    and whitelist_off == legs.off_stats.whitelist_conflict_pruned
+                    and whitelist_on == legs.on_stats.whitelist_conflict_pruned
+                ),
+                True,
+            ),
+            "denyallow_bucket_identical": (denyallow_off == denyallow_on, True),
+            "uncertain_keeps_stasis": (kept_before == kept_after, True),
+            "other_buckets_stable_both_directions": (
+                mismatches_other_buckets == [],
+                True,
+            ),
+            "coverer_membership_complete": (
+                len(pairs) == len(removed) and not uncovered_pairs,
+                True,
+            ),
+            "buckets_partition_total": (population["buckets_partition_total"], True),
+        }
+
+        # Timing merge: only when BOTH canonical reports parse AND match
+        # this frozen dataset's digest does the timing slot carry data;
+        # every other path feeds a NAMED FAILING timing_evidence_present
+        # check so a pass verdict stays structurally unreachable (W-2).
+        timing_notes: list[str] = []
+        timing_docs: dict[str, dict[str, object]] = {}
+        for label, timing_path in (
+            ("apex-off.json", TIMING_OFF_REPORT_PATH),
+            ("apex-on.json", TIMING_ON_REPORT_PATH),
+        ):
+            try:
+                timing_docs[label] = json.loads(timing_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                timing_notes.append(f"{label}: not loadable ({exc})")
+
+        timing_block: dict[str, object] | None = None
+        if len(timing_docs) == 2:
+            try:
+                merged_block = _timing_block_from_reports(
+                    timing_docs["apex-off.json"],
+                    timing_docs["apex-on.json"],
+                    frozen_digest=frozen_digest,
+                    off_sha=legs.off_output_sha256,
+                    on_sha=legs.on_output_sha256,
+                )
+            except ValueError as exc:
+                timing_notes.append(f"timing merge rejected: {exc}")
+            else:
+                if merged_block.get("same_corpus") is True:
+                    timing_block = merged_block
+                else:
+                    timing_notes.append(
+                        "timing reports parsed but their corpus digest differs "
+                        "from the frozen dataset (foreign evidence)"
+                    )
+
+        if timing_block is not None:
+            checks["timing_same_corpus"] = (timing_block["same_corpus"], True)
+            checks["timing_output_stable_both_legs"] = (
+                bool(timing_block["off"]["output_sha256_stable"])
+                and bool(timing_block["on"]["output_sha256_stable"]),
+                True,
+            )
+            checks["timing_within_bar"] = (timing_block["passes"], True)
+            checks["timing_cross_tie_off"] = (timing_block["cross_tie_off"], True)
+            checks["timing_cross_tie_on"] = (timing_block["cross_tie_on"], True)
+            checks["timing_on_compile_flags_echo"] = (
+                timing_block["on_compile_flags"],
+                {"wildcard_apex_pruning": True},
+            )
+        else:
+            # Stage-3 remedy: run the benchmark timing legs (median-of-3
+            # per leg) into reports/benchmarks/runs/apex-off.json and
+            # apex-on.json over THIS frozen corpus, then re-run the gate.
+            checks["timing_evidence_present"] = (
+                "; ".join(timing_notes) or "neither timing report parsed",
+                "both timing reports parseable and same-corpus",
+            )
+
+        evidence: dict[str, object] = {
+            "input_rows": legs.off_stats.total_input,
+            "added_count": len(added),
+            "removed_count": len(removed),
+            "ledger": {
+                "off_total_records": off_total_records,
+                "on_total_records": on_total_records,
+                "delta_equals_removed": on_total_records - off_total_records == len(removed),
+            },
+            "whitelist_conflict_pruned": {"off": whitelist_off, "on": whitelist_on},
+            "kept_because_uncertain": {"off": kept_before, "on": kept_after},
+            "other_buckets_stable": not mismatches_other_buckets,
+            "off_output_sha256": legs.off_output_sha256,
+            "on_output_sha256": legs.on_output_sha256,
+            "leg_seconds": {"off": legs.off_seconds, "on": legs.on_seconds},
+        }
+
+        proposed_guards = _derive_proposed_guards(
+            off_rule_count=len(legs.off_lines),
+            on_rule_count=len(legs.on_lines),
+            removed_count=len(removed),
+        )
+
+        corpus_block = {
+            "dir": FROZEN_CORPUS_DIR.relative_to(REPO_ROOT).as_posix(),
+            "file_count": len(corpus_entries),
+            "total_bytes": sum(entry.byte_size for entry in corpus_entries),
+            "manifest_sha256": frozen_digest,
+            "frozen": True,
+        }
+
+        # D-17-08 WRITE-BEFORE-ASSERT: forensics land on disk first; every
+        # claim below runs only after the versioned manifest exists.
+        verdict, manifest = _evaluate_and_write_manifest(
+            checks=checks,
+            evidence=evidence,
+            population=population,
+            output_dir=SHADOW_GATE_OUTPUT_DIR,
+            filename_stem=APEX_SHADOW_DATASET_ID,
+            identity=_python_identity(),
+            corpus=corpus_block,
+            timing=timing_block,
+            source_health=corpus_summary,
+            proposed_guards=proposed_guards,
+        )
+
+        assert verdict == "pass"
+
+        # S1: input identity across legs (standalone claim).
+        assert legs.off_stats.total_input == legs.on_stats.total_input
+        # S1: input sanity at corpus scale (a silently-empty frozen
+        # dataset can never masquerade as a clean gate).
+        assert legs.off_stats.total_input > 1_000_000
+        # S2: added-lines empty -- wildcards can only vanish.
+        assert not added
+        # S3a: removed set equals the UNCAPPED ledger witness by identity.
+        assert legs.on_ledger.apex_candidates == removed
+        # S3b: removed count equals the paired stats counter.
+        assert legs.on_stats.apex_covered_wildcard_pruned == len(removed)
+        # S4: ON total exceeds OFF by EXACTLY the removal count -- a
+        # to-be-pruned wildcard has NO OFF-leg record (write-time keeps
+        # emit nothing; 16-RESEARCH Derived Implication 3). Never claim
+        # totals equality across these legs.
+        assert on_total_records - off_total_records == len(removed)
+        # S5a: whitelist bucket identical across legs AND equal to each
+        # leg's own counter (three standalone claims).
+        assert whitelist_off == whitelist_on
+        assert whitelist_off == legs.off_stats.whitelist_conflict_pruned
+        assert whitelist_on == legs.on_stats.whitelist_conflict_pruned
+        # S5b: denyallow bucket identical -- both legs run production
+        # default denyallow pruning; the apex flag is the only mover.
+        assert denyallow_off == denyallow_on
+        # S6: uncertain-keeps EQUALITY stasis (Derived Implication 4 --
+        # deliberately unlike the denyallow drop-by-prune-count).
+        assert kept_before == kept_after
+        # S7: every other attribution bucket byte-stable, both directions.
+        assert not mismatches_other_buckets
+        # S8a: pairing completeness -- one uncapped pair per removal.
+        assert len(pairs) == len(removed)
+        # S8b: survivor-coverer membership -- every covering member lives
+        # in the ON output set (PRUNE-02 survivor-only witnessing).
+        assert not uncovered_pairs
+        # D-17-05/D-17-06 partition: the two apex-form buckets sum to the
+        # removal total exactly (no double-counting; Pitfall 9).
+        assert population["buckets_partition_total"]
+        # OFF-side witnessing stays empty: flag-OFF emits nothing.
+        assert legs.off_ledger.apex_candidates == set()
+        assert legs.off_ledger.apex_pairs == set()
+
+        if timing_block is not None:
+            assert timing_block["passes"] is True
+            assert timing_block["same_corpus"] is True
+            assert timing_block["cross_tie_off"] is True
+            assert timing_block["cross_tie_on"] is True
+            assert timing_block["on_compile_flags"] == {"wildcard_apex_pruning": True}
+            assert timing_block["off"]["output_sha256_stable"] is True
+            assert timing_block["on"]["output_sha256_stable"] is True
+
+        # Informational evidence block (magnitudes are calibration facts,
+        # never verdict inputs -- Pitfall 11).
+        single_bucket = population["buckets"][BUCKET_SINGLE_LABEL_SUFFIX_APEX]
+        multipart_bucket = population["buckets"][BUCKET_MULTIPART_SUFFIX_APEX]
+        print(f"\n[APEX SHADOW] total_input={legs.off_stats.total_input:,}")
+        print(f"[APEX SHADOW] removed={len(removed):,}")
+        print(
+            f"[APEX SHADOW] {BUCKET_SINGLE_LABEL_SUFFIX_APEX}="
+            f"{single_bucket['count']:,} ({single_bucket['share_percent']}%)"
+        )
+        print(
+            f"[APEX SHADOW] {BUCKET_MULTIPART_SUFFIX_APEX}="
+            f"{multipart_bucket['count']:,} ({multipart_bucket['share_percent']}%)"
+        )
+        print(
+            f"[APEX SHADOW] pure_tld_share={population['pure_tld_share_percent']}% "
+            f"split_bar={population['split_bar_percent']}% "
+            f"triggered={population['reason_split_triggered']} "
+            "(mechanical D-17-06 answer; magnitude never gates)"
+        )
+        print(f"[APEX SHADOW] off_output_sha256={legs.off_output_sha256[:16]}")
+        print(f"[APEX SHADOW] on_output_sha256={legs.on_output_sha256[:16]}")
+        print(
+            f"[APEX SHADOW] off_leg_seconds={legs.off_seconds:.1f} "
+            f"on_leg_seconds={legs.on_seconds:.1f}"
+        )
+        manifest_path = SHADOW_GATE_OUTPUT_DIR / f"{APEX_SHADOW_DATASET_ID}.json"
+        print(f"[APEX SHADOW] verdict={verdict} manifest={manifest_path}")
+        if timing_block is not None:
+            print(
+                f"[APEX SHADOW] timing medians off="
+                f"{timing_block['off']['median_seconds']}s "
+                f"on={timing_block['on']['median_seconds']}s "
+                f"passes={timing_block['passes']}"
+            )
+        else:
+            failed_timing = checks["timing_evidence_present"]
+            print(f"[APEX SHADOW] timing_evidence_present FAILED: {failed_timing[0]}")
