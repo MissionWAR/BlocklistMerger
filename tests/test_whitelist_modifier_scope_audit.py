@@ -2427,7 +2427,18 @@ def _timing_block_from_reports(
         if not isinstance(corpus, Mapping) or "manifest_sha256" not in corpus:
             raise ValueError("timing report missing required field 'corpus.manifest_sha256'")
 
+        # Typed malformations must take the same named-field ValueError
+        # path as missing keys (T-17-03-B): JSON null/dict/string shapes
+        # would otherwise raise TypeError inside list()/float(), escaping
+        # the gate's ``except ValueError`` and crashing before
+        # _evaluate_and_write_manifest lands forensics (D-17-08). The
+        # bool rejection mirrors benchmark.py's numeric extraction.
         durations = report["durations_seconds"]
+        median_value = summary["median_seconds"]
+        if not isinstance(durations, list):
+            raise ValueError("timing report field 'durations_seconds' must be a list")
+        if isinstance(median_value, bool) or not isinstance(median_value, (int, float)):
+            raise ValueError("timing report field 'summary.median_seconds' must be numeric")
         leg_blocks[leg_name] = {
             "runs": report["runs"],
             # Verbatim passthrough keeps absolute seconds for CI budget
@@ -2791,6 +2802,89 @@ class TestTimingMergeContract:
             )
 
         assert "output_sha256_stable" in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        ("leg", "key_path", "bad_value", "label"),
+        [
+            pytest.param(
+                "off",
+                ("durations_seconds",),
+                None,
+                "durations_seconds",
+                id="off-null-durations",
+            ),
+            pytest.param(
+                "on",
+                ("durations_seconds",),
+                {"run-1": 99.0},
+                "durations_seconds",
+                id="on-object-durations",
+            ),
+            pytest.param(
+                "off",
+                ("summary", "median_seconds"),
+                None,
+                "median_seconds",
+                id="off-null-median",
+            ),
+            pytest.param(
+                "on",
+                ("summary", "median_seconds"),
+                "fast",
+                "median_seconds",
+                id="on-string-median",
+            ),
+            pytest.param(
+                "off",
+                ("summary", "median_seconds"),
+                True,
+                "median_seconds",
+                id="off-bool-median",
+            ),
+        ],
+    )
+    def test_mistyped_required_values_fail_closed_naming_the_field(
+        self,
+        leg: str,
+        key_path: tuple[str, ...],
+        bad_value: object,
+        label: str,
+    ) -> None:
+        """Typed malformations raise the named-field ValueError, never TypeError.
+
+        JSON-shaped null/object/string values would raise TypeError inside
+        list()/float(); that escapes the gate's ``except ValueError`` and
+        crashes before _evaluate_and_write_manifest writes forensics --
+        exactly the red-run-without-manifest failure D-17-08 forbids.
+        Both legs are validated, not just OFF.
+        """
+        off_doc = self._timing_document(
+            median=100.0,
+            final_sha=self.OFF_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+        )
+        on_doc = self._timing_document(
+            median=105.0,
+            final_sha=self.ON_FINAL_SHA,
+            digest=self.FROZEN_DIGEST,
+            compile_flags={"wildcard_apex_pruning": True},
+        )
+        mutated = off_doc if leg == "off" else on_doc
+        if len(key_path) == 1:
+            mutated[key_path[0]] = bad_value
+        else:
+            mutated[key_path[0]][key_path[1]] = bad_value
+
+        with pytest.raises(ValueError) as excinfo:
+            _timing_block_from_reports(
+                off_doc,
+                on_doc,
+                frozen_digest=self.FROZEN_DIGEST,
+                off_sha=self.OFF_FINAL_SHA,
+                on_sha=self.ON_FINAL_SHA,
+            )
+
+        assert label in str(excinfo.value)
 
     def test_cross_tie_booleans_bind_to_equivalence_leg_outputs(self):
         """Cross-ties compare each report's FINAL per_run sha to gate legs."""
