@@ -102,9 +102,7 @@ def _full_timing_document(median: float, digest: str) -> dict[str, object]:
 class TestMemoryLeg:
     """Memory-leg smoke tests over a tiny synthetic corpus."""
 
-    def test_track_memory_reports_positive_peak(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_track_memory_reports_positive_peak(self, tmp_path: Path, monkeypatch) -> None:
         """--track-memory writes a memory-mode report and never mixes in timing."""
         raw_dir = tmp_path / "raw"
         _make_tiny_corpus(raw_dir)
@@ -239,9 +237,7 @@ class TestMemoryTop:
         report_path = Path("reports/benchmarks/runs/memory-notop-smoke.json")
 
         monkeypatch.chdir(tmp_path)
-        return_code = main(
-            ["--corpus", str(raw_dir), "--track-memory", "--json", str(report_path)]
-        )
+        return_code = main(["--corpus", str(raw_dir), "--track-memory", "--json", str(report_path)])
 
         assert return_code == 0
         data = json.loads(report_path.read_text(encoding="utf-8"))
@@ -265,18 +261,14 @@ def _make_autos_pair_corpus(raw_dir: Path) -> None:
 class TestApexTimingFlag:
     """--wildcard-apex-pruning turns one timing leg into the Direction-A ON config."""
 
-    def test_off_report_has_no_compile_flags_key(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_off_report_has_no_compile_flags_key(self, tmp_path: Path, monkeypatch) -> None:
         """Default OFF leg: absent-key backward compatibility (never emits false)."""
         raw_dir = tmp_path / "raw"
         _make_tiny_corpus(raw_dir)
         report_path = Path("reports/benchmarks/runs/apex-off-smoke.json")
 
         monkeypatch.chdir(tmp_path)
-        return_code = main(
-            ["--corpus", str(raw_dir), "--runs", "1", "--json", str(report_path)]
-        )
+        return_code = main(["--corpus", str(raw_dir), "--runs", "1", "--json", str(report_path)])
 
         assert return_code == 0
         data = json.loads(report_path.read_text(encoding="utf-8"))
@@ -286,9 +278,7 @@ class TestApexTimingFlag:
         assert len(data["durations_seconds"]) == 1
         assert data["summary"]["median_seconds"] > 0
 
-    def test_on_report_records_compile_flags(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_on_report_records_compile_flags(self, tmp_path: Path, monkeypatch) -> None:
         """ON leg stamps compile_flags == {"wildcard_apex_pruning": True}."""
         raw_dir = tmp_path / "raw"
         _make_tiny_corpus(raw_dir)
@@ -312,9 +302,7 @@ class TestApexTimingFlag:
         assert data["compile_flags"] == {"wildcard_apex_pruning": True}
         assert data["output_sha256_stable"] is True
 
-    def test_flag_observably_reaches_compile_rules(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_flag_observably_reaches_compile_rules(self, tmp_path: Path, monkeypatch) -> None:
         """ON leg output is strictly smaller than OFF on the same-key pair fixture."""
         raw_dir = tmp_path / "raw"
         _make_autos_pair_corpus(raw_dir)
@@ -346,9 +334,7 @@ class TestApexTimingFlag:
         # ||*.autos^ vanishes only under the flag: the wildcard line is gone.
         assert on_bytes < off_bytes
 
-    def test_flag_with_track_memory_rejected_upfront(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_flag_with_track_memory_rejected_upfront(self, tmp_path: Path, monkeypatch) -> None:
         """flag + --track-memory dies at argparse with exit 2 and no artifacts."""
         raw_dir = tmp_path / "raw"
         _make_tiny_corpus(raw_dir)
@@ -370,9 +356,7 @@ class TestApexTimingFlag:
         assert exc_info.value.code == 2
         assert not report_path.exists()
 
-    def test_flag_with_profile_rejected_upfront(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_flag_with_profile_rejected_upfront(self, tmp_path: Path, monkeypatch) -> None:
         """flag + --profile dies at argparse with exit 2 and no artifacts."""
         raw_dir = tmp_path / "raw"
         _make_tiny_corpus(raw_dir)
@@ -396,9 +380,7 @@ class TestApexTimingFlag:
         assert not report_path.exists()
         assert not stats_path.exists()
 
-    def test_flag_with_compare_rejected_upfront(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
+    def test_flag_with_compare_rejected_upfront(self, tmp_path: Path, monkeypatch) -> None:
         """flag + --compare dies at argparse: document-only mode compiles nothing."""
         raw_dir = tmp_path / "raw"
         _make_tiny_corpus(raw_dir)
@@ -469,17 +451,11 @@ class TestCompareMath:
         assert "median_seconds" in message
         assert "manifest_sha256" in message
 
-    def test_digest_mismatch_rejected_without_percentage(
-        self, tmp_path: Path, capsys
-    ) -> None:
+    def test_digest_mismatch_rejected_without_percentage(self, tmp_path: Path, capsys) -> None:
         pre_path = tmp_path / "pre.json"
         post_path = tmp_path / "post.json"
-        pre_path.write_text(
-            json.dumps(_full_timing_document(100.0, "c" * 64)), encoding="utf-8"
-        )
-        post_path.write_text(
-            json.dumps(_full_timing_document(50.0, "d" * 64)), encoding="utf-8"
-        )
+        pre_path.write_text(json.dumps(_full_timing_document(100.0, "c" * 64)), encoding="utf-8")
+        post_path.write_text(json.dumps(_full_timing_document(50.0, "d" * 64)), encoding="utf-8")
 
         exit_code = run_compare(pre_path, post_path, 15.0)
         captured = capsys.readouterr()

@@ -19,6 +19,8 @@ Usage:
         --json reports/benchmarks/runs/post.json --compare-baseline
     py -3.14 -m scripts.benchmark --corpus lists/_raw \
         --track-memory --json reports/benchmarks/runs/pre-memory.json
+    py -3.14 -m scripts.benchmark --corpus lists/_raw --runs 3 \
+        --json reports/benchmarks/runs/on.json --wildcard-apex-pruning
 
 Exit codes:
     0  success; compare modes: improvement meets the floor
@@ -60,6 +62,11 @@ JSON schema (mode == "timing"):
       "per_run": [{"index": <int>, "elapsed_seconds": <float>,
                    "output_byte_size": <int>, "output_sha256": "<64 hex>"}]
     }
+    With --wildcard-apex-pruning the timing document additionally carries:
+      "compile_flags": {"wildcard_apex_pruning": true}
+    Present ONLY when the flag is set (absent-key backward compatible, like
+    top_allocations): it records that the leg compiled the Direction-A ON
+    configuration for relative within-run OFF-vs-ON comparison (D-17-11).
 
 JSON schema (mode == "memory", from --track-memory):
     Common report_type/created_at/identity/corpus fields as timing mode, plus:
@@ -349,7 +356,7 @@ def _git_revision() -> str:
             capture_output=True,
             text=True,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except OSError, subprocess.CalledProcessError:
         return "unknown"
     return result.stdout.strip() or "unknown"
 
@@ -541,13 +548,17 @@ def run_compare(pre_path: Path, post_path: Path, min_improve_percent: float) -> 
     print(f"improvement : {improvement:.2f}%")
     print(f"floor       : >= {min_improve_percent:.2f}%")
     print("verdict     : PASS" if passes else "verdict     : FAIL")
-    print(json.dumps({
-        "pre_seconds": pre_median,
-        "post_seconds": post_median,
-        "improvement_percent": round(improvement, 6),
-        "floor_percent": min_improve_percent,
-        "passes": passes,
-    }))
+    print(
+        json.dumps(
+            {
+                "pre_seconds": pre_median,
+                "post_seconds": post_median,
+                "improvement_percent": round(improvement, 6),
+                "floor_percent": min_improve_percent,
+                "passes": passes,
+            }
+        )
+    )
     return 0 if passes else 1
 
 
@@ -556,8 +567,19 @@ def run_compare(pre_path: Path, post_path: Path, min_improve_percent: float) -> 
 # =========================================================================
 
 
-def run_timing_leg(corpus_dir: Path, runs: int, json_path: Path) -> dict[str, object]:
-    """Time ``compile_rules()`` over the pinned corpus and persist the report."""
+def run_timing_leg(
+    corpus_dir: Path,
+    runs: int,
+    json_path: Path,
+    *,
+    wildcard_apex_pruning: bool = False,
+) -> dict[str, object]:
+    """Time ``compile_rules()`` over the pinned corpus and persist the report.
+
+    When ``wildcard_apex_pruning`` is set, the leg compiles the Direction-A ON
+    configuration and stamps ``compile_flags`` into the report so OFF-vs-ON
+    documents honestly record which compile configuration produced them.
+    """
     baseline_entries = build_corpus_manifest(corpus_dir)
     baseline_digest = manifest_digest(baseline_entries)
 
@@ -580,7 +602,11 @@ def run_timing_leg(corpus_dir: Path, runs: int, json_path: Path) -> dict[str, ob
             gc.collect()
             clear_caches()
             start_ns = time.perf_counter_ns()
-            compile_rules(iter_corpus_lines(corpus_dir), str(output_path))
+            compile_rules(
+                iter_corpus_lines(corpus_dir),
+                str(output_path),
+                wildcard_apex_pruning=wildcard_apex_pruning,
+            )
             elapsed_seconds = round((time.perf_counter_ns() - start_ns) / 1_000_000_000, 6)
 
             output_sha = _sha256_file(output_path) if output_path.exists() else ""
@@ -626,6 +652,10 @@ def run_timing_leg(corpus_dir: Path, runs: int, json_path: Path) -> dict[str, ob
         "output_sha256_stable": sha_stable,
         "per_run": per_run,
     }
+    if wildcard_apex_pruning:
+        # Absent-key backward compatibility mirrors the top_allocations
+        # precedent: an OFF report can never be mistaken for an ON one.
+        report["compile_flags"] = {"wildcard_apex_pruning": True}
     _write_json_report(json_path, report)
     print(
         f"timing leg complete: median={report['summary']['median_seconds']}s "
@@ -815,6 +845,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
+        "--wildcard-apex-pruning",
+        action="store_true",
+        help=(
+            "compile the timing leg as the Direction-A ON configuration "
+            "(wildcard_apex_pruning=True) for relative within-run OFF-vs-ON "
+            "comparison (D-17-11); timing legs only, and the pinned "
+            "historical baseline is NOT the comparison target (D-17-03)"
+        ),
+    )
+    parser.add_argument(
         "--memory-top",
         nargs="?",
         const=DEFAULT_MEMORY_TOP,
@@ -859,6 +899,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        # Usage guards that must hold before any dispatch decision: the apex
+        # flag only means something for a compiled timing leg, so a
+        # document-only compare invocation can never consume it.
+        if args.wildcard_apex_pruning and args.compare is not None:
+            parser.error(
+                "--wildcard-apex-pruning cannot combine with --compare: "
+                "document-only mode compiles nothing"
+            )
+
         # Document-only mode: never touches the corpus directory.
         if args.compare is not None:
             pre_path = Path(args.compare[0])
@@ -888,6 +937,12 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("--memory-top requires --track-memory")
             if args.memory_top < 1:
                 parser.error("--memory-top must be >= 1")
+        if args.wildcard_apex_pruning and (args.profile or args.track_memory):
+            parser.error(
+                "--wildcard-apex-pruning applies to timing legs only: "
+                "profile/memory legs do not consume the flag and would "
+                "silently misreport the measurement configuration"
+            )
         if not corpus_dir.is_dir():
             raise BenchmarkError(
                 f"corpus directory not found: {corpus_dir}; run `python run.py fetch` first"
@@ -905,7 +960,12 @@ def main(argv: list[str] | None = None) -> int:
         elif args.track_memory:
             run_memory_leg(corpus_dir, args.json, args.memory_top)
         else:
-            run_timing_leg(corpus_dir, args.runs, args.json)
+            run_timing_leg(
+                corpus_dir,
+                args.runs,
+                args.json,
+                wildcard_apex_pruning=args.wildcard_apex_pruning,
+            )
 
         if baseline_path is not None:
             if not args.json.is_file():
