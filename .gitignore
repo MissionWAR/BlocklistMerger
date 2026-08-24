@@ -15,9 +15,12 @@ AGENTS.md
 # ============================================
 # Generated/runtime outputs
 # ============================================
+# reports/* (not bare reports/) so git descends and can un-ignore the
+# committed shadow-gate evidence home below (D-17-02/D-17-07).
 lists/
 .cache/
-reports/
+reports/*
+!reports/shadow-gate/
 state.json
 
 # ============================================
