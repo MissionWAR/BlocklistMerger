@@ -95,7 +95,13 @@ def test_workflow_public_reuse_surface_has_no_manual_inputs() -> None:
 
 
 def test_ignore_policy_source_runtime_boundary() -> None:
-    """Public docs/tests should be trackable while runtime and private paths stay ignored."""
+    """Public docs/tests should be trackable while runtime and private paths stay ignored.
+
+    Phase 17 (D-17-02/D-17-07) carves exactly one exception out of the
+    reports/ ignore: reports/shadow-gate/ is a committed evidence home
+    for apex-shadow summary manifests. Every other reports/ subtree and
+    all other generated/runtime outputs stay untracked.
+    """
     assert _git_check_ignore("docs/SCOPE.md") == 1
     assert _git_check_ignore("tests/test_public_docs.py") == 1
 
@@ -103,7 +109,13 @@ def test_ignore_policy_source_runtime_boundary() -> None:
     assert _git_check_ignore("AGENTS.md") == 0
     assert _git_check_ignore("run.py") == 0
 
-    assert _git_ls_files("lists", ".cache", "reports") == []
+    # The shadow-gate evidence home itself stays trackable (manifests are
+    # versioned stems, so pin a future-shaped path, not just current files).
+    assert _git_check_ignore("reports/shadow-gate/apex-shadow-v1.json") == 1
+
+    tracked = _git_ls_files("lists", ".cache", "reports")
+    bulk_tracked = [path for path in tracked if not path.startswith("reports/shadow-gate/")]
+    assert bulk_tracked == []
 
 
 def test_scope_doc_defers_v2_config_platform() -> None:
