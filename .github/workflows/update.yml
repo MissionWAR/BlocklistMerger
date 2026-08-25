@@ -233,6 +233,9 @@ jobs:
       - name: Ruff
         run: python -m ruff check .
 
+      - name: Ruff format
+        run: python -m ruff format --check .
+
       - name: Test
         run: python -m pytest
 
