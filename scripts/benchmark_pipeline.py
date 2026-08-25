@@ -385,7 +385,7 @@ def _git_revision() -> str:
             capture_output=True,
             text=True,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except OSError, subprocess.CalledProcessError:
         return "unknown"
     return result.stdout.strip() or "unknown"
 
@@ -624,11 +624,7 @@ def _benchmark_summary(durations: list[float]) -> dict[str, float]:
         return {"min_seconds": 0.0, "max_seconds": 0.0, "p50_seconds": 0.0, "p95_seconds": 0.0}
     ordered = sorted(durations)
     midpoint = len(ordered) // 2
-    p50 = (
-        ordered[midpoint]
-        if len(ordered) % 2
-        else (ordered[midpoint - 1] + ordered[midpoint]) / 2
-    )
+    p50 = ordered[midpoint] if len(ordered) % 2 else (ordered[midpoint - 1] + ordered[midpoint]) / 2
     return {
         "min_seconds": round(min(durations), 6),
         "max_seconds": round(max(durations), 6),

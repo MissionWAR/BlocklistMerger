@@ -66,6 +66,7 @@ PIPELINE_STATS_SCHEMA_VERSION: Final[int] = 5
 # DATA STRUCTURES
 # =============================================================================
 
+
 class PipelineStats(TypedDict):
     """
     Statistics collected during pipeline execution.
@@ -73,6 +74,7 @@ class PipelineStats(TypedDict):
     Provides detailed metrics about each stage of processing,
     useful for monitoring and debugging.
     """
+
     files_processed: int
     lines_raw: int
     lines_clean: int
@@ -204,6 +206,7 @@ class CleanWorkerResult(NamedTuple):
     The cleaned rule payload stays in the spool file so process results do not
     serialize a full cleaned list back to the parent process.
     """
+
     source_index: int
     spool_path: Path
     stats: dict[str, int]
@@ -229,6 +232,7 @@ CLEANER_REASON_STAT_KEYS: Final[dict[str, str]] = {
 # =============================================================================
 # WORKER FUNCTIONS
 # =============================================================================
+
 
 def _new_clean_file_stats() -> dict[str, int]:
     """Return a fresh cleaner stats dictionary for one source file."""
@@ -401,7 +405,7 @@ def _memory_profile() -> MemoryProfile:
     else:
         try:
             resource_ru_maxrss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        except (AttributeError, OSError, ValueError):
+        except AttributeError, OSError, ValueError:
             resource_ru_maxrss = None
 
     return {
@@ -435,7 +439,7 @@ def _child_resource_usage_snapshot() -> object | None:
 
     try:
         return resource.getrusage(resource.RUSAGE_CHILDREN)
-    except (AttributeError, OSError, ValueError):
+    except AttributeError, OSError, ValueError:
         return None
 
 
@@ -443,7 +447,7 @@ def _resource_float_delta(before: object, after: object, field: str) -> float | 
     """Return a rounded non-negative float delta from two resource snapshots."""
     try:
         return round(max(0.0, float(getattr(after, field)) - float(getattr(before, field))), 6)
-    except (AttributeError, TypeError, ValueError):
+    except AttributeError, TypeError, ValueError:
         return None
 
 
@@ -451,7 +455,7 @@ def _resource_int_delta(before: object, after: object, field: str) -> int | None
     """Return a non-negative integer delta from two resource snapshots."""
     try:
         return max(0, int(getattr(after, field)) - int(getattr(before, field)))
-    except (AttributeError, TypeError, ValueError):
+    except AttributeError, TypeError, ValueError:
         return None
 
 
@@ -487,7 +491,7 @@ def _source_health_summary_from_report(
     try:
         with open(report_path, encoding="utf-8") as f:
             report = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         return unavailable
 
     if not isinstance(report, dict):
@@ -556,6 +560,7 @@ def _stage_summaries(
 # =============================================================================
 # PIPELINE FUNCTIONS
 # =============================================================================
+
 
 def process_files(
     input_dir: str,
@@ -802,14 +807,8 @@ def print_summary(stats: PipelineStats) -> None:
         f"uncertain={stats['rule_effect_uncertain']:,}"
     )
     print("   Compression policy:")
-    print(
-        "     Hosts/plain promoted to ABP: "
-        f"{stats['compression_policy_broadened']:>10,}"
-    )
-    print(
-        "     Regex preserved without pruning: "
-        f"{stats['regex_preserved_no_pruning']:>10,}"
-    )
+    print(f"     Hosts/plain promoted to ABP: {stats['compression_policy_broadened']:>10,}")
+    print(f"     Regex preserved without pruning: {stats['regex_preserved_no_pruning']:>10,}")
 
 
 def save_stats_json(
@@ -850,6 +849,7 @@ def save_stats_json(
 # CLI INTERFACE
 # =============================================================================
 
+
 def main() -> int:
     """
     Main entry point for CLI usage.
@@ -866,7 +866,9 @@ def main() -> int:
     parser.add_argument("input_dir", help="Directory containing raw blocklist .txt files")
     parser.add_argument("output_file", help="Path for the merged output file")
     parser.add_argument(
-        "--json-stats", dest="json_stats", metavar="PATH",
+        "--json-stats",
+        dest="json_stats",
+        metavar="PATH",
         help="Save detailed statistics to a JSON file",
     )
     parser.add_argument(
@@ -926,6 +928,7 @@ def main() -> int:
     except Exception as e:
         print(f"\n❌ ERROR: {e}", file=sys.stderr)
         import traceback
+
         traceback.print_exc()
         return 1
 

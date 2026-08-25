@@ -39,10 +39,12 @@ class TestCrossFormatPruningAudit:
 
     def test_hosts_entry_pruned_by_equivalent_native_abp_rule(self):
         """Hosts-compressed ||domain^ is pruned when native ABP ||domain^ exists."""
-        rules, stats = self._compile([
-            "0.0.0.0 example.com",
-            "||example.com^",
-        ])
+        rules, stats = self._compile(
+            [
+                "0.0.0.0 example.com",
+                "||example.com^",
+            ]
+        )
         assert "||example.com^" in rules
         assert rules.count("||example.com^") == 1
         assert stats.duplicate_pruned == 1
@@ -59,57 +61,69 @@ class TestCrossFormatPruningAudit:
 
     def test_client_scoped_parent_does_not_prune_hosts_compressed_child(self):
         """ABP parent with $client=X must NOT prune hosts-compressed bare child."""
-        rules, _stats = self._compile([
-            "||sub.example.com^$client=10.0.0.1",
-            "0.0.0.0 sub.example.com",
-        ])
+        rules, _stats = self._compile(
+            [
+                "||sub.example.com^$client=10.0.0.1",
+                "0.0.0.0 sub.example.com",
+            ]
+        )
         assert "||sub.example.com^" in rules
         assert "||sub.example.com^$client=10.0.0.1" in rules
 
     def test_ctag_scoped_parent_does_not_prune_hosts_compressed_child(self):
         """ABP parent with $ctag=X must NOT prune hosts-compressed bare child."""
-        rules, _stats = self._compile([
-            "||sub.example.com^$ctag=ads",
-            "0.0.0.0 sub.example.com",
-        ])
+        rules, _stats = self._compile(
+            [
+                "||sub.example.com^$ctag=ads",
+                "0.0.0.0 sub.example.com",
+            ]
+        )
         assert "||sub.example.com^" in rules
         assert "||sub.example.com^$ctag=ads" in rules
 
     def test_dnstype_scoped_parent_does_not_prune_hosts_compressed_child(self):
         """ABP parent with $dnstype=X must NOT prune hosts-compressed bare child."""
-        rules, _stats = self._compile([
-            "||sub.example.com^$dnstype=A",
-            "0.0.0.0 sub.example.com",
-        ])
+        rules, _stats = self._compile(
+            [
+                "||sub.example.com^$dnstype=A",
+                "0.0.0.0 sub.example.com",
+            ]
+        )
         assert "||sub.example.com^" in rules
         assert "||sub.example.com^$dnstype=A" in rules
 
     def test_denyallow_parent_does_not_prune_hosts_compressed_child(self):
         """ABP parent with $denyallow=X must NOT prune hosts-compressed bare child."""
-        rules, _stats = self._compile([
-            "||sub.example.com^$denyallow=cdn.example.com",
-            "0.0.0.0 sub.example.com",
-        ])
+        rules, _stats = self._compile(
+            [
+                "||sub.example.com^$denyallow=cdn.example.com",
+                "0.0.0.0 sub.example.com",
+            ]
+        )
         assert "||sub.example.com^" in rules
         assert "||sub.example.com^$denyallow=cdn.example.com" in rules
 
     def test_unmodified_parent_prunes_hosts_compressed_child(self):
         """ABP parent with NO modifiers prunes hosts-compressed bare child."""
-        rules, stats = self._compile([
-            "||example.com^",
-            "0.0.0.0 sub.example.com",
-        ])
+        rules, stats = self._compile(
+            [
+                "||example.com^",
+                "0.0.0.0 sub.example.com",
+            ]
+        )
         assert "||sub.example.com^" not in rules
         assert "||example.com^" in rules
         assert stats.abp_subdomain_pruned == 1
 
     def test_multi_domain_hosts_row_independent_dedup_decisions(self):
         """Each domain from a multi-domain hosts row gets its own dedup check."""
-        rules, _stats = self._compile([
-            "||a.com^$client=10.0.0.1",
-            "||b.com^",
-            "0.0.0.0 a.com b.com",
-        ])
+        rules, _stats = self._compile(
+            [
+                "||a.com^$client=10.0.0.1",
+                "||b.com^",
+                "0.0.0.0 a.com b.com",
+            ]
+        )
         # a.com survives because its parent has narrowing $client scope.
         assert "||a.com^" in rules
         assert "||a.com^$client=10.0.0.1" in rules
@@ -122,19 +136,23 @@ class TestCrossFormatPruningAudit:
 
     def test_important_parent_prunes_hosts_compressed_child(self):
         """ABP parent with $important prunes hosts-compressed bare child."""
-        rules, _stats = self._compile([
-            "||example.com^$important",
-            "0.0.0.0 example.com",
-        ])
+        rules, _stats = self._compile(
+            [
+                "||example.com^$important",
+                "0.0.0.0 example.com",
+            ]
+        )
         assert "||example.com^" in rules
         assert rules.count("||example.com^") == 1
         assert "||example.com^$important" in rules
 
     def test_important_child_not_pruned_by_compressed_bare_parent(self):
         """Native ABP $important child survives a hosts-compressed bare parent."""
-        rules, _stats = self._compile([
-            "0.0.0.0 example.com",
-            "||example.com^$important",
-        ])
+        rules, _stats = self._compile(
+            [
+                "0.0.0.0 example.com",
+                "||example.com^$important",
+            ]
+        )
         assert "||example.com^" in rules
         assert "||example.com^$important" in rules

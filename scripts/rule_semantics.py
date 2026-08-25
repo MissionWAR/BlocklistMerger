@@ -25,43 +25,55 @@ from scripts.rule_syntax import (
 # MODIFIER CONSTANTS
 # =============================================================================
 
-VALUE_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "client",
-    "ctag",
-    "denyallow",
-    "dnsrewrite",
-    "dnstype",
-})
+VALUE_MODIFIERS: Final[frozenset[str]] = frozenset(
+    {
+        "client",
+        "ctag",
+        "denyallow",
+        "dnsrewrite",
+        "dnstype",
+    }
+)
 
-FLAG_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "badfilter",
-    "important",
-})
+FLAG_MODIFIERS: Final[frozenset[str]] = frozenset(
+    {
+        "badfilter",
+        "important",
+    }
+)
 
 KNOWN_MODIFIERS: Final[frozenset[str]] = VALUE_MODIFIERS | FLAG_MODIFIERS
 
-NARROW_SCOPE_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "client",
-    "ctag",
-    "dnstype",
-})
+NARROW_SCOPE_MODIFIERS: Final[frozenset[str]] = frozenset(
+    {
+        "client",
+        "ctag",
+        "dnstype",
+    }
+)
 
-NO_COVERAGE_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "badfilter",
-    "denyallow",
-    "dnsrewrite",
-})
+NO_COVERAGE_MODIFIERS: Final[frozenset[str]] = frozenset(
+    {
+        "badfilter",
+        "denyallow",
+        "dnsrewrite",
+    }
+)
 
-SCOPED_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "client",
-    "ctag",
-    "denyallow",
-    "dnstype",
-})
+SCOPED_MODIFIERS: Final[frozenset[str]] = frozenset(
+    {
+        "client",
+        "ctag",
+        "denyallow",
+        "dnstype",
+    }
+)
 
-PRIORITY_MODIFIERS: Final[frozenset[str]] = frozenset({
-    "important",
-})
+PRIORITY_MODIFIERS: Final[frozenset[str]] = frozenset(
+    {
+        "important",
+    }
+)
 
 EFFECT_BLOCK: Final[str] = "block"
 EFFECT_EXCEPTION: Final[str] = "exception"
@@ -83,29 +95,33 @@ DOCS_AGH_DNS_SYNTAX: Final[str] = "adguard_dns_filtering_syntax"
 DOCS_AGH_HOSTS_BLOCKLISTS: Final[str] = "adguard_home_hosts_blocklists"
 DOCS_PROJECT_POLICY: Final[str] = "project_policy"
 
-BLOCKING_IPS: Final[frozenset[str]] = frozenset({
-    "0.0.0.0",
-    "127.0.0.1",
-    "::1",
-    "::0",
-    "::",
-    "0:0:0:0:0:0:0:0",
-    "0:0:0:0:0:0:0:1",
-})
+BLOCKING_IPS: Final[frozenset[str]] = frozenset(
+    {
+        "0.0.0.0",
+        "127.0.0.1",
+        "::1",
+        "::0",
+        "::",
+        "0:0:0:0:0:0:0:0",
+        "0:0:0:0:0:0:0:1",
+    }
+)
 
-LOCAL_HOSTNAMES: Final[frozenset[str]] = frozenset({
-    "localhost",
-    "localhost.localdomain",
-    "local",
-    "broadcasthost",
-    "ip6-localhost",
-    "ip6-loopback",
-    "ip6-localnet",
-    "ip6-mcastprefix",
-    "ip6-allnodes",
-    "ip6-allrouters",
-    "ip6-allhosts",
-})
+LOCAL_HOSTNAMES: Final[frozenset[str]] = frozenset(
+    {
+        "localhost",
+        "localhost.localdomain",
+        "local",
+        "broadcasthost",
+        "ip6-localhost",
+        "ip6-loopback",
+        "ip6-localnet",
+        "ip6-mcastprefix",
+        "ip6-allnodes",
+        "ip6-allrouters",
+        "ip6-allhosts",
+    }
+)
 
 __all__ = [
     "EFFECT_BLOCK",
@@ -774,8 +790,6 @@ def _domain_disjoint_from_all(domain: str, entries: frozenset[str]) -> bool:
         False
     """
     return not any(
-        domain == entry
-        or domain.endswith("." + entry)
-        or entry.endswith("." + domain)
+        domain == entry or domain.endswith("." + entry) or entry.endswith("." + domain)
         for entry in entries
     )

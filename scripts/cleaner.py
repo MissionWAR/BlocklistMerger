@@ -51,97 +51,90 @@ from scripts.rule_syntax import (
 # If a rule contains ANY of these, the ENTIRE RULE should be discarded.
 #
 # Grouped by category for easier maintenance:
-UNSUPPORTED_MODIFIERS: Final[frozenset[str]] = frozenset({
-    # -------------------------------------------------------------------------
-    # Content type modifiers (browser-only, DNS can't see content types)
-    # -------------------------------------------------------------------------
-    "script",         # JavaScript files
-    "image",          # Images (png, jpg, etc.)
-    "stylesheet",     # CSS files
-    "font",           # Web fonts
-    "media",          # Audio/video content
-    "object",         # Flash/plugins (legacy)
-    "subdocument",    # Iframes
-    "xmlhttprequest", # AJAX requests
-    "websocket",      # WebSocket connections
-    "webrtc",         # WebRTC connections
-    "ping",           # Navigator.sendBeacon()
-    "other",          # Other content types
-
-    # -------------------------------------------------------------------------
-    # Shorthand content types
-    # -------------------------------------------------------------------------
-    "css",  # Alias for stylesheet
-    "js",   # Alias for script
-
-    # -------------------------------------------------------------------------
-    # Third-party/first-party (requires page context)
-    # -------------------------------------------------------------------------
-    "third-party",  # Requests from different domain
-    "3p",           # Shorthand for third-party
-    "first-party",  # Requests from same domain
-    "1p",           # Shorthand for first-party
-
-    # -------------------------------------------------------------------------
-    # Document modifiers (page-level blocking)
-    # -------------------------------------------------------------------------
-    "document",  # Block entire document
-    "doc",       # Alias for document
-    "popup",     # Block popups
-    "all",       # Match all content types
-
-    # -------------------------------------------------------------------------
-    # Network/redirect modifiers (require HTTP-level access)
-    # -------------------------------------------------------------------------
-    "network",       # Network requests
-    "redirect",      # Redirect to resource
-    "redirect-rule", # Conditional redirect
-    "empty",         # Return empty response
-    "mp4",           # Return empty MP4
-
-    # -------------------------------------------------------------------------
-    # Request modification (HTTP header manipulation)
-    # -------------------------------------------------------------------------
-    "csp",          # Content Security Policy injection
-    "permissions",  # Permissions Policy injection
-    "header",       # HTTP header modification
-    "removeparam",  # Remove URL parameters
-    "removeheader", # Remove HTTP headers
-    "replace",      # Replace response content
-    "hls",          # HLS playlist modification
-    "jsonprune",    # JSON response modification
-
-    # -------------------------------------------------------------------------
-    # Exception modifiers (browser extension exceptions)
-    # -------------------------------------------------------------------------
-    "genericblock",  # Disable generic blocking
-    "generichide",   # Disable generic hiding
-    "elemhide",      # Disable element hiding
-    "specifichide",  # Disable specific hiding
-    "jsinject",      # Disable JS injection
-    "urlblock",      # Disable URL blocking
-    "content",       # Disable content blocking
-    "extension",     # Disable extension rules
-
-    # -------------------------------------------------------------------------
-    # Domain restriction (page-level, not useful for DNS-wide blocking)
-    # -------------------------------------------------------------------------
-    "domain",  # Only apply on specific domains
-
-    # -------------------------------------------------------------------------
-    # Matching modifiers (case sensitivity, strict party)
-    # -------------------------------------------------------------------------
-    "match-case",           # Case-sensitive matching
-    "strict-first-party",   # Strict first-party check
-    "strict-third-party",   # Strict third-party check
-
-    # -------------------------------------------------------------------------
-    # Other browser-only features
-    # -------------------------------------------------------------------------
-    "stealth",  # Stealth mode settings
-    "app",      # App-specific rules
-    "method",   # HTTP method restrictions
-})
+UNSUPPORTED_MODIFIERS: Final[frozenset[str]] = frozenset(
+    {
+        # -------------------------------------------------------------------------
+        # Content type modifiers (browser-only, DNS can't see content types)
+        # -------------------------------------------------------------------------
+        "script",  # JavaScript files
+        "image",  # Images (png, jpg, etc.)
+        "stylesheet",  # CSS files
+        "font",  # Web fonts
+        "media",  # Audio/video content
+        "object",  # Flash/plugins (legacy)
+        "subdocument",  # Iframes
+        "xmlhttprequest",  # AJAX requests
+        "websocket",  # WebSocket connections
+        "webrtc",  # WebRTC connections
+        "ping",  # Navigator.sendBeacon()
+        "other",  # Other content types
+        # -------------------------------------------------------------------------
+        # Shorthand content types
+        # -------------------------------------------------------------------------
+        "css",  # Alias for stylesheet
+        "js",  # Alias for script
+        # -------------------------------------------------------------------------
+        # Third-party/first-party (requires page context)
+        # -------------------------------------------------------------------------
+        "third-party",  # Requests from different domain
+        "3p",  # Shorthand for third-party
+        "first-party",  # Requests from same domain
+        "1p",  # Shorthand for first-party
+        # -------------------------------------------------------------------------
+        # Document modifiers (page-level blocking)
+        # -------------------------------------------------------------------------
+        "document",  # Block entire document
+        "doc",  # Alias for document
+        "popup",  # Block popups
+        "all",  # Match all content types
+        # -------------------------------------------------------------------------
+        # Network/redirect modifiers (require HTTP-level access)
+        # -------------------------------------------------------------------------
+        "network",  # Network requests
+        "redirect",  # Redirect to resource
+        "redirect-rule",  # Conditional redirect
+        "empty",  # Return empty response
+        "mp4",  # Return empty MP4
+        # -------------------------------------------------------------------------
+        # Request modification (HTTP header manipulation)
+        # -------------------------------------------------------------------------
+        "csp",  # Content Security Policy injection
+        "permissions",  # Permissions Policy injection
+        "header",  # HTTP header modification
+        "removeparam",  # Remove URL parameters
+        "removeheader",  # Remove HTTP headers
+        "replace",  # Replace response content
+        "hls",  # HLS playlist modification
+        "jsonprune",  # JSON response modification
+        # -------------------------------------------------------------------------
+        # Exception modifiers (browser extension exceptions)
+        # -------------------------------------------------------------------------
+        "genericblock",  # Disable generic blocking
+        "generichide",  # Disable generic hiding
+        "elemhide",  # Disable element hiding
+        "specifichide",  # Disable specific hiding
+        "jsinject",  # Disable JS injection
+        "urlblock",  # Disable URL blocking
+        "content",  # Disable content blocking
+        "extension",  # Disable extension rules
+        # -------------------------------------------------------------------------
+        # Domain restriction (page-level, not useful for DNS-wide blocking)
+        # -------------------------------------------------------------------------
+        "domain",  # Only apply on specific domains
+        # -------------------------------------------------------------------------
+        # Matching modifiers (case sensitivity, strict party)
+        # -------------------------------------------------------------------------
+        "match-case",  # Case-sensitive matching
+        "strict-first-party",  # Strict first-party check
+        "strict-third-party",  # Strict third-party check
+        # -------------------------------------------------------------------------
+        # Other browser-only features
+        # -------------------------------------------------------------------------
+        "stealth",  # Stealth mode settings
+        "app",  # App-specific rules
+        "method",  # HTTP method restrictions
+    }
+)
 
 #: Cleaner-owned discard reason taxonomy.
 DISCARD_REASON_COMMENT: Final[str] = "comment"
@@ -159,12 +152,12 @@ DISCARD_REASON_INVALID: Final[str] = "invalid"
 #: Cosmetic/element-hiding rule patterns (DISCARD entirely)
 #: These include: ## #@# #?# #$# #$?# #@?# #@$# etc.
 COSMETIC_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"#[@$?%]*#|"            # Standard element hiding: ## #@# #?# #$# etc.
-    r"#[@$?%]*\?#|"          # Extended CSS: #?# #@?# etc.
-    r"\$#|"                  # Snippet injection: $#
-    r"#%#|"                  # Scriptlet injection: #%#
-    r"\[adblock",            # Adblock header: [Adblock Plus ...]
-    re.IGNORECASE
+    r"#[@$?%]*#|"  # Standard element hiding: ## #@# #?# #$# etc.
+    r"#[@$?%]*\?#|"  # Extended CSS: #?# #@?# etc.
+    r"\$#|"  # Snippet injection: $#
+    r"#%#|"  # Scriptlet injection: #%#
+    r"\[adblock",  # Adblock header: [Adblock Plus ...]
+    re.IGNORECASE,
 )
 
 #: Pattern to detect if a line is a comment (starts with # or !)
@@ -178,6 +171,7 @@ TRAILING_COMMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"\s+#\s+.*$")
 # =============================================================================
 # DATA STRUCTURES
 # =============================================================================
+
 
 class CleanResult(NamedTuple):
     """
@@ -193,6 +187,7 @@ class CleanResult(NamedTuple):
         >>> result.discarded
         False
     """
+
     line: str | None
     discarded: bool
     reason: str | None
@@ -218,6 +213,7 @@ class CleanStats(NamedTuple):
         >>> stats.kept_lines
         80
     """
+
     total_lines: int
     kept_lines: int
     comments_removed: int
@@ -231,6 +227,7 @@ class CleanStats(NamedTuple):
 
 class CleanStatsDict(TypedDict):
     """TypedDict for internal stats tracking with type safety."""
+
     total: int
     kept: int
     comments: int
@@ -245,6 +242,7 @@ class CleanStatsDict(TypedDict):
 # =============================================================================
 # CLEANING FUNCTIONS
 # =============================================================================
+
 
 def is_comment(line: str) -> bool:
     """
@@ -315,7 +313,7 @@ def strip_trailing_comment(line: str) -> str:
     # Only strip if there's whitespace before the #
     match = TRAILING_COMMENT_PATTERN.search(line)
     if match:
-        return line[:match.start()].rstrip()
+        return line[: match.start()].rstrip()
     return line
 
 
@@ -567,9 +565,11 @@ if __name__ == "__main__":
     stats = clean_file(input_file, output_file)
 
     print(f"Cleaned: {stats.total_lines} total, {stats.kept_lines} kept")
-    print(f"  Removed: {stats.comments_removed} comments, "
-          f"{stats.cosmetic_removed} cosmetic, "
-          f"{stats.unsupported_modifier_removed} unsupported modifiers, "
-          f"{stats.url_path_removed} URL paths, "
-          f"{stats.empty_removed} empty, "
-          f"{stats.invalid_removed} invalid")
+    print(
+        f"  Removed: {stats.comments_removed} comments, "
+        f"{stats.cosmetic_removed} cosmetic, "
+        f"{stats.unsupported_modifier_removed} unsupported modifiers, "
+        f"{stats.url_path_removed} URL paths, "
+        f"{stats.empty_removed} empty, "
+        f"{stats.invalid_removed} invalid"
+    )

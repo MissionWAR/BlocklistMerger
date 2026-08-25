@@ -63,10 +63,12 @@ SUPPORTED_CANARY_SCHEMA_VERSIONS: Final[tuple[int, ...]] = (
 )
 SCOPED_CANARY_DEFAULT_GATE: Final[str] = "diagnostic"
 SCOPED_CANARY_HARD_GATE: Final[str] = "hard"
-SCOPED_CANARY_ALLOWED_GATES: Final[frozenset[str]] = frozenset({
-    SCOPED_CANARY_DEFAULT_GATE,
-    SCOPED_CANARY_HARD_GATE,
-})
+SCOPED_CANARY_ALLOWED_GATES: Final[frozenset[str]] = frozenset(
+    {
+        SCOPED_CANARY_DEFAULT_GATE,
+        SCOPED_CANARY_HARD_GATE,
+    }
+)
 
 DEFAULT_MINIMUM_OUTPUT_RULES: Final[int] = 1_000_000
 DEFAULT_SOURCE_FAILED_STALE_MINIMUM: Final[int] = 3
@@ -84,35 +86,43 @@ SOURCE_HEALTH_STATUSES: Final[tuple[str, ...]] = (
     "stale_cache",
     "validated_cache",
 )
-PIPELINE_DETAIL_FINDING_CODES: Final[frozenset[str]] = frozenset({
-    "pipeline_stats_invalid",
-    "pipeline_statistics_invalid",
-    "pipeline_output_count_missing",
-    "pipeline_output_count_invalid",
-    "pipeline_output_count_mismatch",
-})
+PIPELINE_DETAIL_FINDING_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "pipeline_stats_invalid",
+        "pipeline_statistics_invalid",
+        "pipeline_output_count_missing",
+        "pipeline_output_count_invalid",
+        "pipeline_output_count_mismatch",
+    }
+)
 SCOPED_CANARY_EXPECT_BLOCKED: Final[str] = "blocked"
 SCOPED_CANARY_EXPECT_ALLOWED: Final[str] = "allowed"
-SCOPED_CANARY_ALLOWED_EXPECTATIONS: Final[frozenset[str]] = frozenset({
-    SCOPED_CANARY_EXPECT_ALLOWED,
-    SCOPED_CANARY_EXPECT_BLOCKED,
-})
-SCOPED_CANARY_ALLOWED_SCOPES: Final[frozenset[str]] = frozenset({
-    SCOPE_APEX,
-    SCOPE_APEX_AND_SUBDOMAINS,
-    SCOPE_EXACT_HOST,
-    SCOPE_SUBDOMAIN,
-    SCOPE_UNSCOPED_GLOBAL,
-    SCOPE_WILDCARD_APEX_ALLOWED,
-    SCOPE_WILDCARD_CHILD,
-})
-SCOPED_CANARY_ALLOWED_FIELDS: Final[frozenset[str]] = frozenset({
-    "domain",
-    "expect",
-    "gate",
-    "name",
-    "scope",
-})
+SCOPED_CANARY_ALLOWED_EXPECTATIONS: Final[frozenset[str]] = frozenset(
+    {
+        SCOPED_CANARY_EXPECT_ALLOWED,
+        SCOPED_CANARY_EXPECT_BLOCKED,
+    }
+)
+SCOPED_CANARY_ALLOWED_SCOPES: Final[frozenset[str]] = frozenset(
+    {
+        SCOPE_APEX,
+        SCOPE_APEX_AND_SUBDOMAINS,
+        SCOPE_EXACT_HOST,
+        SCOPE_SUBDOMAIN,
+        SCOPE_UNSCOPED_GLOBAL,
+        SCOPE_WILDCARD_APEX_ALLOWED,
+        SCOPE_WILDCARD_CHILD,
+    }
+)
+SCOPED_CANARY_ALLOWED_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "domain",
+        "expect",
+        "gate",
+        "name",
+        "scope",
+    }
+)
 
 Finding = dict[str, object]
 
@@ -362,10 +372,12 @@ def _validate_report_schema_versions(
         validate_pipeline_stats
         and pipeline_stats.get("schema_version") != PIPELINE_STATS_SCHEMA_VERSION
     ):
-        errors.append(_finding(
-            "pipeline_stats_schema_version",
-            "Unsupported pipeline-stats schema",
-        ))
+        errors.append(
+            _finding(
+                "pipeline_stats_schema_version",
+                "Unsupported pipeline-stats schema",
+            )
+        )
     return errors
 
 
@@ -445,43 +457,49 @@ def _validate_canary_schema(
     if schema_version == CANARY_SCHEMA_V1:
         for field_name in ("must_block", "must_allow"):
             if not isinstance(canaries.get(field_name), list):
-                errors.append(_finding(
+                errors.append(
+                    _finding(
+                        "canary_config_invalid",
+                        "Canary config must define domain lists",
+                        **_details_with_canaries_path(
+                            canaries_path,
+                            field=field_name,
+                            schema_version=schema_version,
+                            expected="list",
+                        ),
+                    )
+                )
+        return errors
+
+    for field_name in ("must_block", "must_allow"):
+        if field_name in canaries and not isinstance(canaries.get(field_name), list):
+            errors.append(
+                _finding(
                     "canary_config_invalid",
-                    "Canary config must define domain lists",
+                    "Schema v2 canary domain field must be a list when present",
                     **_details_with_canaries_path(
                         canaries_path,
                         field=field_name,
                         schema_version=schema_version,
                         expected="list",
                     ),
-                ))
-        return errors
-
-    for field_name in ("must_block", "must_allow"):
-        if field_name in canaries and not isinstance(canaries.get(field_name), list):
-            errors.append(_finding(
-                "canary_config_invalid",
-                "Schema v2 canary domain field must be a list when present",
-                **_details_with_canaries_path(
-                    canaries_path,
-                    field=field_name,
-                    schema_version=schema_version,
-                    expected="list",
-                ),
-            ))
+                )
+            )
 
     scoped_canaries = canaries.get("scoped_canaries", [])
     if not isinstance(scoped_canaries, list):
-        errors.append(_finding(
-            "canary_config_invalid",
-            "Schema v2 scoped_canaries must be a list when present",
-            **_details_with_canaries_path(
-                canaries_path,
-                field="scoped_canaries",
-                schema_version=schema_version,
-                expected="list",
-            ),
-        ))
+        errors.append(
+            _finding(
+                "canary_config_invalid",
+                "Schema v2 scoped_canaries must be a list when present",
+                **_details_with_canaries_path(
+                    canaries_path,
+                    field="scoped_canaries",
+                    schema_version=schema_version,
+                    expected="list",
+                ),
+            )
+        )
     return errors
 
 
@@ -663,27 +681,33 @@ def validate_source_health(
     errors: list[Finding] = []
     warnings: list[Finding] = []
     if failed_stale > failed_stale_limit:
-        errors.append(_finding(
-            "source_health_catastrophic_failed_stale",
-            "Failed plus stale sources exceed the hard release threshold",
-            failed_stale=failed_stale,
-            limit=failed_stale_limit,
-        ))
+        errors.append(
+            _finding(
+                "source_health_catastrophic_failed_stale",
+                "Failed plus stale sources exceed the hard release threshold",
+                failed_stale=failed_stale,
+                limit=failed_stale_limit,
+            )
+        )
     if fallback_stale > fallback_stale_limit:
-        errors.append(_finding(
-            "source_health_catastrophic_fallback_stale",
-            "Fallback plus stale sources exceed the hard release threshold",
-            fallback_stale=fallback_stale,
-            limit=fallback_stale_limit,
-        ))
+        errors.append(
+            _finding(
+                "source_health_catastrophic_fallback_stale",
+                "Fallback plus stale sources exceed the hard release threshold",
+                fallback_stale=fallback_stale,
+                limit=fallback_stale_limit,
+            )
+        )
 
     degraded = counts["failed"] + counts["fallback_cache"] + counts["stale_cache"]
     if degraded and not errors:
-        warnings.append(_finding(
-            "source_health_degraded",
-            "One or more sources used fallback cache, stale cache, or failed",
-            degraded_sources=degraded,
-        ))
+        warnings.append(
+            _finding(
+                "source_health_degraded",
+                "One or more sources used fallback cache, stale cache, or failed",
+                degraded_sources=degraded,
+            )
+        )
 
     details = {
         "source_count": total_sources,
@@ -777,39 +801,47 @@ def scan_output(
             syntax = classify_rule_syntax(line)
             if syntax.is_exception:
                 exception_count += 1
-                errors.append(_finding(
-                    "output_exception_rule",
-                    "Exception rules must not be emitted in the release artifact",
-                    line_number=line_number,
-                    rule=line,
-                ))
+                errors.append(
+                    _finding(
+                        "output_exception_rule",
+                        "Exception rules must not be emitted in the release artifact",
+                        line_number=line_number,
+                        rule=line,
+                    )
+                )
             if syntax.is_invalid:
                 invalid_count += 1
-                errors.append(_finding(
-                    "output_invalid_syntax",
-                    "Invalid emitted rule syntax",
-                    line_number=line_number,
-                    rule=line,
-                ))
+                errors.append(
+                    _finding(
+                        "output_invalid_syntax",
+                        "Invalid emitted rule syntax",
+                        line_number=line_number,
+                        rule=line,
+                    )
+                )
             if syntax.has_url_path:
                 url_path_count += 1
-                errors.append(_finding(
-                    "output_url_path",
-                    "URL-path rule emitted in DNS blocklist output",
-                    line_number=line_number,
-                    rule=line,
-                ))
+                errors.append(
+                    _finding(
+                        "output_url_path",
+                        "URL-path rule emitted in DNS blocklist output",
+                        line_number=line_number,
+                        rule=line,
+                    )
+                )
 
             modifiers = set(syntax.modifier_names)
             if modifiers and has_unsupported_modifiers(modifiers):
                 unsupported_modifier_count += 1
-                errors.append(_finding(
-                    "output_unsupported_modifier",
-                    "Browser-only modifier emitted in DNS blocklist output",
-                    line_number=line_number,
-                    rule=line,
-                    modifiers=sorted(modifiers),
-                ))
+                errors.append(
+                    _finding(
+                        "output_unsupported_modifier",
+                        "Browser-only modifier emitted in DNS blocklist output",
+                        line_number=line_number,
+                        rule=line,
+                        modifiers=sorted(modifiers),
+                    )
+                )
 
             if not syntax.is_exception:
                 _add_blocked_domain(line, blocked_domains, wildcard_domains)
@@ -850,8 +882,7 @@ def _domain_is_blocked(
             return True
 
     return any(
-        canonical_domain.endswith(f".{wildcard_domain}")
-        for wildcard_domain in wildcard_domains
+        canonical_domain.endswith(f".{wildcard_domain}") for wildcard_domain in wildcard_domains
     )
 
 
@@ -912,12 +943,10 @@ def _evaluate_scoped_canaries(
         gate = str(canary["gate"])
         name = canary.get("name")
         matched = any(
-            _record_matches_scoped_evidence(record, domain, scope)
-            for record in coverage_records
+            _record_matches_scoped_evidence(record, domain, scope) for record in coverage_records
         )
         blocked = any(
-            _record_blocks_scoped_domain(record, domain, scope)
-            for record in coverage_records
+            _record_blocks_scoped_domain(record, domain, scope) for record in coverage_records
         )
         passed = blocked if expect == SCOPED_CANARY_EXPECT_BLOCKED else not blocked
         result: dict[str, object] = {
@@ -934,23 +963,27 @@ def _evaluate_scoped_canaries(
         if passed or gate != SCOPED_CANARY_HARD_GATE:
             continue
         if expect == SCOPED_CANARY_EXPECT_BLOCKED:
-            errors.append(_finding(
-                "canary_scoped_block_missing",
-                "Hard scoped must-block canary is not covered by emitted output",
-                domain=domain,
-                scope=scope,
-                gate=gate,
-                name=name,
-            ))
+            errors.append(
+                _finding(
+                    "canary_scoped_block_missing",
+                    "Hard scoped must-block canary is not covered by emitted output",
+                    domain=domain,
+                    scope=scope,
+                    gate=gate,
+                    name=name,
+                )
+            )
         else:
-            errors.append(_finding(
-                "canary_scoped_allow_blocked",
-                "Hard scoped must-allow canary is blocked by emitted output",
-                domain=domain,
-                scope=scope,
-                gate=gate,
-                name=name,
-            ))
+            errors.append(
+                _finding(
+                    "canary_scoped_allow_blocked",
+                    "Hard scoped must-allow canary is blocked by emitted output",
+                    domain=domain,
+                    scope=scope,
+                    gate=gate,
+                    name=name,
+                )
+            )
 
     return errors, results
 
@@ -988,22 +1021,26 @@ def validate_canaries(
         blocked = _domain_is_blocked(domain_text, blocked_domains, wildcard_domains)
         must_block_results.append({"domain": domain_text, "blocked": blocked})
         if not blocked:
-            errors.append(_finding(
-                "canary_must_block_missing",
-                "Must-block canary is not covered by emitted output",
-                domain=domain_text,
-            ))
+            errors.append(
+                _finding(
+                    "canary_must_block_missing",
+                    "Must-block canary is not covered by emitted output",
+                    domain=domain_text,
+                )
+            )
 
     for domain in must_allow:
         domain_text = str(domain)
         blocked = _domain_is_blocked(domain_text, blocked_domains, wildcard_domains)
         must_allow_results.append({"domain": domain_text, "blocked": blocked})
         if blocked:
-            errors.append(_finding(
-                "canary_must_allow_blocked",
-                "Must-allow canary is blocked by emitted output",
-                domain=domain_text,
-            ))
+            errors.append(
+                _finding(
+                    "canary_must_allow_blocked",
+                    "Must-allow canary is blocked by emitted output",
+                    domain=domain_text,
+                )
+            )
 
     scoped_canaries, scoped_config_errors = _validate_scoped_canaries(canaries, canaries_path)
     if scoped_config_errors:
@@ -1114,10 +1151,12 @@ def validate_previous_output_delta(
     }
 
     if previous_count <= 0:
-        warnings.append(_finding(
-            "previous_output_empty",
-            "Previous release output is empty; delta comparison skipped",
-        ))
+        warnings.append(
+            _finding(
+                "previous_output_empty",
+                "Previous release output is empty; delta comparison skipped",
+            )
+        )
         previous_release["available"] = False
         return ValidationSummary(
             errors=errors,
@@ -1134,34 +1173,42 @@ def validate_previous_output_delta(
     if current_count < previous_count:
         drop_ratio = (previous_count - current_count) / previous_count
         if drop_ratio > thresholds.previous_extreme_drop_ratio:
-            errors.append(_finding(
-                "previous_output_extreme_drop",
-                "Current output dropped beyond the hard release threshold",
-                drop_ratio=round(drop_ratio, 6),
-            ))
+            errors.append(
+                _finding(
+                    "previous_output_extreme_drop",
+                    "Current output dropped beyond the hard release threshold",
+                    drop_ratio=round(drop_ratio, 6),
+                )
+            )
     else:
         increase_ratio = (current_count - previous_count) / previous_count
         if increase_ratio > thresholds.previous_extreme_increase_ratio:
-            errors.append(_finding(
-                "previous_output_extreme_increase",
-                "Current output increased beyond the hard release threshold",
-                increase_ratio=round(increase_ratio, 6),
-            ))
+            errors.append(
+                _finding(
+                    "previous_output_extreme_increase",
+                    "Current output increased beyond the hard release threshold",
+                    increase_ratio=round(increase_ratio, 6),
+                )
+            )
 
     if absolute_delta_magnitude > thresholds.previous_extreme_absolute_delta:
-        errors.append(_finding(
-            "previous_output_extreme_absolute_delta",
-            "Current output absolute delta exceeds the hard release threshold",
-            absolute_delta=absolute_delta,
-        ))
+        errors.append(
+            _finding(
+                "previous_output_extreme_absolute_delta",
+                "Current output absolute delta exceeds the hard release threshold",
+                absolute_delta=absolute_delta,
+            )
+        )
 
     if not errors and relative_delta > thresholds.previous_moderate_delta_ratio:
-        warnings.append(_finding(
-            "previous_output_moderate_delta",
-            "Current output changed beyond the warning threshold",
-            relative_delta=round(relative_delta, 6),
-            absolute_delta=absolute_delta,
-        ))
+        warnings.append(
+            _finding(
+                "previous_output_moderate_delta",
+                "Current output changed beyond the warning threshold",
+                relative_delta=round(relative_delta, 6),
+                absolute_delta=absolute_delta,
+            )
+        )
 
     return ValidationSummary(
         errors=errors,
@@ -1331,24 +1378,28 @@ def validate_release(
 
     current_count = output_scan.line_count
     if pipeline_count is not None and pipeline_count != current_count:
-        errors.append(_finding(
-            "pipeline_output_count_mismatch",
-            "Pipeline reported output count does not match scanned release artifact",
-            pipeline_reported_output_rules=pipeline_count,
-            scanned_output_rules=current_count,
-            absolute_delta=abs(pipeline_count - current_count),
-            pipeline_stats_path=str(pipeline_stats_path),
-            schema_version=pipeline_stats.get("schema_version"),
-            field="statistics.lines_output",
-        ))
+        errors.append(
+            _finding(
+                "pipeline_output_count_mismatch",
+                "Pipeline reported output count does not match scanned release artifact",
+                pipeline_reported_output_rules=pipeline_count,
+                scanned_output_rules=current_count,
+                absolute_delta=abs(pipeline_count - current_count),
+                pipeline_stats_path=str(pipeline_stats_path),
+                schema_version=pipeline_stats.get("schema_version"),
+                field="statistics.lines_output",
+            )
+        )
 
     if current_count < thresholds.minimum_output_rules:
-        errors.append(_finding(
-            "output_below_minimum_count",
-            "Current output rule count is below the hard minimum",
-            current_count=current_count,
-            minimum=thresholds.minimum_output_rules,
-        ))
+        errors.append(
+            _finding(
+                "output_below_minimum_count",
+                "Current output rule count is below the hard minimum",
+                current_count=current_count,
+                minimum=thresholds.minimum_output_rules,
+            )
+        )
 
     canary_errors, canary_details = validate_canaries(
         canaries,
@@ -1375,10 +1426,12 @@ def validate_release(
         warnings.extend(previous_summary.warnings)
         previous_release = previous_summary.previous_release
     else:
-        warnings.append(_finding(
-            "previous_output_unavailable",
-            "Previous release output is unavailable; delta comparison skipped",
-        ))
+        warnings.append(
+            _finding(
+                "previous_output_unavailable",
+                "Previous release output is unavailable; delta comparison skipped",
+            )
+        )
 
     counts = {"current_output_rules": current_count}
     if pipeline_count is not None:

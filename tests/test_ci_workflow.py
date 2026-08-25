@@ -16,8 +16,7 @@ PYPROJECT = ROOT / "pyproject.toml"
 RELEASE_CONSTRAINTS = ROOT / "constraints" / "release-py314.txt"
 RELEASE_INSTALL = 'python -m pip install -q -c constraints/release-py314.txt ".[dev]"'
 AUDIT_INSTALL = (
-    'python -m pip install -e ".[dev]" --ignore-requires-python '
-    "-c constraints/release-py314.txt"
+    'python -m pip install -e ".[dev]" --ignore-requires-python -c constraints/release-py314.txt'
 )
 HEAVY_EVIDENCE_WORKFLOW_TOKENS = (
     "scripts.benchmark_pipeline",
@@ -205,9 +204,7 @@ def test_release_constraints_file_pins_py314_resolution() -> None:
     """The scheduled-release dependency set should be reviewable as exact pip pins."""
     text = _constraints_text()
     lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.startswith("#")
+        line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")
     ]
     pinned_names = {line.split("==", maxsplit=1)[0].lower() for line in lines}
 

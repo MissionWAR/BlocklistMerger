@@ -3,6 +3,7 @@ conftest.py - Shared test fixtures for the blocklist merger test suite.
 
 Provides common helpers and ensures clean state between tests.
 """
+
 import os
 import tempfile
 
@@ -69,6 +70,7 @@ def make_input_dir(tmp_dir):
                 "list1.txt": "||example.com^\\n",
             })
     """
+
     def _make(file_contents: dict[str, str]) -> tuple[str, str]:
         input_dir = os.path.join(tmp_dir, "input")
         os.makedirs(input_dir)

@@ -234,10 +234,12 @@ class TestWhitelistModifierScopeAudit:
         and modifier scope checks -> pruning. It proves exceptions are consumed
         silently (never emitted) while their covered blocks disappear.
         """
-        rules, stats = self._compile([
-            "||example.com^",
-            "@@||example.com^",
-        ])
+        rules, stats = self._compile(
+            [
+                "||example.com^",
+                "@@||example.com^",
+            ]
+        )
 
         assert "||example.com^" not in rules
         assert not any(rule.startswith("@@") for rule in rules)
@@ -285,10 +287,12 @@ class TestWhitelistModifierScopeAudit:
         independently rejects any pair containing dnsrewrite (see
         TestModifierScopeTruthTable for the unit-level proof).
         """
-        rules, stats = self._compile([
-            "||example.com^$dnsrewrite=1.2.3.4",
-            "@@||example.com^",
-        ])
+        rules, stats = self._compile(
+            [
+                "||example.com^$dnsrewrite=1.2.3.4",
+                "@@||example.com^",
+            ]
+        )
 
         assert rules == []
         assert stats.whitelist_conflict_pruned == 0
@@ -301,10 +305,12 @@ class TestWhitelistModifierScopeAudit:
         so compiler Phase 1 drops the exception before it even enters the
         exception index. The block survives untouched.
         """
-        rules, stats = self._compile([
-            "||example.com^",
-            "@@||example.com^$future=value",
-        ])
+        rules, stats = self._compile(
+            [
+                "||example.com^",
+                "@@||example.com^$future=value",
+            ]
+        )
 
         assert rules == ["||example.com^"]
         assert stats.whitelist_conflict_pruned == 0
@@ -319,10 +325,12 @@ class TestWhitelistModifierScopeAudit:
         coverage regardless of the other side — the conservative answer while
         AGH behavior for duplicate modifiers is undocumented.
         """
-        rules, stats = self._compile([
-            "||example.com^",
-            "@@||example.com^$client=A,client=B",
-        ])
+        rules, stats = self._compile(
+            [
+                "||example.com^",
+                "@@||example.com^$client=A,client=B",
+            ]
+        )
 
         assert rules == ["||example.com^"]
         assert stats.whitelist_conflict_pruned == 0
@@ -337,11 +345,13 @@ class TestWhitelistModifierScopeAudit:
         still removes the block. An early-return implementation would keep
         ||example.com^ here and prune nothing.
         """
-        rules, stats = self._compile([
-            "||example.com^",
-            "@@||example.com^$client=192.168.1.1",
-            "@@||example.com^",
-        ])
+        rules, stats = self._compile(
+            [
+                "||example.com^",
+                "@@||example.com^$client=192.168.1.1",
+                "@@||example.com^",
+            ]
+        )
 
         assert rules == []
         assert stats.whitelist_conflict_pruned == 1
@@ -931,8 +941,9 @@ class TestShadowComparisonMachinery:
             assert off_by_reason.get(reason, 0) == on_count
 
         # total_records identical across legs (one record per decision either way).
-        assert result.off_ledger.summary()["total_records"] == (
-            result.on_ledger.summary()["total_records"]
+        assert (
+            result.off_ledger.summary()["total_records"]
+            == (result.on_ledger.summary()["total_records"])
         )
 
         # Uncapped tally bypasses sample truncation: identities match removals.

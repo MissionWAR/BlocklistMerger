@@ -147,10 +147,7 @@ def test_profile_cli_rejects_unsafe_report_destinations_before_writing(
     monkeypatch.chdir(tmp_path)
     input_dir = _write_tiny_input(tmp_path)
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
-    resolved_args = [
-        str(outside) if value == "{outside}" else value
-        for value in args
-    ]
+    resolved_args = [str(outside) if value == "{outside}" else value for value in args]
 
     assert _run_cli(monkeypatch, [str(input_dir), *resolved_args]) != 0
 

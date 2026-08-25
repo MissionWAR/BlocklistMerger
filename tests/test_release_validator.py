@@ -4,6 +4,7 @@ test_release_validator.py
 
 Focused tests for release validation policy.
 """
+
 import json
 import sys
 from pathlib import Path
@@ -322,8 +323,7 @@ def test_source_health_hard_fails_catastrophic_and_warns_bounded_fallback(
     )
 
     assert any(
-        error["code"] == "source_health_catastrophic_failed_stale"
-        for error in catastrophic.errors
+        error["code"] == "source_health_catastrophic_failed_stale" for error in catastrophic.errors
     )
     assert not bounded.errors
     assert any(warning["code"] == "source_health_degraded" for warning in bounded.warnings)
@@ -406,9 +406,7 @@ def test_schema_v2_simple_canaries_keep_hard_gate_semantics(tmp_path: Path) -> N
         "canary_must_allow_blocked",
     }
     assert summary.canaries["schema_version"] == 2
-    assert summary.canaries["must_block"] == [
-        {"domain": "missing.example.com", "blocked": False}
-    ]
+    assert summary.canaries["must_block"] == [{"domain": "missing.example.com", "blocked": False}]
     assert summary.canaries["must_allow"] == [{"domain": "github.com", "blocked": True}]
 
 
@@ -742,10 +740,7 @@ def test_schema_v1_evidence_sidecar_caps_coverage_sampling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    output_lines = [
-        f"||ads{index}.example.com^"
-        for index in range(DEFAULT_SAMPLE_CAP + 10)
-    ]
+    output_lines = [f"||ads{index}.example.com^" for index in range(DEFAULT_SAMPLE_CAP + 10)]
     paths = _write_release_inputs(
         tmp_path,
         output_lines=output_lines,
@@ -786,10 +781,7 @@ def test_scoped_canaries_collect_full_coverage_beyond_sidecar_sample(
     tmp_path: Path,
 ) -> None:
     target_domain = "late.example.com"
-    output_lines = [
-        f"||noise{index}.example.com^"
-        for index in range(DEFAULT_SAMPLE_CAP + 5)
-    ]
+    output_lines = [f"||noise{index}.example.com^" for index in range(DEFAULT_SAMPLE_CAP + 5)]
     output_lines.append(f"||{target_domain}^")
 
     summary = _validate(

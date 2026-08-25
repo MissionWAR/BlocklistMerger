@@ -131,14 +131,16 @@ def test_compact_source_health_context_prefers_sorted_totals_without_rich_source
 
 
 def test_compact_source_health_context_derives_counts_from_sources_when_needed() -> None:
-    context = compact_source_health_context({
-        "sources": [
-            {"status": "fresh_fetch"},
-            {"status": "fresh_fetch"},
-            {"status": "stale_cache"},
-            {"status": "unknown"},
-        ]
-    })
+    context = compact_source_health_context(
+        {
+            "sources": [
+                {"status": "fresh_fetch"},
+                {"status": "fresh_fetch"},
+                {"status": "stale_cache"},
+                {"status": "unknown"},
+            ]
+        }
+    )
 
     assert context["available"] is True
     assert context["source_count"] == 4
@@ -313,11 +315,13 @@ def test_unsupported_modifier_record_is_diagnostic_evidence() -> None:
 
 
 def test_coverage_records_from_rules_flattens_and_sorts_deterministically() -> None:
-    records = coverage_records_from_rules([
-        "||b.example^",
-        "",
-        "0.0.0.0 a.example c.example",
-    ])
+    records = coverage_records_from_rules(
+        [
+            "||b.example^",
+            "",
+            "0.0.0.0 a.example c.example",
+        ]
+    )
 
     assert [record.domain for record in records] == ["a.example", "b.example", "c.example"]
 

@@ -67,6 +67,7 @@ CLEANER_STAGE_BY_REASON: Final[dict[str, str]] = {
 # DATA STRUCTURES
 # =============================================================================
 
+
 class StageSummary(TypedDict):
     """JSON-friendly aggregate counters for one internal stage."""
 
@@ -83,6 +84,7 @@ StatsSource = Mapping[str, object] | object
 # =============================================================================
 # HELPERS
 # =============================================================================
+
 
 def _new_summary() -> StageSummary:
     """Return a zeroed summary for one stage."""

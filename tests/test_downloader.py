@@ -6,6 +6,7 @@ Tests for the downloader module's helper functions.
 Tests pure functions (url_to_filename, load_sources, load_state, save_state)
 without making real HTTP requests.
 """
+
 import asyncio
 import json
 import os
@@ -58,7 +59,9 @@ class TestUrlToFilename:
 
     def test_long_domain_truncated(self):
         """Very long domains should be truncated."""
-        result = url_to_filename("https://very-long-subdomain.very-long-domain.example.com/list.txt")
+        result = url_to_filename(
+            "https://very-long-subdomain.very-long-domain.example.com/list.txt"
+        )
         # Domain part should be at most 30 chars
         domain_part = result.rsplit("_", 1)[0]
         assert len(domain_part) <= 30
@@ -229,8 +232,7 @@ class TestSourceHealth:
             assert health.changed is True
             assert health.byte_size == len(content)
             assert (
-                health.sha256
-                == "aded7777eeac966af185f2b048d53fda75c4b4eac1950590e3c7ceb178671691"
+                health.sha256 == "aded7777eeac966af185f2b048d53fda75c4b4eac1950590e3c7ceb178671691"
             )
             assert health.cache_age_seconds is None
             assert health.failure_reason is None

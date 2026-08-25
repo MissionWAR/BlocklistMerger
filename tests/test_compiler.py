@@ -5,6 +5,7 @@ test_compiler.py
 Edge case tests for the compiler module.
 Tests deduplication logic, TLD wildcards, and cross-format optimization.
 """
+
 import inspect
 import json
 import os
@@ -736,9 +737,7 @@ class TestCompilerProofLedgerPlumbing:
             proof_ledger=ledger,
         )
         promotion_records = [
-            record
-            for record in ledger.records
-            if record.reason == REASON_CROSS_FORMAT_BROADENED
+            record for record in ledger.records if record.reason == REASON_CROSS_FORMAT_BROADENED
         ]
 
         assert rules == [
@@ -787,10 +786,12 @@ class TestCompilerPruningProofLedger:
         assert record.fingerprint
 
     def test_duplicate_pruning_records_exact_semantic_equivalence(self):
-        rules, stats, ledger = self._compile([
-            "||dup.example.com^$client=10.0.0.1,dnstype=a",
-            "||dup.example.com^$dnstype=A,client=10.0.0.1",
-        ])
+        rules, stats, ledger = self._compile(
+            [
+                "||dup.example.com^$client=10.0.0.1,dnstype=a",
+                "||dup.example.com^$dnstype=A,client=10.0.0.1",
+            ]
+        )
 
         record = self._record(ledger, REASON_DUPLICATE_RULE)
 
@@ -805,14 +806,16 @@ class TestCompilerPruningProofLedger:
         self._assert_required_facets(record)
 
     def test_parent_wildcard_and_tld_pruning_record_covering_facets(self):
-        rules, stats, ledger = self._compile([
-            "||parent.example.com^",
-            "||child.parent.example.com^",
-            "||*.wild.example.com^",
-            "||child.wild.example.com^",
-            "||*.autos^",
-            "||spam.autos^",
-        ])
+        rules, stats, ledger = self._compile(
+            [
+                "||parent.example.com^",
+                "||child.parent.example.com^",
+                "||*.wild.example.com^",
+                "||child.wild.example.com^",
+                "||*.autos^",
+                "||spam.autos^",
+            ]
+        )
 
         parent_record = self._record(ledger, REASON_PARENT_COVERED)
         wildcard_record = self._record(ledger, REASON_WILDCARD_COVERED)
@@ -838,12 +841,14 @@ class TestCompilerPruningProofLedger:
             self._assert_required_facets(record)
 
     def test_exception_pruning_records_proven_and_uncertain_decisions(self):
-        rules, stats, ledger = self._compile([
-            "||covered.example.com^$client=10.0.0.1",
-            "@@||covered.example.com^$client=10.0.0.1",
-            "||uncertain.example.com^",
-            "@@||uncertain.example.com^$client=10.0.0.1",
-        ])
+        rules, stats, ledger = self._compile(
+            [
+                "||covered.example.com^$client=10.0.0.1",
+                "@@||covered.example.com^$client=10.0.0.1",
+                "||uncertain.example.com^",
+                "@@||uncertain.example.com^$client=10.0.0.1",
+            ]
+        )
 
         proven_record = self._record(ledger, REASON_EXCEPTION_COVERED)
         uncertain_record = self._record(ledger, REASON_KEPT_BECAUSE_UNCERTAIN)
@@ -868,10 +873,12 @@ class TestCompilerPruningProofLedger:
         self._assert_required_facets(uncertain_record)
 
     def test_important_exception_sample_uses_exception_scope_proof(self):
-        rules, stats, ledger = self._compile([
-            "||important-exception.example.com^",
-            "@@||important-exception.example.com^$important",
-        ])
+        rules, stats, ledger = self._compile(
+            [
+                "||important-exception.example.com^",
+                "@@||important-exception.example.com^$important",
+            ]
+        )
 
         record = self._record(ledger, REASON_EXCEPTION_COVERED)
 
@@ -1076,8 +1083,8 @@ class TestModifierHandling:
     def test_dnstype_child_pruned_when_parent_blocks_all(self):
         """Parent blocks all types, child blocks specific type -> prune child."""
         lines = [
-            "||example.com^",               # Blocks ALL DNS types
-            "||sub.example.com^$dnstype=A", # Blocks only A records
+            "||example.com^",  # Blocks ALL DNS types
+            "||sub.example.com^$dnstype=A",  # Blocks only A records
         ]
         rules, _ = self._compile(lines)
         # Parent already blocks ALL types, so specific type is redundant
@@ -1087,8 +1094,8 @@ class TestModifierHandling:
     def test_dnstype_child_kept_when_parent_has_different_dnstype(self):
         """Both have $dnstype but might differ -> keep child (safe)."""
         lines = [
-            "||example.com^$dnstype=A",      # Blocks only A records
-            "||sub.example.com^$dnstype=AAAA", # Blocks only AAAA records
+            "||example.com^$dnstype=A",  # Blocks only A records
+            "||sub.example.com^$dnstype=AAAA",  # Blocks only AAAA records
         ]
         rules, _ = self._compile(lines)
         # Can't tell if same type, so keep both for safety
@@ -1099,7 +1106,7 @@ class TestModifierHandling:
         """Child blocks all types, parent only specific -> keep child."""
         lines = [
             "||example.com^$dnstype=A",  # Blocks only A records
-            "||sub.example.com^",        # Blocks ALL types
+            "||sub.example.com^",  # Blocks ALL types
         ]
         rules, _ = self._compile(lines)
         # Child is MORE restrictive, should NOT be pruned
@@ -1453,7 +1460,6 @@ class TestStressAndComplexScenarios:
         rules, stats = self._compile(lines)
         assert len(rules) == 3
         assert stats.tld_wildcard_pruned == 3
-
 
 
 class TestIPRules:

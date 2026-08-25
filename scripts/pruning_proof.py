@@ -366,12 +366,14 @@ class CappedProofLedger(ProofLedger):
         sample_buckets: list[dict[str, object]] = []
         for bucket in sorted(self._bucket_counts):
             sampled_records = _sorted_records(self._bucket_samples.get(bucket, ()))
-            sample_buckets.append({
-                "bucket": _bucket_dict(bucket),
-                "total_records": self._bucket_counts[bucket],
-                "sampled_records": len(sampled_records),
-                "records": [_capped_sample_record(record) for record in sampled_records],
-            })
+            sample_buckets.append(
+                {
+                    "bucket": _bucket_dict(bucket),
+                    "total_records": self._bucket_counts[bucket],
+                    "sampled_records": len(sampled_records),
+                    "records": [_capped_sample_record(record) for record in sampled_records],
+                }
+            )
         return sample_buckets
 
 
@@ -607,12 +609,14 @@ def render_capped_report(
     for bucket in sorted(grouped):
         bucket_records = grouped[bucket]
         sampled_records = bucket_records[:sample_cap]
-        sample_buckets.append({
-            "bucket": _bucket_dict(bucket),
-            "total_records": len(bucket_records),
-            "sampled_records": len(sampled_records),
-            "records": [_capped_sample_record(record) for record in sampled_records],
-        })
+        sample_buckets.append(
+            {
+                "bucket": _bucket_dict(bucket),
+                "total_records": len(bucket_records),
+                "sampled_records": len(sampled_records),
+                "records": [_capped_sample_record(record) for record in sampled_records],
+            }
+        )
 
     return {
         "schema_version": PROOF_REPORT_SCHEMA_VERSION,

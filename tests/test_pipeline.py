@@ -6,6 +6,7 @@ Tests for the pipeline module's end-to-end processing.
 Tests process_files() with real temp directories to verify the full
 clean -> compile pipeline produces correct output.
 """
+
 import json
 import os
 import shutil
@@ -76,9 +77,12 @@ class TestProcessFiles:
 
     def test_basic_pipeline(self, make_input_dir):
         """Simple ABP rules should pass through the pipeline."""
-        rules, stats = self._run(make_input_dir, {
-            "list1.txt": "||example.com^\n||other.com^\n",
-        })
+        rules, stats = self._run(
+            make_input_dir,
+            {
+                "list1.txt": "||example.com^\n||other.com^\n",
+            },
+        )
         assert "||example.com^" in rules
         assert "||other.com^" in rules
         assert stats["files_processed"] == 1
@@ -86,58 +90,80 @@ class TestProcessFiles:
 
     def test_comments_filtered(self, make_input_dir):
         """Comments should be removed during cleaning stage."""
-        rules, stats = self._run(make_input_dir, {
-            "list1.txt": "! This is a comment\n# Another comment\n||example.com^\n",
-        })
+        rules, stats = self._run(
+            make_input_dir,
+            {
+                "list1.txt": "! This is a comment\n# Another comment\n||example.com^\n",
+            },
+        )
         assert len(rules) == 1
         assert "||example.com^" in rules
         assert stats["comments_removed"] == 2
 
     def test_cosmetic_filtered(self, make_input_dir):
         """Cosmetic rules should be removed during cleaning stage."""
-        rules, stats = self._run(make_input_dir, {
-            "list1.txt": "||example.com^\nexample.com##.ad-banner\n",
-        })
+        rules, stats = self._run(
+            make_input_dir,
+            {
+                "list1.txt": "||example.com^\nexample.com##.ad-banner\n",
+            },
+        )
         assert len(rules) == 1
         assert stats["cosmetic_removed"] == 1
 
     def test_subdomain_pruning(self, make_input_dir):
         """Subdomains should be pruned when parent exists."""
-        rules, stats = self._run(make_input_dir, {
-            "list1.txt": "||example.com^\n||sub.example.com^\n",
-        })
+        rules, stats = self._run(
+            make_input_dir,
+            {
+                "list1.txt": "||example.com^\n||sub.example.com^\n",
+            },
+        )
         assert len(rules) == 1
         assert "||example.com^" in rules
         assert stats["abp_subdomain_pruned"] == 1
 
     def test_cross_file_deduplication(self, make_input_dir):
         """Duplicate rules across files should be deduplicated."""
-        rules, stats = self._run(make_input_dir, {
-            "list1.txt": "||example.com^\n",
-            "list2.txt": "||example.com^\n",
-        })
+        rules, stats = self._run(
+            make_input_dir,
+            {
+                "list1.txt": "||example.com^\n",
+                "list2.txt": "||example.com^\n",
+            },
+        )
         assert len(rules) == 1
         assert stats["duplicate_pruned"] == 1
 
-    @pytest.mark.parametrize("input_rule,expected", [
-        ("0.0.0.0 example.com", "||example.com^"),
-        ("127.0.0.1 example.com", "||example.com^"),
-        ("tracking.com", "||tracking.com^"),
-    ], ids=["hosts-zeros", "hosts-loopback", "plain-domain"])
+    @pytest.mark.parametrize(
+        "input_rule,expected",
+        [
+            ("0.0.0.0 example.com", "||example.com^"),
+            ("127.0.0.1 example.com", "||example.com^"),
+            ("tracking.com", "||tracking.com^"),
+        ],
+        ids=["hosts-zeros", "hosts-loopback", "plain-domain"],
+    )
     def test_format_compression(self, make_input_dir, input_rule, expected):
         """Various input formats should all compress to ABP."""
-        rules, stats = self._run(make_input_dir, {
-            "list1.txt": f"{input_rule}\n",
-        })
+        rules, stats = self._run(
+            make_input_dir,
+            {
+                "list1.txt": f"{input_rule}\n",
+            },
+        )
         assert expected in rules
         assert stats["formats_compressed"] >= 1
 
     def test_cross_file_subdomain_pruning(self, make_input_dir):
         """Subdomain pruning should work across files."""
-        rules, stats = self._run(make_input_dir, {
-            "list1.txt": "||example.com^\n",
-            "list2.txt": "0.0.0.0 sub.example.com\n",
-        })
+        rules, stats = self._run(
+            make_input_dir,
+            {
+                "list1.txt": "||example.com^\n",
+                "list2.txt": "0.0.0.0 sub.example.com\n",
+            },
+        )
         assert len(rules) == 1
         assert "||example.com^" in rules
 
@@ -162,10 +188,13 @@ class TestProcessFiles:
 
     def test_multiple_files_deterministic(self, make_input_dir):
         """Output should be deterministic regardless of file system ordering."""
-        rules1, _ = self._run(make_input_dir, {
-            "aaa.txt": "||a.com^\n",
-            "zzz.txt": "||z.com^\n",
-        })
+        rules1, _ = self._run(
+            make_input_dir,
+            {
+                "aaa.txt": "||a.com^\n",
+                "zzz.txt": "||z.com^\n",
+            },
+        )
         # Re-create input dir for second run (fixture is already consumed)
         with tempfile.TemporaryDirectory() as tmpdir:
             input_dir = os.path.join(tmpdir, "input")
@@ -181,28 +210,36 @@ class TestProcessFiles:
 
     def test_unsupported_modifiers_filtered(self, make_input_dir):
         """Rules with unsupported modifiers should be discarded."""
-        rules, stats = self._run(make_input_dir, {
-            "list1.txt": "||example.com^$script,third-party\n||keep.com^\n",
-        })
+        rules, stats = self._run(
+            make_input_dir,
+            {
+                "list1.txt": "||example.com^$script,third-party\n||keep.com^\n",
+            },
+        )
         assert len(rules) == 1
         assert "||keep.com^" in rules
         assert stats["unsupported_removed"] == 1
 
     def test_cleaner_discard_reasons_project_to_flat_stats(self, make_input_dir):
         """Every cleaner-owned discard reason should surface in pipeline stats."""
-        rules, stats = self._run(make_input_dir, {
-            "list1.txt": "\n".join([
-                "! comment",
-                "example.com##.ad",
-                "||bad-modifier.com^$script",
-                "",
-                "   ",
-                "||path.example.com/ads/",
-                "||^",
-                "||keep.com^",
-                "",
-            ]),
-        })
+        rules, stats = self._run(
+            make_input_dir,
+            {
+                "list1.txt": "\n".join(
+                    [
+                        "! comment",
+                        "example.com##.ad",
+                        "||bad-modifier.com^$script",
+                        "",
+                        "   ",
+                        "||path.example.com/ads/",
+                        "||^",
+                        "||keep.com^",
+                        "",
+                    ]
+                ),
+            },
+        )
 
         assert rules == ["||keep.com^"]
         assert stats["lines_clean"] == 1
@@ -219,9 +256,11 @@ class TestProcessFiles:
         monkeypatch,
     ):
         """Compiler-owned malformed discard totals should surface in pipeline stats."""
-        input_dir, output_file = make_input_dir({
-            "list1.txt": "||keep.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "list1.txt": "||keep.com^\n",
+            }
+        )
 
         def fake_compile_rules(lines, output_file):
             assert list(lines) == ["||keep.com^"]
@@ -242,9 +281,11 @@ class TestProcessFiles:
         monkeypatch,
     ):
         """Compiler-owned semantic diagnostics should surface in pipeline stats."""
-        input_dir, output_file = make_input_dir({
-            "list1.txt": "||keep.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "list1.txt": "||keep.com^\n",
+            }
+        )
 
         def fake_compile_rules(lines, output_file):
             assert list(lines) == ["||keep.com^"]
@@ -285,9 +326,11 @@ class TestProcessFiles:
         monkeypatch,
     ):
         """Default processing should not construct proof output or change compile call shape."""
-        input_dir, output_file = make_input_dir({
-            "list1.txt": "||keep.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "list1.txt": "||keep.com^\n",
+            }
+        )
         report_path = Path(output_file).with_name("coverage-proof.json")
         reports_dir = Path(output_file).parent / "reports"
 
@@ -312,13 +355,14 @@ class TestProcessFiles:
         tmp_path: Path,
     ):
         """Explicit proof reports should be capped, fingerprinted, and stats-compatible."""
-        input_dir, output_file = make_input_dir({
-            "list1.txt": "||keep.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "list1.txt": "||keep.com^\n",
+            }
+        )
         report_path = tmp_path / "reports" / "coverage-proof.json"
         expected_records = [
-            _proof_record(f"decision:{index:03d}", index=index)
-            for index in range(3)
+            _proof_record(f"decision:{index:03d}", index=index) for index in range(3)
         ]
 
         def fake_compile_rules(lines, output_file, *, proof_ledger=None):
@@ -389,11 +433,13 @@ class TestProcessFiles:
         monkeypatch,
     ):
         """Compiler input should follow sorted filenames, not worker completion order."""
-        input_dir, output_file = make_input_dir({
-            "b-list.txt": "||b.com^\n",
-            "a-list.txt": "||a.com^\n",
-            "c-list.txt": "||c.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "b-list.txt": "||b.com^\n",
+                "a-list.txt": "||a.com^\n",
+                "c-list.txt": "||c.com^\n",
+            }
+        )
         submitted_futures = []
         compiled_lines: list[str] = []
 
@@ -452,10 +498,12 @@ class TestProcessFiles:
         compile_fails: bool,
     ):
         """Temporary cleaned spools should be cleaned up on success and compile failure."""
-        input_dir, output_file = make_input_dir({
-            "one.txt": "||one.com^\n",
-            "two.txt": "||two.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "one.txt": "||one.com^\n",
+                "two.txt": "||two.com^\n",
+            }
+        )
         spool_root = tmp_path / "recorded-spools"
         entered_spool_context = False
 
@@ -503,10 +551,12 @@ class TestProcessFiles:
         make_input_dir,
     ):
         """Profiled processing should preserve stats and expose runtime-size metadata."""
-        input_dir, output_file = make_input_dir({
-            "b-list.txt": "||b.com^\n",
-            "a-list.txt": "||a.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "b-list.txt": "||b.com^\n",
+                "a-list.txt": "||a.com^\n",
+            }
+        )
 
         stats, runtime_profile = pipeline_module.process_files_with_profile(input_dir, output_file)
 
@@ -783,9 +833,11 @@ class TestPipelineCli:
         tmp_path: Path,
     ) -> None:
         """The CLI should generate proof reports only for an explicit path."""
-        input_dir, output_file = make_input_dir({
-            "list1.txt": "||example.com^\n||ads.example.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "list1.txt": "||example.com^\n||ads.example.com^\n",
+            }
+        )
         proof_report = tmp_path / "reports" / "coverage-proof.json"
         stats_report = tmp_path / "reports" / "pipeline-stats.json"
         monkeypatch.setattr(
@@ -822,9 +874,11 @@ class TestPipelineCli:
         tmp_path: Path,
     ) -> None:
         """Omitting --coverage-proof should leave proof report paths absent."""
-        input_dir, output_file = make_input_dir({
-            "list1.txt": "||example.com^\n||ads.example.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "list1.txt": "||example.com^\n||ads.example.com^\n",
+            }
+        )
         proof_report = tmp_path / "reports" / "coverage-proof.json"
         stats_report = tmp_path / "reports" / "pipeline-stats.json"
         monkeypatch.setattr(
@@ -851,9 +905,11 @@ class TestPipelineCli:
         tmp_path: Path,
     ) -> None:
         """The CLI should read source-health sidecars without copying rich fields."""
-        input_dir, output_file = make_input_dir({
-            "list1.txt": "||example.com^\n",
-        })
+        input_dir, output_file = make_input_dir(
+            {
+                "list1.txt": "||example.com^\n",
+            }
+        )
         source_health_report = tmp_path / "reports" / "source-health.json"
         stats_report = tmp_path / "reports" / "pipeline-stats.json"
         source_health_report.parent.mkdir(parents=True, exist_ok=True)

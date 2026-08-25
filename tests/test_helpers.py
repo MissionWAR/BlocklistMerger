@@ -63,10 +63,7 @@ def test_parse_abp_rule_preserves_structured_modifier_values() -> None:
     )
     assert record.semantic_signature == canonical_modifier_signature(record.modifiers)
 
-    raw_values_by_name = {
-        modifier.name: modifier.raw_value
-        for modifier in record.modifiers
-    }
+    raw_values_by_name = {modifier.name: modifier.raw_value for modifier in record.modifiers}
     assert raw_values_by_name == {
         "client": "10.0.0.1",
         "ctag": "pc",
@@ -108,4 +105,3 @@ def test_cleaner_extract_modifiers_roundtrip() -> None:
     assert "script" in mods
     # Negation should be unwrapped
     assert "~script" not in mods
-
