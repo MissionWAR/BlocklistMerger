@@ -316,8 +316,8 @@ def test_manual_heavy_evidence_workflow_is_dispatch_only_and_read_only() -> None
     assert "actions: write" not in text
     assert "\n    timeout-minutes: 60\n" in job
 
-    assert "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd" in text
-    assert "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405" in text
+    assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in text
+    assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in text
     assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in text
 
 
