@@ -103,6 +103,8 @@ class TestWcsCompilePlane:
         assert stats.wildcard_covered_sub_pruned == 0
         summary = ledger.summary()
         assert REASON_WILDCARD_COVERS_SUB not in summary["by_reason"]
+        tally = summary["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert tally == stats.wildcard_covered_sub_pruned
 
     def test_flag_on_alone_stays_inert_with_zero_counter_and_no_ledger_entries(self):
         """wildcard_covers_subs_pruning=True alone: identical bytes, counter 0."""
@@ -117,6 +119,8 @@ class TestWcsCompilePlane:
         assert stats.wildcard_covered_sub_pruned == 0
         summary = ledger.summary()
         assert REASON_WILDCARD_COVERS_SUB not in summary["by_reason"]
+        tally = summary["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert tally == stats.wildcard_covered_sub_pruned
 
 
 class TestWcsRecordingPath:
@@ -231,6 +235,7 @@ class TestWcsStageReconciliation:
 
         summaries = compiler_stage_summaries_from_stats(stats_off)
 
+        assert stats_off.wildcard_covered_sub_pruned == 0
         assert summaries[COMPILER_STAGE_PRUNE]["reasons"] == {}
         assert "wcs_covered" not in summaries[COMPILER_STAGE_PRUNE]["reasons"]
 
