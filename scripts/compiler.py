@@ -1377,6 +1377,65 @@ def _find_denyallow_covering_variant(
     return None
 
 
+def _wildcard_covers_sub(
+    candidate: RuleEntry,
+    witnesses: list[RuleEntry],
+    tld: str,
+) -> RuleEntry | None:
+    """Return the FIRST surviving wildcard variant provably covering a candidate.
+
+    Iterates witnesses in storage (append) order so multi-variant keys
+    resolve deterministically: exactly one witness or None, never a
+    collection. A witness proves coverage only after three legs, composed
+    per witness with the first full pass winning:
+
+    1. Domain eligibility (evaluated once, before iteration): the candidate
+       must sit strictly under the ``tld`` key. A domain equal to the key is
+       the wildcard's own apex and is refused -- AdGuard Home matches
+       ``||*.x^`` via the ``".x"`` suffix so an apex never covers itself --
+       and any domain not ending in ``"." + tld`` is cross-key and refused
+       outright. Strict same-key eligibility ONLY: no suffix relaxation, no
+       registered-domain walking, no cross-key witnessing, ever (the D-16-02
+       adjudication).
+    2. Scope proof: ``modifier_scope_covers(witness.modifiers,
+       candidate.modifiers)`` is the SOLE authority on modifier coverage --
+       no comparison logic is invented here. Carriers of NO_COVERAGE
+       modifiers ($badfilter, $denyallow, $dnsrewrite) are rejected by the
+       oracle wholesale.
+    3. Denyallow divergence: reuses ``_denyallow_allow_set`` +
+       ``_domain_disjoint_from_all`` unchanged. When the witness carries an
+       admissible $denyallow set sharing a subtree with the candidate,
+       coverage is refused (the exemption carves out a region the wildcard
+       cannot prove across). An inadmissible set imposes nothing here.
+
+    Args:
+        candidate: Plain blocking rule record under evaluation.
+        witnesses: Same-key surviving wildcard variants in storage order.
+        tld: The wildcard storage key shared by the witnesses (from the
+            parse-time ``get_tld`` bucketing).
+
+    Returns:
+        The first witness passing all legs, or None when no witness provably
+        covers the candidate.
+
+    Note:
+        Intentionally UNCALLED by production code in this milestone: the
+        Phase 20 write-time emission site is this helper's future consumer.
+        Wiring it earlier would break the byte-identity guarantee, so do not
+        add callers casually.
+    """
+    if candidate.domain == tld or not candidate.domain.endswith("." + tld):
+        return None
+    for witness in witnesses:
+        if not modifier_scope_covers(witness.modifiers, candidate.modifiers):
+            continue
+        allow_set = _denyallow_allow_set(witness.modifiers, tld)
+        if allow_set is not None and not _domain_disjoint_from_all(candidate.domain, allow_set):
+            continue
+        return witness
+    return None
+
+
 def _record_proven_pruning(
     proof_ledger: ProofLedger | None,
     *,
