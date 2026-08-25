@@ -29,19 +29,25 @@ def test_cleaner_stage_summary_contains_all_stages_when_zero() -> None:
 
     assert tuple(summaries) == CLEANER_STAGES
     assert set(summaries) == set(CLEANER_STAGES)
-    assert all(summary == {
-        "processed": 0,
-        "emitted": 0,
-        "discarded": 0,
-        "reasons": {},
-    } for summary in summaries.values())
+    assert all(
+        summary
+        == {
+            "processed": 0,
+            "emitted": 0,
+            "discarded": 0,
+            "reasons": {},
+        }
+        for summary in summaries.values()
+    )
 
 
 def test_cleaner_trimmed_rows_are_normalize_metadata_only() -> None:
-    summaries = cleaner_stage_summaries_from_stats({
-        "lines_clean": 1,
-        "trimmed": 2,
-    })
+    summaries = cleaner_stage_summaries_from_stats(
+        {
+            "lines_clean": 1,
+            "trimmed": 2,
+        }
+    )
 
     assert summaries[CLEANER_STAGE_NORMALIZE]["reasons"] == {"trimmed": 2}
     assert summaries[CLEANER_STAGE_NORMALIZE]["discarded"] == 0
@@ -78,5 +84,7 @@ def test_compiler_stage_summary_contains_all_stages_when_zero() -> None:
 
     assert tuple(summaries) == COMPILER_STAGES
     assert set(summaries) == set(COMPILER_STAGES)
-    assert all(set(summary) == {"processed", "emitted", "discarded", "reasons"}
-               for summary in summaries.values())
+    assert all(
+        set(summary) == {"processed", "emitted", "discarded", "reasons"}
+        for summary in summaries.values()
+    )

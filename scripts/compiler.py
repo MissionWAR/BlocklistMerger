@@ -66,6 +66,7 @@ from scripts.pruning_proof import (
     PROOF_STATUS_NOT_APPLICABLE,
     PROOF_STATUS_PROVEN,
     PROOF_STATUS_UNCERTAIN,
+    REASON_APEX_COVERS_TLD_WILDCARD,
     REASON_BADFILTER_DISABLED,
     REASON_CROSS_FORMAT_BROADENED,
     REASON_DENYALLOW_COVERED,
@@ -114,6 +115,7 @@ from scripts.rule_syntax import (
 # TYPE ALIASES
 # =============================================================================
 # These make complex type signatures more readable throughout the codebase.
+
 
 class AbpRuleRecord(NamedTuple):
     """
@@ -183,24 +185,22 @@ _tld_extract = tldextract.TLDExtract(suffix_list_urls=None)
 #: ABP pattern: ||[*.]domain^ (including IP addresses)
 #: Examples: ||example.com^, ||*.example.com^, @@||example.com^$important
 ABP_DOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^(@@)?\|\|"              # Start: || or @@|| (group 1: exception marker)
-    r"(\*\.)?"                 # Optional *. wildcard (group 2)
-    r"([^^$|*\s]+)"            # Domain/IP (group 3)
-    r"\^"                      # Separator
+    r"^(@@)?\|\|"  # Start: || or @@|| (group 1: exception marker)
+    r"(\*\.)?"  # Optional *. wildcard (group 2)
+    r"([^^$|*\s]+)"  # Domain/IP (group 3)
+    r"\^"  # Separator
 )
 
 #: Hosts format: IP domain [domain2 ...]
 #: Examples: 0.0.0.0 example.com, 127.0.0.1 ads.example.com tracking.example.com
 HOSTS_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^([\d.:a-fA-F]+)\s+"   # IP address (IPv4 or IPv6)
-    r"(.+)$"                 # Rest of line (domains)
+    r"^([\d.:a-fA-F]+)\s+"  # IP address (IPv4 or IPv6)
+    r"(.+)$"  # Rest of line (domains)
 )
 
 #: Valid domain/IP for hosts file entries
 #: Examples: example.com, sub.example.com, my-domain.co.uk
-HOSTS_DOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^[a-zA-Z0-9][\w.-]*$"
-)
+HOSTS_DOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-zA-Z0-9][\w.-]*$")
 
 #: Plain domain (simple domain name, no special chars except . and -)
 #: Examples: example.com, sub.example.com (NOT: ||example.com^, 0.0.0.0 example.com)
@@ -215,21 +215,39 @@ PLAIN_DOMAIN_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 #: Local/blocking IPs recognized in hosts format
 #: These indicate the entry is meant to block the domain, not redirect it.
-BLOCKING_IPS: Final[frozenset[str]] = frozenset({
-    "0.0.0.0", "127.0.0.1", "::1", "::0", "::",
-    "0:0:0:0:0:0:0:0", "0:0:0:0:0:0:0:1",
-})
+BLOCKING_IPS: Final[frozenset[str]] = frozenset(
+    {
+        "0.0.0.0",
+        "127.0.0.1",
+        "::1",
+        "::0",
+        "::",
+        "0:0:0:0:0:0:0:0",
+        "0:0:0:0:0:0:0:1",
+    }
+)
 
 #: Local hostnames to skip (these appear in hosts files but shouldn't be blocked)
-LOCAL_HOSTNAMES: Final[frozenset[str]] = frozenset({
-    "localhost", "localhost.localdomain", "local", "broadcasthost",
-    "ip6-localhost", "ip6-loopback", "ip6-localnet",
-    "ip6-mcastprefix", "ip6-allnodes", "ip6-allrouters", "ip6-allhosts",
-})
+LOCAL_HOSTNAMES: Final[frozenset[str]] = frozenset(
+    {
+        "localhost",
+        "localhost.localdomain",
+        "local",
+        "broadcasthost",
+        "ip6-localhost",
+        "ip6-loopback",
+        "ip6-localnet",
+        "ip6-mcastprefix",
+        "ip6-allnodes",
+        "ip6-allrouters",
+        "ip6-allhosts",
+    }
+)
 
 # =============================================================================
 # DATA STRUCTURES
 # =============================================================================
+
 
 @dataclass(slots=True)
 class CompileStats:
@@ -247,6 +265,7 @@ class CompileStats:
         abp_subdomain_pruned: Subdomain rules pruned by parent rules
         tld_wildcard_pruned: Rules pruned by TLD wildcards (e.g., ||*.autos^)
         denyallow_wildcard_pruned: Rules pruned by admissible $denyallow wildcard coverage
+        apex_covered_wildcard_pruned: TLD wildcard variants pruned by surviving apex coverage
         duplicate_pruned: Exact duplicate rules removed
         whitelist_conflict_pruned: Rules removed due to whitelist conflicts
         local_hostname_pruned: Local hostnames (localhost, etc.) skipped
@@ -274,6 +293,7 @@ class CompileStats:
         >>> print(f"Kept {stats.abp_kept} of {stats.total_input}")
         Kept 500 of 1000
     """
+
     total_input: int = 0
     total_output: int = 0
 
@@ -285,6 +305,7 @@ class CompileStats:
     abp_subdomain_pruned: int = 0
     tld_wildcard_pruned: int = 0
     denyallow_wildcard_pruned: int = 0
+    apex_covered_wildcard_pruned: int = 0
     duplicate_pruned: int = 0
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
@@ -313,6 +334,7 @@ class CompileStats:
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
+
 
 def normalize_domain(domain: str) -> str:
     """
@@ -479,9 +501,13 @@ def _facet_from_line(
         proof_is_wildcard = is_wildcard
 
     modifiers = parse_modifier_text(syntax.modifier_text)
-    domain_shape = "regex" if syntax.kind == RULE_KIND_REGEX else _domain_shape(
-        proof_domain,
-        is_wildcard=proof_is_wildcard,
+    domain_shape = (
+        "regex"
+        if syntax.kind == RULE_KIND_REGEX
+        else _domain_shape(
+            proof_domain,
+            is_wildcard=proof_is_wildcard,
+        )
     )
 
     return RuleFacet(
@@ -931,6 +957,7 @@ def walk_parent_domains(domain: str) -> tuple[str, ...]:
 # HELPER FUNCTIONS FOR COMPILATION PHASES
 # =============================================================================
 
+
 def _parse_and_compress_lines(
     lines: Iterable[str],
     stats: CompileStats,
@@ -1173,11 +1200,7 @@ def _exception_domain_scope_covers(exception: RuleEntry, block: RuleEntry) -> bo
 
 def _important_priority_state(modifiers: tuple[ParsedModifier, ...]) -> tuple[bool, bool]:
     """Return (has_positive_important, is_safe_to_compare) for priority handling."""
-    important_modifiers = [
-        modifier
-        for modifier in modifiers
-        if modifier.name == "important"
-    ]
+    important_modifiers = [modifier for modifier in modifiers if modifier.name == "important"]
     if not important_modifiers:
         return False, True
     if len(important_modifiers) != 1:
@@ -1214,15 +1237,9 @@ def _exception_modifier_scope_covers(exception: RuleEntry, block: RuleEntry) -> 
 
 def _exception_covers_block(exception: RuleEntry, block: RuleEntry) -> bool:
     """Return True when an exception fully covers a block rule."""
-    return (
-        _exception_domain_scope_covers(exception, block)
-        and _exception_modifier_scope_covers(exception, block)
+    return _exception_domain_scope_covers(exception, block) and _exception_modifier_scope_covers(
+        exception, block
     )
-
-
-def _is_whitelisted(record: RuleEntry, exceptions: ExceptionRules) -> bool:
-    """Check whether any exception rule fully covers a block rule."""
-    return any(_exception_covers_block(exception, record) for exception in exceptions)
 
 
 def _find_covering_exception(record: RuleEntry, exceptions: ExceptionRules) -> RuleEntry | None:
@@ -1306,12 +1323,27 @@ def _find_domain_scope_exception_indexed(
     return None
 
 
+def _build_apex_survivor_index(
+    pruned_abp: RuleStorage,
+    abp_wildcards: WildcardStorage,
+) -> dict[str, list[RuleEntry]]:
+    """Project Phase 3 survivors onto wildcard keys as apex witnesses.
+
+    Witnesses come exclusively from post-exception survivors: every entry
+    lives in pruned_abp, so an apex removed by a whitelist conflict can never
+    license removing the wildcard it nominally covered (PRUNE-02). Witnessing
+    is strict same-key (D-16-02): a survivor lands under key K only when it
+    was stored under that plain-domain key, which happens only when its
+    normalized domain equals K -- no cross-key or suffix-relaxed eligibility.
+    """
+    return {
+        tld: survivors for tld in abp_wildcards if (survivors := pruned_abp.get(tld)) is not None
+    }
+
+
 def _any_parent_record_covers(child: RuleEntry, parents: list[RuleEntry]) -> bool:
     """Return True when any parent variant proves coverage for a child variant."""
-    return any(
-        modifier_scope_covers(parent.modifiers, child.modifiers)
-        for parent in parents
-    )
+    return any(modifier_scope_covers(parent.modifiers, child.modifiers) for parent in parents)
 
 
 def _find_covering_parent_record(child: RuleEntry, parents: list[RuleEntry]) -> RuleEntry | None:
@@ -1470,11 +1502,7 @@ def _prune_redundant_rules(
             uncertain_reason = "exception_domain_scope_matched_modifier_scope_unproven"
 
             tld = get_tld(clean_domain)
-            if (
-                tld
-                and tld in tld_wildcards
-                and clean_domain != tld
-            ):
+            if tld and tld in tld_wildcards and clean_domain != tld:
                 covering_tld = _find_covering_parent_record(record, abp_wildcards[tld])
                 if covering_tld is not None:
                     stats.tld_wildcard_pruned += 1
@@ -1585,6 +1613,7 @@ def _write_output(
     proof_ledger: ProofLedger | None,
     *,
     exception_index: ExceptionIndex | None = None,
+    apex_survivor_index: dict[str, list[RuleEntry]] | None = None,
 ) -> None:
     """Phase 4: Write deduplicated rules to output atomically.
 
@@ -1599,6 +1628,10 @@ def _write_output(
         exception_index: Prebuilt exception domain index; when provided the
             write-time whitelist scan uses indexed probes, otherwise the
             legacy linear scan runs so direct internal callers stay valid.
+        apex_survivor_index: Prebuilt wildcard-key to surviving-apex index;
+            when provided each wildcard record is additionally proven against
+            a surviving same-key apex and skipped when covered; None keeps
+            the legacy emission path instruction-for-instruction.
     """
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1627,6 +1660,23 @@ def _write_output(
                         ),
                     )
                     continue
+                # Direction-A proof (D-16-01): strictly after exception screening;
+                # witnesses come only from the prebuilt survivor index (PRUNE-02).
+                if apex_survivor_index is not None:
+                    witnesses = apex_survivor_index.get(record.domain)
+                    if witnesses:
+                        covering_apex = _find_covering_parent_record(record, witnesses)
+                        if covering_apex is not None:
+                            stats.apex_covered_wildcard_pruned += 1
+                            _record_proven_pruning(
+                                proof_ledger,
+                                reason=REASON_APEX_COVERS_TLD_WILDCARD,
+                                candidate=record,
+                                covering=covering_apex,
+                            )
+                            # Skips BOTH the write and the abp_kept bump, or
+                            # total_output corrupts while bytes stay correct.
+                            continue
                 f.write(record.rule + "\n")
                 stats.abp_kept += 1
 
@@ -1647,12 +1697,14 @@ def _write_output(
 # MAIN COMPILATION
 # =============================================================================
 
+
 def compile_rules(
     lines: Iterable[str],
     output_file: str,
     *,
     proof_ledger: ProofLedger | None = None,
     denyallow_pruning: bool = True,
+    wildcard_apex_pruning: bool = False,
 ) -> CompileStats:
     """
     Compile and deduplicate rules with format compression.
@@ -1672,6 +1724,13 @@ def compile_rules(
             Production-on since v1.2 (D-04): the full-corpus shadow gate proved
             removals are exactly the provably-covered population before this default
             flipped True. Pass False to restore pre-v1.2 keep-everything behavior.
+        wildcard_apex_pruning: Remove a TLD wildcard only when a surviving same-key
+            apex (one present in the final output) provably covers it with
+            equal-or-broader modifier scope; every removal is individually recorded
+            in the proof ledger and the apex itself always remains. OFF (the
+            production default): compiled output is byte-identical to legacy
+            behavior and the apex-covered counter stays 0 everywhere. ON: each
+            removed TLD wildcard is individually proven against its surviving apex.
 
     Returns:
         CompileStats with metrics about the compilation process
@@ -1726,6 +1785,13 @@ def compile_rules(
         exception_index=exception_index,
     )
 
+    # Direction-A witnesses (D-16-01): built ONCE over the final post-exception
+    # survivor state so write-time proofs cite only rules present in the output;
+    # gated off entirely under the production default.
+    apex_survivor_index = (
+        _build_apex_survivor_index(pruned_abp, abp_wildcards) if wildcard_apex_pruning else None
+    )
+
     # PHASE 4: Output to file
     _write_output(
         output_file=output_file,
@@ -1736,6 +1802,7 @@ def compile_rules(
         other_rules=other_rules,
         proof_ledger=proof_ledger,
         exception_index=exception_index,
+        apex_survivor_index=apex_survivor_index,
     )
 
     return stats
@@ -1774,8 +1841,10 @@ if __name__ == "__main__":
     )
     print(f"  Other rules: {stats.other_kept:,}")
     print("\nPruned:")
-    print(f"  ABP subdomains:     {stats.abp_subdomain_pruned:,}")
-    print(f"  TLD wildcards:      {stats.tld_wildcard_pruned:,}")
-    print(f"  Duplicates:         {stats.duplicate_pruned:,}")
-    print(f"  Whitelist conflicts: {stats.whitelist_conflict_pruned:,}")
-    print(f"  Local hostnames:    {stats.local_hostname_pruned:,}")
+    print(f"  ABP subdomains:         {stats.abp_subdomain_pruned:,}")
+    print(f"  TLD wildcards:          {stats.tld_wildcard_pruned:,}")
+    print(f"  Denyallow wildcards:    {stats.denyallow_wildcard_pruned:,}")
+    print(f"  Apex-covered wildcards: {stats.apex_covered_wildcard_pruned:,}")
+    print(f"  Duplicates:             {stats.duplicate_pruned:,}")
+    print(f"  Whitelist conflicts:    {stats.whitelist_conflict_pruned:,}")
+    print(f"  Local hostnames:        {stats.local_hostname_pruned:,}")

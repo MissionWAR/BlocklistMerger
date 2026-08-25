@@ -4,6 +4,7 @@ test_cleaner.py
 
 Edge case tests for the cleaner module.
 """
+
 import pytest
 
 from scripts.cleaner import (

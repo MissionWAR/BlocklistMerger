@@ -1,5 +1,6 @@
 """Static checks for public documentation and fork-reuse boundaries."""
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -9,6 +10,7 @@ AGH_SEMANTICS = ROOT / "docs" / "AGH_SEMANTICS.md"
 SCOPE_DOC = ROOT / "docs" / "SCOPE.md"
 RUNTIME_LANGUAGE_GATE = ROOT / "docs" / "RUNTIME_LANGUAGE_GATE.md"
 WORKFLOW = ROOT / ".github" / "workflows" / "update.yml"
+GIT_BLAME_IGNORE_REVS = ROOT / ".git-blame-ignore-revs"
 
 MAINTAINER_RELEASE_URL = (
     "https://github.com/MissionWAR/BlocklistMerger/releases/download/latest/merged.txt"
@@ -43,6 +45,28 @@ def _git_ls_files(*paths: str) -> list[str]:
     )
     assert result.returncode == 0
     return [line for line in result.stdout.splitlines() if line]
+
+
+def _git_rev_parse_verify(revision: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", revision],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _git_is_ancestor(sha: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
 
 
 def test_readme_public_reuse_paths() -> None:
@@ -95,7 +119,13 @@ def test_workflow_public_reuse_surface_has_no_manual_inputs() -> None:
 
 
 def test_ignore_policy_source_runtime_boundary() -> None:
-    """Public docs/tests should be trackable while runtime and private paths stay ignored."""
+    """Public docs/tests should be trackable while runtime and private paths stay ignored.
+
+    Phase 17 (D-17-02/D-17-07) carves exactly one exception out of the
+    reports/ ignore: reports/shadow-gate/ is a committed evidence home
+    for apex-shadow summary manifests. Every other reports/ subtree and
+    all other generated/runtime outputs stay untracked.
+    """
     assert _git_check_ignore("docs/SCOPE.md") == 1
     assert _git_check_ignore("tests/test_public_docs.py") == 1
 
@@ -103,7 +133,29 @@ def test_ignore_policy_source_runtime_boundary() -> None:
     assert _git_check_ignore("AGENTS.md") == 0
     assert _git_check_ignore("run.py") == 0
 
-    assert _git_ls_files("lists", ".cache", "reports") == []
+    # The shadow-gate evidence home itself stays trackable (manifests are
+    # versioned stems, so pin a future-shaped path, not just current files).
+    assert _git_check_ignore("reports/shadow-gate/apex-shadow-v1.json") == 1
+
+    tracked = _git_ls_files("lists", ".cache", "reports")
+    bulk_tracked = [path for path in tracked if not path.startswith("reports/shadow-gate/")]
+    assert bulk_tracked == []
+
+
+def test_blame_ignore_revs_reference_resolves_to_head_ancestor() -> None:
+    """The formatter-normalization exemption must pin one real ancestor commit."""
+    assert GIT_BLAME_IGNORE_REVS.exists()
+
+    shas = [
+        line
+        for line in _read_text(GIT_BLAME_IGNORE_REVS).splitlines()
+        if re.fullmatch(r"[0-9a-f]{40}", line)
+    ]
+    assert len(shas) == 1
+
+    sha = shas[0]
+    assert _git_rev_parse_verify(f"{sha}^{{commit}}"), f"SHA does not resolve: {sha}"
+    assert _git_is_ancestor(sha), f"SHA is not an ancestor of HEAD: {sha}"
 
 
 def test_scope_doc_defers_v2_config_platform() -> None:
@@ -128,6 +180,37 @@ def test_scope_doc_defers_v2_config_platform() -> None:
     ]
     for item in deferred_items:
         assert item in scope
+
+
+def test_readme_direction_a_closure_paragraph_is_contained_with_evidence_link() -> None:
+    """README should keep the apex-shadow verdict inside Scope and Non-Goals."""
+    text = _read_text(README)
+    scope_heading = _position(text, "## Scope and Non-Goals")
+    paragraph_start = _position(
+        text,
+        "**Apex-covered wildcard pruning (v1.3): measured, not enabled.**",
+    )
+    paragraph_end = text.find("\n\n", paragraph_start)
+    sources_heading = _position(text, "## 📋 Sources")
+
+    assert scope_heading < paragraph_start < paragraph_end < sources_heading
+
+    paragraph = text[paragraph_start:paragraph_end]
+    required_fragments = [
+        "A full-corpus shadow run over 10,348,336 input rules",
+        "no surviving TLD wildcard has a same-key apex coverer",
+        "would have cost +23.4% median wall-clock",
+        "ships permanently disabled and the direction is closed",
+    ]
+    for fragment in required_fragments:
+        assert fragment in paragraph
+
+    assert (
+        "[`reports/shadow-gate/apex-shadow-v1.md`](reports/shadow-gate/apex-shadow-v1.md)"
+        in paragraph
+    )
+
+    assert "APEX_SHADOW_DATASET_ID" not in text
 
 
 def test_agh_semantics_matrix_is_publicly_discoverable() -> None:

@@ -10,6 +10,7 @@ coverage lookup, modifier-scope comparison, and pruning. The E-06 finding
 documents that TLD wildcards bypass Phase 3 apex-vs-wildcard redundancy
 checks; Phase 14 FIX-01 owns the remediation.
 """
+
 import os
 import tempfile
 

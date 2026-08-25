@@ -98,11 +98,7 @@ def _python_code_without_strings(path: str) -> str:
 
 def _python_string_literals(path: str) -> str:
     tokens = tokenize.generate_tokens(io.StringIO(_read(path)).readline)
-    return " ".join(
-        token.string.lower()
-        for token in tokens
-        if token.type == tokenize.STRING
-    )
+    return " ".join(token.string.lower() for token in tokens if token.type == tokenize.STRING)
 
 
 def _python_tree(path: str) -> ast.AST:
@@ -130,8 +126,7 @@ def _release_threshold_field_names() -> set[str]:
         return {
             statement.target.id
             for statement in node.body
-            if isinstance(statement, ast.AnnAssign)
-            and isinstance(statement.target, ast.Name)
+            if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)
         }
     raise AssertionError("ReleaseThresholds class not found")
 

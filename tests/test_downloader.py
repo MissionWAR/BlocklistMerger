@@ -6,7 +6,9 @@ Tests for the downloader module's helper functions.
 Tests pure functions (url_to_filename, load_sources, load_state, save_state)
 without making real HTTP requests.
 """
+
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -58,7 +60,9 @@ class TestUrlToFilename:
 
     def test_long_domain_truncated(self):
         """Very long domains should be truncated."""
-        result = url_to_filename("https://very-long-subdomain.very-long-domain.example.com/list.txt")
+        result = url_to_filename(
+            "https://very-long-subdomain.very-long-domain.example.com/list.txt"
+        )
         # Domain part should be at most 30 chars
         domain_part = result.rsplit("_", 1)[0]
         assert len(domain_part) <= 30
@@ -229,8 +233,7 @@ class TestSourceHealth:
             assert health.changed is True
             assert health.byte_size == len(content)
             assert (
-                health.sha256
-                == "aded7777eeac966af185f2b048d53fda75c4b4eac1950590e3c7ceb178671691"
+                health.sha256 == "aded7777eeac966af185f2b048d53fda75c4b4eac1950590e3c7ceb178671691"
             )
             assert health.cache_age_seconds is None
             assert health.failure_reason is None
@@ -429,6 +432,34 @@ class TestSourceHealthReport:
         serialized = json.dumps(summary, sort_keys=True)
         for forbidden_key in ("url", "filename", "sha256", "failure_reason", "sources"):
             assert f'"{forbidden_key}"' not in serialized
+
+
+class TestMainDocstringTruthContract:
+    """Pin the TRUE exit contract wording of main()'s docstring (Phase 18, T-17-04-E)."""
+
+    def test_docstring_states_return_zero_after_fetching_exit_contract(self):
+        doc = inspect.getdoc(downloader.main)
+
+        assert doc is not None
+        assert "0 after fetching completes" in doc
+        assert "even when many or all individual sources" in doc
+        assert "Non-zero only when no URLs are loaded from --sources" in doc
+        assert "cannot be written (OSError)" in doc
+
+    def test_docstring_names_tolerance_resilience_chain_and_health_flag(self):
+        doc = inspect.getdoc(downloader.main)
+
+        assert doc is not None
+        assert "Tolerates per-source failures" in doc
+        assert "(--health-report)" in doc
+        assert "Resilience chain: cache fallback" in doc
+        assert "rule-count publish gate" in doc
+
+    def test_docstring_never_reintroduces_false_halt_line_claim(self):
+        doc = inspect.getdoc(downloader.main) or ""
+
+        for banned in ("more than half", ">half", "thresholds decide", "failure thresholds"):
+            assert banned not in doc
 
     def test_cli_health_report_mode_writes_report_without_legacy_failure_gate(
         self, monkeypatch, tmp_path

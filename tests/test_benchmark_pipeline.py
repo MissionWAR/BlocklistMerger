@@ -492,9 +492,7 @@ def test_benchmark_cli_freeze_and_run_frozen(
     )
 
     assert benchmark_pipeline.main() == 0
-    manifest_path = (
-        tmp_path / "reports" / "benchmarks" / "frozen" / "cli-smoke" / "manifest.json"
-    )
+    manifest_path = tmp_path / "reports" / "benchmarks" / "frozen" / "cli-smoke" / "manifest.json"
     assert manifest_path.exists()
 
     def fake_process_files_with_profile(input_dir, output_file, **kwargs):

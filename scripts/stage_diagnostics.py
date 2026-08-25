@@ -67,6 +67,7 @@ CLEANER_STAGE_BY_REASON: Final[dict[str, str]] = {
 # DATA STRUCTURES
 # =============================================================================
 
+
 class StageSummary(TypedDict):
     """JSON-friendly aggregate counters for one internal stage."""
 
@@ -83,6 +84,7 @@ StatsSource = Mapping[str, object] | object
 # =============================================================================
 # HELPERS
 # =============================================================================
+
 
 def _new_summary() -> StageSummary:
     """Return a zeroed summary for one stage."""
@@ -222,6 +224,8 @@ def compiler_stage_summaries_from_stats(stats: StatsSource) -> StageSummaries:
     pruned = {
         "abp_subdomain": _stat(stats, "abp_subdomain_pruned"),
         "tld_wildcard": _stat(stats, "tld_wildcard_pruned"),
+        "denyallow": _stat(stats, "denyallow_wildcard_pruned"),
+        "apex_covered": _stat(stats, "apex_covered_wildcard_pruned"),
         "whitelist_conflict": _stat(stats, "whitelist_conflict_pruned"),
         "local_hostname": _stat(stats, "local_hostname_pruned"),
     }

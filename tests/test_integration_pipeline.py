@@ -81,4 +81,3 @@ def test_pipeline_fixtures(case_name: str, tmp_path: Path) -> None:
 def test_coverage_proof_pruning_fixture(tmp_path: Path) -> None:
     """Full sidecar fixture proves pruning categories without generated data."""
     _run_proof_case("coverage_proof_pruning", tmp_path)
-

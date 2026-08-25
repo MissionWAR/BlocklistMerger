@@ -1,0 +1,247 @@
+{
+  "checks": {
+    "added_empty": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "buckets_partition_total": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "coverer_membership_complete": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "denyallow_bucket_identical": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "input_identity": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "input_rows_sanity": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "other_buckets_stable_both_directions": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "removed_equals_counter": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "removed_equals_uncapped_tally": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "timing_cross_tie_off": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "timing_cross_tie_on": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "timing_on_compile_flags_echo": {
+      "expected": {
+        "wildcard_apex_pruning": true
+      },
+      "observed": {
+        "wildcard_apex_pruning": true
+      },
+      "ok": true
+    },
+    "timing_output_stable_both_legs": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "timing_same_corpus": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "timing_within_bar": {
+      "expected": true,
+      "observed": false,
+      "ok": false
+    },
+    "total_records_delta_equals_removed": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "uncertain_keeps_stasis": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "whitelist_bucket_identical": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    }
+  },
+  "corpus": {
+    "dir": "reports/benchmarks/frozen/apex-shadow-v1/raw",
+    "file_count": 86,
+    "frozen": true,
+    "manifest_sha256": "3bd739e891bf841b116ff17ea9e5306290c9f69bdc6d3c2ae0a41ba26b40e401",
+    "total_bytes": 231266675
+  },
+  "created_at": "2026-08-24T18:59:35Z",
+  "flags": {
+    "denyallow_pruning": true,
+    "wildcard_apex_pruning_off": false,
+    "wildcard_apex_pruning_on": true
+  },
+  "identity": {
+    "git_revision": "356a349",
+    "package_version": "1.5.0",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python_version": "3.14.6"
+  },
+  "population": {
+    "buckets": {
+      "multipart_suffix_apex": {
+        "count": 0,
+        "samples": [],
+        "share_percent": 0.0
+      },
+      "single_label_suffix_apex": {
+        "count": 0,
+        "samples": [],
+        "share_percent": 0.0
+      }
+    },
+    "buckets_partition_total": true,
+    "pure_tld_share_percent": 0.0,
+    "reason_split_triggered": false,
+    "split_bar_percent": 1.0,
+    "total": 0
+  },
+  "proposed_guards": {
+    "binding": false,
+    "counter_ledger_equality": {
+      "expected": "tally == counter == removed, both directions"
+    },
+    "minimum_output_rules": {
+      "basis": "the ON leg IS the deterministic post-flip preview; expected floor = off_rule_count - removed_count",
+      "current": 1000000,
+      "proposed": 3557273
+    },
+    "note": "data-only draft for Phase 18 review (D-17-09/D-17-10); values derive from measured population plus headroom and bind nothing",
+    "previous_extreme_absolute_delta": {
+      "current": 2000000,
+      "observed_first_flip_absolute_rule_delta": 0,
+      "proposed": null
+    },
+    "previous_extreme_drop_ratio": {
+      "current": 0.25,
+      "expected_first_post_flip_drop": 0.0,
+      "proposed": null
+    },
+    "previous_extreme_increase_ratio": {
+      "current": 1.0,
+      "expected_first_post_flip_increase": 0.0,
+      "proposed": null
+    },
+    "previous_moderate_delta_ratio": {
+      "current": 0.1,
+      "observed_first_flip_relative_delta": 0.0,
+      "proposed": null
+    },
+    "removal_count_window": {
+      "expected_apex_covered_wildcard_pruned": 0,
+      "headroom_high": 1,
+      "headroom_low": 0
+    },
+    "uncertain_keeps_stasis": {
+      "expected_delta": 0
+    }
+  },
+  "report_type": "apex_shadow_gate",
+  "schema_version": 1,
+  "signature": {
+    "added_count": 0,
+    "input_rows": 10348336,
+    "kept_because_uncertain": {
+      "off": 569,
+      "on": 569
+    },
+    "ledger": {
+      "delta_equals_removed": true,
+      "off_total_records": 8771590,
+      "on_total_records": 8771590
+    },
+    "leg_seconds": {
+      "off": 249.04245850000007,
+      "on": 364.1683359999988
+    },
+    "off_output_sha256": "87f0ecb702a21faf3069b1b0fd129242fa2df5d26cf393d464f481ae327edabe",
+    "on_output_sha256": "87f0ecb702a21faf3069b1b0fd129242fa2df5d26cf393d464f481ae327edabe",
+    "other_buckets_stable": true,
+    "removed_count": 0,
+    "whitelist_conflict_pruned": {
+      "off": 181,
+      "on": 181
+    }
+  },
+  "source_health": {
+    "degraded_sources": 5,
+    "file_count": 86,
+    "present": true,
+    "total_bytes": 231266675,
+    "totals_by_status": {
+      "fresh_fetch": 62,
+      "stale_cache": 5,
+      "validated_cache": 19
+    }
+  },
+  "timing": {
+    "bar_percent": 10.0,
+    "cross_tie_off": true,
+    "cross_tie_on": true,
+    "methodology": "median-of-3 per leg, one kind per invocation",
+    "off": {
+      "durations_seconds": [
+        249.963609,
+        215.536238,
+        271.341037
+      ],
+      "median_seconds": 249.96,
+      "output_sha256_stable": true,
+      "runs": 3
+    },
+    "on": {
+      "durations_seconds": [
+        296.334379,
+        308.375702,
+        316.686317
+      ],
+      "median_seconds": 308.38,
+      "output_sha256_stable": true,
+      "runs": 3
+    },
+    "on_compile_flags": {
+      "wildcard_apex_pruning": true
+    },
+    "passes": false,
+    "relative_overhead_percent": -23.37,
+    "same_corpus": true
+  },
+  "verdict": "fail"
+}

@@ -67,7 +67,7 @@ def test_profile_cli_writes_stdlib_artifacts_under_run_directory(
     assert "||example.com^" in merged_path.read_text(encoding="utf-8")
 
     stats = json.loads(stats_path.read_text(encoding="utf-8"))
-    assert stats["schema_version"] == 4
+    assert stats["schema_version"] == 5
     assert stats["statistics"]["lines_output"] >= 1
     assert "runtime_profile" in stats
     serialized_stats = json.dumps(stats, sort_keys=True)
@@ -147,10 +147,7 @@ def test_profile_cli_rejects_unsafe_report_destinations_before_writing(
     monkeypatch.chdir(tmp_path)
     input_dir = _write_tiny_input(tmp_path)
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
-    resolved_args = [
-        str(outside) if value == "{outside}" else value
-        for value in args
-    ]
+    resolved_args = [str(outside) if value == "{outside}" else value for value in args]
 
     assert _run_cli(monkeypatch, [str(input_dir), *resolved_args]) != 0
 

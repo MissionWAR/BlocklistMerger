@@ -16,8 +16,7 @@ PYPROJECT = ROOT / "pyproject.toml"
 RELEASE_CONSTRAINTS = ROOT / "constraints" / "release-py314.txt"
 RELEASE_INSTALL = 'python -m pip install -q -c constraints/release-py314.txt ".[dev]"'
 AUDIT_INSTALL = (
-    'python -m pip install -e ".[dev]" --ignore-requires-python '
-    "-c constraints/release-py314.txt"
+    'python -m pip install -e ".[dev]" --ignore-requires-python -c constraints/release-py314.txt'
 )
 HEAVY_EVIDENCE_WORKFLOW_TOKENS = (
     "scripts.benchmark_pipeline",
@@ -205,9 +204,7 @@ def test_release_constraints_file_pins_py314_resolution() -> None:
     """The scheduled-release dependency set should be reviewable as exact pip pins."""
     text = _constraints_text()
     lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.startswith("#")
+        line.strip() for line in text.splitlines() if line.strip() and not line.startswith("#")
     ]
     pinned_names = {line.split("==", maxsplit=1)[0].lower() for line in lines}
 
@@ -379,7 +376,7 @@ def test_python_compatibility_audit_matrix_is_read_only_and_separate() -> None:
     assert "\n    permissions:\n      contents: read\n" in audit
     assert "contents: write" not in audit
     assert "actions: write" not in audit
-    assert 'python-version: ["3.13", "3.14"]' in audit
+    assert 'python-version: ["3.14"]' in audit
     assert AUDIT_INSTALL in audit
     assert "python -m ruff check ." in audit
     assert "python -m pytest" in audit
@@ -396,6 +393,21 @@ def test_audit_install_runs_before_audit_quality_gates() -> None:
     pytest = _position(audit, "python -m pytest")
 
     assert install < ruff < pytest
+
+
+def test_audit_job_checks_format_between_ruff_and_test_steps() -> None:
+    """The audit job should gate format checking after lint and before tests."""
+    audit = _job_section(_workflow_text(), "python_compatibility_audit")
+
+    install = _position(audit, AUDIT_INSTALL)
+    ruff_name = _position(audit, "- name: Ruff")
+    ruff_check = _position(audit, "python -m ruff check .")
+    format_name = _position(audit, "- name: Ruff format")
+    format_check = _position(audit, "python -m ruff format --check .")
+    test_name = _position(audit, "- name: Test")
+    test_run = _position(audit, "python -m pytest")
+
+    assert install < ruff_name < ruff_check < format_name < format_check < test_name < test_run
 
 
 def test_python_requirement_and_ruff_target_remain_py314() -> None:

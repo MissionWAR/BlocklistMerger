@@ -45,6 +45,8 @@ The Python-first runtime and language decision gate is documented in
 Release evidence, inspect-only diagnostics, and guard promotion criteria are documented in
 [`docs/RELEASE_GUARD_PROMOTION.md`](docs/RELEASE_GUARD_PROMOTION.md).
 
+**Apex-covered wildcard pruning (v1.3): measured, not enabled.** A full-corpus shadow run over 10,348,336 input rules found **zero** removable `||*.tld^` wildcard pairs — after deduplication, no surviving TLD wildcard has a same-key apex coverer — while the flagged pass would have cost +23.4% median wall-clock. Consistent with this project's evidence-first policy, the feature ships permanently disabled and the direction is closed; the complete verdict manifest and re-run procedure live in [`reports/shadow-gate/apex-shadow-v1.md`](reports/shadow-gate/apex-shadow-v1.md).
+
 ---
 
 ## 📋 Sources
@@ -64,6 +66,9 @@ catalog:
    comments are ignored.
 2. Keep Python 3.14 for local parity with the scheduled GitHub Actions release job.
 3. Install and run the existing module commands:
+4. Timing baselines are machine-specific — regenerate your own baseline with
+   `scripts/benchmark.py --compare-baseline` before comparing runs against this workflow's
+   published figures.
 
 ```bash
 pip install .

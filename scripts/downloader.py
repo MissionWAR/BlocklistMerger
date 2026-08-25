@@ -78,6 +78,7 @@ SOURCE_HEALTH_STATUSES: Final[tuple[str, ...]] = (
 # DATA STRUCTURES
 # =============================================================================
 
+
 class FetchResult(NamedTuple):
     """
     Result of a single fetch operation.
@@ -93,6 +94,7 @@ class FetchResult(NamedTuple):
         >>> result.success
         True
     """
+
     url: str
     success: bool
     changed: bool
@@ -151,6 +153,7 @@ class SourceHealthRuntimeSummary(TypedDict):
 # =============================================================================
 # HELPER FUNCTIONS
 # =============================================================================
+
 
 def url_to_filename(url: str) -> str:
     """
@@ -627,6 +630,7 @@ def save_source_health_report(
 # ASYNC FETCH FUNCTIONS
 # =============================================================================
 
+
 async def fetch_url(
     session: aiohttp.ClientSession,
     url: str,
@@ -680,7 +684,6 @@ async def fetch_url(
                 timeout=aiohttp.ClientTimeout(total=timeout),
                 allow_redirects=True,
             ) as response:
-
                 # 304 Not Modified - use cached version
                 if response.status == 304:
                     if cache_path.exists():
@@ -693,7 +696,7 @@ async def fetch_url(
                 # Error responses
                 if response.status >= 400:
                     if attempt < retries - 1:
-                        await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                        await asyncio.sleep(2**attempt)  # Exponential backoff
                         continue
 
                     # Use cached/local file as fallback
@@ -703,7 +706,7 @@ async def fetch_url(
                             url,
                             success=True,
                             changed=False,
-                            error=f"HTTP {response.status}, using cached version"
+                            error=f"HTTP {response.status}, using cached version",
                         )
                     return FetchResult(
                         url,
@@ -730,7 +733,7 @@ async def fetch_url(
 
         except TimeoutError:
             if attempt < retries - 1:
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(2**attempt)
                 continue
             # Fallback to cache
             if cache_path.exists():
@@ -745,7 +748,7 @@ async def fetch_url(
 
         except Exception as e:
             if attempt < retries - 1:
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(2**attempt)
                 continue
             # Fallback to cache
             if cache_path.exists():
@@ -805,9 +808,7 @@ async def fetch_all(
 
     async def fetch_with_semaphore(url: str) -> FetchResult:
         async with semaphore:
-            return await fetch_url(
-                session, url, output_dir, cache_dir, state, timeout, retries
-            )
+            return await fetch_url(session, url, output_dir, cache_dir, state, timeout, retries)
 
     # Create session with connection pooling
     connector = aiohttp.TCPConnector(limit=concurrency, limit_per_host=2)
@@ -835,12 +836,22 @@ async def fetch_all(
 # CLI INTERFACE
 # =============================================================================
 
+
 def main() -> int:
     """
     Main entry point for CLI usage.
 
+    Tolerates per-source failures: each failed fetch falls back to cached
+    content and its status is recorded in the optional source-health report
+    (--health-report). Resilience chain: cache fallback -> per-source health
+    recording -> the downstream rule-count publish gate owned by release
+    validation. A degraded source mix never fails the fetch process itself;
+    the workflow's rule-count gate decides whether the merged output publishes.
+
     Returns:
-        Exit code (0 for success, 1 for failure)
+        0 after fetching completes, even when many or all individual sources
+        fail. Non-zero only when no URLs are loaded from --sources, or when
+        the source-health report cannot be written (OSError).
     """
     parser = argparse.ArgumentParser(description="Fetch blocklist sources with caching")
     parser.add_argument("--sources", required=True, help="Path to sources.txt file")
@@ -883,14 +894,16 @@ def main() -> int:
     # Run async fetch
     output_dir = Path(args.outdir)
     cache_dir = Path(args.cache)
-    results = asyncio.run(fetch_all(
-        urls,
-        output_dir,
-        cache_dir,
-        args.concurrency,
-        args.timeout,
-        args.retries,
-    ))
+    results = asyncio.run(
+        fetch_all(
+            urls,
+            output_dir,
+            cache_dir,
+            args.concurrency,
+            args.timeout,
+            args.retries,
+        )
+    )
 
     if args.health_report:
         state = load_state(cache_dir)

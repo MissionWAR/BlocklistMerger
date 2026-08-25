@@ -5,9 +5,12 @@ test_compiler.py
 Edge case tests for the compiler module.
 Tests deduplication logic, TLD wildcards, and cross-format optimization.
 """
+
 import inspect
 import json
 import os
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -606,15 +609,25 @@ class TestCompilerProofLedgerPlumbing:
         default True since v1.2 (D-04): the Plan B full-corpus shadow gate
         proved the removal population exact before the default flipped, and
         passing False explicitly restores pre-v1.2 keep-everything behavior.
+        The Phase 16 apex flag joins keyword-only with production-off default
+        False until its own shadow gate sanctions the flip.
         """
         signature = inspect.signature(compile_rules)
         parameters = signature.parameters
 
-        assert list(parameters) == ["lines", "output_file", "proof_ledger", "denyallow_pruning"]
+        assert list(parameters) == [
+            "lines",
+            "output_file",
+            "proof_ledger",
+            "denyallow_pruning",
+            "wildcard_apex_pruning",
+        ]
         assert parameters["proof_ledger"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["proof_ledger"].default is None
         assert parameters["denyallow_pruning"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["denyallow_pruning"].default is True
+        assert parameters["wildcard_apex_pruning"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters["wildcard_apex_pruning"].default is False
         assert "stage_summaries" not in CompileStats.__dataclass_fields__
 
     def test_compiler_stage_summaries_are_aggregate_only_and_preserve_output(self):
@@ -724,9 +737,7 @@ class TestCompilerProofLedgerPlumbing:
             proof_ledger=ledger,
         )
         promotion_records = [
-            record
-            for record in ledger.records
-            if record.reason == REASON_CROSS_FORMAT_BROADENED
+            record for record in ledger.records if record.reason == REASON_CROSS_FORMAT_BROADENED
         ]
 
         assert rules == [
@@ -775,10 +786,12 @@ class TestCompilerPruningProofLedger:
         assert record.fingerprint
 
     def test_duplicate_pruning_records_exact_semantic_equivalence(self):
-        rules, stats, ledger = self._compile([
-            "||dup.example.com^$client=10.0.0.1,dnstype=a",
-            "||dup.example.com^$dnstype=A,client=10.0.0.1",
-        ])
+        rules, stats, ledger = self._compile(
+            [
+                "||dup.example.com^$client=10.0.0.1,dnstype=a",
+                "||dup.example.com^$dnstype=A,client=10.0.0.1",
+            ]
+        )
 
         record = self._record(ledger, REASON_DUPLICATE_RULE)
 
@@ -793,14 +806,16 @@ class TestCompilerPruningProofLedger:
         self._assert_required_facets(record)
 
     def test_parent_wildcard_and_tld_pruning_record_covering_facets(self):
-        rules, stats, ledger = self._compile([
-            "||parent.example.com^",
-            "||child.parent.example.com^",
-            "||*.wild.example.com^",
-            "||child.wild.example.com^",
-            "||*.autos^",
-            "||spam.autos^",
-        ])
+        rules, stats, ledger = self._compile(
+            [
+                "||parent.example.com^",
+                "||child.parent.example.com^",
+                "||*.wild.example.com^",
+                "||child.wild.example.com^",
+                "||*.autos^",
+                "||spam.autos^",
+            ]
+        )
 
         parent_record = self._record(ledger, REASON_PARENT_COVERED)
         wildcard_record = self._record(ledger, REASON_WILDCARD_COVERED)
@@ -826,12 +841,14 @@ class TestCompilerPruningProofLedger:
             self._assert_required_facets(record)
 
     def test_exception_pruning_records_proven_and_uncertain_decisions(self):
-        rules, stats, ledger = self._compile([
-            "||covered.example.com^$client=10.0.0.1",
-            "@@||covered.example.com^$client=10.0.0.1",
-            "||uncertain.example.com^",
-            "@@||uncertain.example.com^$client=10.0.0.1",
-        ])
+        rules, stats, ledger = self._compile(
+            [
+                "||covered.example.com^$client=10.0.0.1",
+                "@@||covered.example.com^$client=10.0.0.1",
+                "||uncertain.example.com^",
+                "@@||uncertain.example.com^$client=10.0.0.1",
+            ]
+        )
 
         proven_record = self._record(ledger, REASON_EXCEPTION_COVERED)
         uncertain_record = self._record(ledger, REASON_KEPT_BECAUSE_UNCERTAIN)
@@ -856,10 +873,12 @@ class TestCompilerPruningProofLedger:
         self._assert_required_facets(uncertain_record)
 
     def test_important_exception_sample_uses_exception_scope_proof(self):
-        rules, stats, ledger = self._compile([
-            "||important-exception.example.com^",
-            "@@||important-exception.example.com^$important",
-        ])
+        rules, stats, ledger = self._compile(
+            [
+                "||important-exception.example.com^",
+                "@@||important-exception.example.com^$important",
+            ]
+        )
 
         record = self._record(ledger, REASON_EXCEPTION_COVERED)
 
@@ -1064,8 +1083,8 @@ class TestModifierHandling:
     def test_dnstype_child_pruned_when_parent_blocks_all(self):
         """Parent blocks all types, child blocks specific type -> prune child."""
         lines = [
-            "||example.com^",               # Blocks ALL DNS types
-            "||sub.example.com^$dnstype=A", # Blocks only A records
+            "||example.com^",  # Blocks ALL DNS types
+            "||sub.example.com^$dnstype=A",  # Blocks only A records
         ]
         rules, _ = self._compile(lines)
         # Parent already blocks ALL types, so specific type is redundant
@@ -1075,8 +1094,8 @@ class TestModifierHandling:
     def test_dnstype_child_kept_when_parent_has_different_dnstype(self):
         """Both have $dnstype but might differ -> keep child (safe)."""
         lines = [
-            "||example.com^$dnstype=A",      # Blocks only A records
-            "||sub.example.com^$dnstype=AAAA", # Blocks only AAAA records
+            "||example.com^$dnstype=A",  # Blocks only A records
+            "||sub.example.com^$dnstype=AAAA",  # Blocks only AAAA records
         ]
         rules, _ = self._compile(lines)
         # Can't tell if same type, so keep both for safety
@@ -1087,7 +1106,7 @@ class TestModifierHandling:
         """Child blocks all types, parent only specific -> keep child."""
         lines = [
             "||example.com^$dnstype=A",  # Blocks only A records
-            "||sub.example.com^",        # Blocks ALL types
+            "||sub.example.com^",  # Blocks ALL types
         ]
         rules, _ = self._compile(lines)
         # Child is MORE restrictive, should NOT be pruned
@@ -1441,7 +1460,6 @@ class TestStressAndComplexScenarios:
         rules, stats = self._compile(lines)
         assert len(rules) == 3
         assert stats.tld_wildcard_pruned == 3
-
 
 
 class TestIPRules:
@@ -2066,6 +2084,45 @@ class TestWildcardWhitelistHandling:
         rules, stats = self._compile(lines)
         # example.com should still be blocked (wildcard only covers subdomains)
         assert "||example.com^" in rules
+
+
+class TestCompilerCliSummary:
+    """Pin the standalone-CLI half of D-06/D-07 (symmetric surfacing, research Q2).
+
+    Drives the real ``python -m scripts.compiler`` entry point so the __main__
+    Pruned block is proven end-to-end, mirroring the capsys plane in
+    tests/test_pipeline.py for print_summary().
+    """
+
+    def _run_compiler(self, input_text, tmp_path):
+        """Write input_text to a temp file and compile it via python -m scripts.compiler."""
+        input_path = tmp_path / "input.txt"
+        output_path = tmp_path / "output.txt"
+        input_path.write_text(input_text, encoding="utf-8")
+        return subprocess.run(
+            [sys.executable, "-m", "scripts.compiler", str(input_path), str(output_path)],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_cli_pruned_block_reports_denyallow_and_apex_lines(self, tmp_path):
+        """Standalone compiler CLI prints both Denyallow and Apex-covered lines."""
+        input_text = "\n".join(
+            [
+                "! comment line",
+                "||example.com^",
+                "||ads.example.net^$",
+                "0.0.0.0 trackers.example.org",
+            ]
+        )
+        result = self._run_compiler(input_text, tmp_path)
+
+        assert result.returncode == 0
+        assert "Pruned:" in result.stdout
+        assert "Apex-covered wildcards:" in result.stdout
+        assert "Denyallow wildcards:" in result.stdout
 
 
 if __name__ == "__main__":

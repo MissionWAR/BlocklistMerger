@@ -56,11 +56,13 @@ SCOPE_WILDCARD_APEX_ALLOWED: Final[str] = "wildcard_apex_allowed"
 SCOPE_EXACT_HOST: Final[str] = "exact_host"
 SCOPE_UNSCOPED_GLOBAL: Final[str] = "unscoped_global"
 
-_DEGRADED_SOURCE_STATUSES: Final[frozenset[str]] = frozenset({
-    "failed",
-    "fallback_cache",
-    "stale_cache",
-})
+_DEGRADED_SOURCE_STATUSES: Final[frozenset[str]] = frozenset(
+    {
+        "failed",
+        "fallback_cache",
+        "stale_cache",
+    }
+)
 
 __all__ = [
     "COVERAGE_EFFECT_ALLOW",
@@ -460,11 +462,7 @@ def coverage_records_for_rule(rule: str) -> tuple[CoverageRecord, ...]:
 
 def coverage_records_from_rules(rules: Iterable[str]) -> tuple[CoverageRecord, ...]:
     """Return flattened coverage records sorted for deterministic reports."""
-    records = [
-        record
-        for rule in rules
-        for record in coverage_records_for_rule(rule)
-    ]
+    records = [record for rule in rules for record in coverage_records_for_rule(rule)]
     return tuple(sorted(records, key=lambda record: (record.domain, record.raw_rule, record.scope)))
 
 
@@ -589,9 +587,7 @@ def render_diagnostic_sidecar(
         "report_type": "release_evidence",
         "sample_cap": sample_cap,
         "membership_churn": (
-            membership_churn_to_dict(membership_churn)
-            if membership_churn is not None
-            else None
+            membership_churn_to_dict(membership_churn) if membership_churn is not None else None
         ),
         "source_health_context": dict(source_health_context or {"available": False}),
         "coverage_summary": _coverage_summary(sorted_coverage_records, sample_cap),

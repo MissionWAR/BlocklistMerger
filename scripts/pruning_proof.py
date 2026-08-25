@@ -44,6 +44,7 @@ PROOF_STATUS_UNPROVEN: Final[str] = "unproven"
 PROOF_STATUS_UNCERTAIN: Final[str] = "uncertain"
 PROOF_STATUS_NOT_APPLICABLE: Final[str] = "not_applicable"
 
+REASON_APEX_COVERS_TLD_WILDCARD: Final[str] = "apex_covers_tld_wildcard"
 REASON_DUPLICATE_RULE: Final[str] = "duplicate_rule"
 REASON_PARENT_COVERED: Final[str] = "parent_covered"
 REASON_WILDCARD_COVERED: Final[str] = "wildcard_covered"
@@ -78,6 +79,7 @@ __all__ = [
     "PROOF_STATUS_PROVEN",
     "PROOF_STATUS_UNCERTAIN",
     "PROOF_STATUS_UNPROVEN",
+    "REASON_APEX_COVERS_TLD_WILDCARD",
     "REASON_BADFILTER_DISABLED",
     "REASON_CROSS_FORMAT_BROADENED",
     "REASON_DENYALLOW_COVERED",
@@ -364,12 +366,14 @@ class CappedProofLedger(ProofLedger):
         sample_buckets: list[dict[str, object]] = []
         for bucket in sorted(self._bucket_counts):
             sampled_records = _sorted_records(self._bucket_samples.get(bucket, ()))
-            sample_buckets.append({
-                "bucket": _bucket_dict(bucket),
-                "total_records": self._bucket_counts[bucket],
-                "sampled_records": len(sampled_records),
-                "records": [_capped_sample_record(record) for record in sampled_records],
-            })
+            sample_buckets.append(
+                {
+                    "bucket": _bucket_dict(bucket),
+                    "total_records": self._bucket_counts[bucket],
+                    "sampled_records": len(sampled_records),
+                    "records": [_capped_sample_record(record) for record in sampled_records],
+                }
+            )
         return sample_buckets
 
 
@@ -605,12 +609,14 @@ def render_capped_report(
     for bucket in sorted(grouped):
         bucket_records = grouped[bucket]
         sampled_records = bucket_records[:sample_cap]
-        sample_buckets.append({
-            "bucket": _bucket_dict(bucket),
-            "total_records": len(bucket_records),
-            "sampled_records": len(sampled_records),
-            "records": [_capped_sample_record(record) for record in sampled_records],
-        })
+        sample_buckets.append(
+            {
+                "bucket": _bucket_dict(bucket),
+                "total_records": len(bucket_records),
+                "sampled_records": len(sampled_records),
+                "records": [_capped_sample_record(record) for record in sampled_records],
+            }
+        )
 
     return {
         "schema_version": PROOF_REPORT_SCHEMA_VERSION,
