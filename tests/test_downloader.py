@@ -8,6 +8,7 @@ without making real HTTP requests.
 """
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -431,6 +432,34 @@ class TestSourceHealthReport:
         serialized = json.dumps(summary, sort_keys=True)
         for forbidden_key in ("url", "filename", "sha256", "failure_reason", "sources"):
             assert f'"{forbidden_key}"' not in serialized
+
+
+class TestMainDocstringTruthContract:
+    """Pin the TRUE exit contract wording of main()'s docstring (Phase 18, T-17-04-E)."""
+
+    def test_docstring_states_return_zero_after_fetching_exit_contract(self):
+        doc = inspect.getdoc(downloader.main)
+
+        assert doc is not None
+        assert "0 after fetching completes" in doc
+        assert "even when many or all individual sources" in doc
+        assert "Non-zero only when no URLs are loaded from --sources" in doc
+        assert "cannot be written (OSError)" in doc
+
+    def test_docstring_names_tolerance_resilience_chain_and_health_flag(self):
+        doc = inspect.getdoc(downloader.main)
+
+        assert doc is not None
+        assert "Tolerates per-source failures" in doc
+        assert "(--health-report)" in doc
+        assert "Resilience chain: cache fallback" in doc
+        assert "rule-count publish gate" in doc
+
+    def test_docstring_never_reintroduces_false_halt_line_claim(self):
+        doc = inspect.getdoc(downloader.main) or ""
+
+        for banned in ("more than half", ">half", "thresholds decide", "failure thresholds"):
+            assert banned not in doc
 
     def test_cli_health_report_mode_writes_report_without_legacy_failure_gate(
         self, monkeypatch, tmp_path

@@ -395,6 +395,21 @@ def test_audit_install_runs_before_audit_quality_gates() -> None:
     assert install < ruff < pytest
 
 
+def test_audit_job_checks_format_between_ruff_and_test_steps() -> None:
+    """The audit job should gate format checking after lint and before tests."""
+    audit = _job_section(_workflow_text(), "python_compatibility_audit")
+
+    install = _position(audit, AUDIT_INSTALL)
+    ruff_name = _position(audit, "- name: Ruff")
+    ruff_check = _position(audit, "python -m ruff check .")
+    format_name = _position(audit, "- name: Ruff format")
+    format_check = _position(audit, "python -m ruff format --check .")
+    test_name = _position(audit, "- name: Test")
+    test_run = _position(audit, "python -m pytest")
+
+    assert install < ruff_name < ruff_check < format_name < format_check < test_name < test_run
+
+
 def test_python_requirement_and_ruff_target_remain_py314() -> None:
     """Compatibility evidence should not lower declared support in this phase."""
     text = _pyproject_text()
