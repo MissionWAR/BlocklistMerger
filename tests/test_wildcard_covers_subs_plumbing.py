@@ -23,12 +23,16 @@ Pattern source: tests/test_apex_wildcard_plumbing.py (v1.3 apex plumbing suite).
 import os
 import tempfile
 
+import pytest
+
 import scripts.pruning_proof
 from scripts.compiler import (
     CompileStats,
     _parse_abp_rule,
     _record_proven_pruning,
+    _wildcard_covers_sub,
     compile_rules,
+    get_tld,
 )
 from scripts.pipeline import PipelineStats, _new_pipeline_stats, process_files
 from scripts.pruning_proof import (
@@ -248,3 +252,179 @@ class TestWcsStageReconciliation:
         summaries = compiler_stage_summaries_from_stats({})
 
         assert summaries[COMPILER_STAGE_PRUNE]["reasons"] == {}
+
+
+# ----------------------------------------------------------------------
+# Builder-contract unit pins (Phase 19 plan 19-02, Tasks 1-2).
+#
+# These legs call _wildcard_covers_sub() DIRECTLY. Storages and
+# candidates are built ONLY through production derivations --
+# _parse_abp_rule for parsing and the parse-time get_tld bucketing for
+# the wildcard side -- so no pin ever exercises hand-invented keys
+# (D-19-06). Every fixture domain comes from the real-public-suffix
+# closed vocabulary (autos / co.uk / com / example.com); synthetic TLD
+# strings never reach the wildcard buckets, so they would prove nothing.
+# ----------------------------------------------------------------------
+
+
+class TestWcsCoveragePredicate:
+    """Direct unit pins on _wildcard_covers_sub(): verdicts + determinism."""
+
+    @staticmethod
+    def _witness(texts):
+        """Parse wildcard texts into a witness list preserving the given order."""
+        records = []
+        for text in texts:
+            record = _parse_abp_rule(text)
+            assert record is not None
+            records.append(record)
+        return records
+
+    @staticmethod
+    def _witness_tld(text):
+        """Parse one wildcard and derive its parse-time TLD bucket key."""
+        record = _parse_abp_rule(text)
+        assert record is not None
+        tld = get_tld(record.domain)
+        assert tld is not None
+        assert record.domain == tld  # fixture discipline: TLD-form wildcards only
+        return record, tld
+
+    @staticmethod
+    def _candidate(text):
+        """Parse one plain blocking rule into a candidate record."""
+        record = _parse_abp_rule(text)
+        assert record is not None
+        return record
+
+    @pytest.mark.parametrize(
+        ("candidate_text",),
+        [
+            pytest.param("||sub.autos^", id="shallow-sub"),
+            pytest.param("||deep.sub.autos^", id="deep-sub"),
+        ],
+    )
+    def test_same_key_sub_is_covered_by_sole_witness(self, candidate_text):
+        """Strict same-key subs at any depth resolve to the single covering witness.
+
+        All three legs pass together: the domain leg admits same-key subs,
+        the scope oracle proves empty-modifier coverage, and the denyallow
+        leg imposes nothing without an admissible allow-set.
+        """
+        witness, tld = self._witness_tld("||*.autos^")
+
+        covered = _wildcard_covers_sub(self._candidate(candidate_text), [witness], tld)
+
+        assert covered is witness
+
+    def test_apex_candidate_is_never_covered_by_its_own_wildcard(self):
+        """AGH HasSuffix direction safety: the apex equals the key and is refused.
+
+        PRUNE-03 leg 1: ``||*.autos^`` matches ``".autos"`` suffixes, so the
+        apex ``autos`` itself can never be its own wildcard's coverage
+        target; the domain-leg carve-out encodes this at the boundary.
+        """
+        witness, tld = self._witness_tld("||*.autos^")
+        candidate = self._candidate("||autos^")
+
+        covered = _wildcard_covers_sub(candidate, [witness], tld)
+
+        assert covered is None
+
+    def test_cross_key_candidate_is_structurally_uncoverable(self):
+        """A candidate outside the key refuses even against supplied witnesses.
+
+        D-16-02 lineage: strict same-key eligibility holds at the predicate
+        boundary, so a buggy caller handing same-list cross-key witnesses
+        cannot smuggle a coverage verdict.
+        """
+        witness, tld = self._witness_tld("||*.co.uk^")
+        candidate = self._candidate("||example.com^")
+
+        covered = _wildcard_covers_sub(candidate, [witness], tld)
+
+        assert covered is None
+
+    def test_badfilter_carrier_witness_never_proves_coverage(self):
+        """The oracle wholesale-rejects NO_COVERAGE carriers (:673-674).
+
+        A ``$badfilter``-carrying wildcard is a disabling hint, not a
+        blocking rule, so it must never prove coverage regardless of
+        domain eligibility.
+        """
+        witness, tld = self._witness_tld("||*.autos^$badfilter")
+        candidate = self._candidate("||sub.autos^")
+
+        covered = _wildcard_covers_sub(candidate, [witness], tld)
+
+        assert covered is None
+
+    def test_denyallow_divergent_pairing_keeps_the_sub(self):
+        """Denyallow divergence forces None through BOTH guarding mechanisms.
+
+        Honest double-guard statement: the candidate's subtree intersects
+        the witness's admissible allow-set (the reused _denyallow_allow_set +
+        _domain_disjoint_from_all truth tables force KEEP), AND the scope
+        oracle additionally rejects every denyallow carrier outright today
+        via NO_COVERAGE_MODIFIERS membership. Neither mechanism may be
+        weakened independently of the other.
+        """
+        witness, tld = self._witness_tld("||*.autos^$denyallow=a.autos^")
+        candidate = self._candidate("||a.autos^")
+
+        covered = _wildcard_covers_sub(candidate, [witness], tld)
+
+        assert covered is None
+
+    def test_denyallow_disjointness_alone_admits_nothing(self):
+        """Disjointness is necessary-but-not-sufficient: carriers stay rejected.
+
+        Pins that nobody may later assume the divergence leg alone admits
+        denyallow witnesses: this pairing IS subtree-disjoint, yet carrier
+        admission is governed by NO_COVERAGE_MODIFIERS, so the verdict is
+        still None.
+        """
+        witness, tld = self._witness_tld("||*.autos^$denyallow=safe.autos^")
+        candidate = self._candidate("||sub.autos^")
+
+        covered = _wildcard_covers_sub(candidate, [witness], tld)
+
+        assert covered is None
+
+    def test_empty_witness_list_returns_none(self):
+        """None-contract: no witnesses means no coverage verdict, ever."""
+        _, tld = self._witness_tld("||*.autos^")
+        candidate = self._candidate("||sub.autos^")
+
+        covered = _wildcard_covers_sub(candidate, [], tld)
+
+        assert covered is None
+
+    def test_multi_coverer_returns_first_witness_in_storage_order(self):
+        """Two simultaneously-covering witnesses resolve to exactly one: the first.
+
+        D-19-04/D-19-09b forward-pin half: the scoped witness covers via the
+        matching narrow-scope value-signature branch, the plain witness via
+        the parent-absent narrow-scope skip -- storage order picks the winner.
+        """
+        scoped, tld = self._witness_tld("||*.autos^$client=10.0.0.1")
+        plain = self._witness(["||*.autos^"])[0]
+        candidate = self._candidate("||sub.autos^$client=10.0.0.1")
+
+        covered = _wildcard_covers_sub(candidate, [scoped, plain], tld)
+
+        assert covered is scoped
+
+    def test_multi_coverer_flips_with_reversed_storage_order(self):
+        """Reversing the list flips the winner: selection follows storage order.
+
+        Companion to the forward-ordering pin proving iteration is
+        first-match over the given order, never arbitrary preference.
+        """
+        scoped, tld = self._witness_tld("||*.autos^$client=10.0.0.1")
+        plain = self._witness(["||*.autos^"])[0]
+        candidate = self._candidate("||sub.autos^$client=10.0.0.1")
+
+        covered = _wildcard_covers_sub(candidate, [plain, scoped], tld)
+
+        assert covered is plain
