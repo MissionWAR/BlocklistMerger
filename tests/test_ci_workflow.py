@@ -376,7 +376,7 @@ def test_python_compatibility_audit_matrix_is_read_only_and_separate() -> None:
     assert "\n    permissions:\n      contents: read\n" in audit
     assert "contents: write" not in audit
     assert "actions: write" not in audit
-    assert 'python-version: ["3.13", "3.14"]' in audit
+    assert 'python-version: ["3.14"]' in audit
     assert AUDIT_INSTALL in audit
     assert "python -m ruff check ." in audit
     assert "python -m pytest" in audit
