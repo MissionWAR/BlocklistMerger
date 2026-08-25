@@ -839,8 +839,17 @@ def main() -> int:
     """
     Main entry point for CLI usage.
 
+    Tolerates per-source failures: each failed fetch falls back to cached
+    content and its status is recorded in the optional source-health report
+    (--health-report). Resilience chain: cache fallback -> per-source health
+    recording -> the downstream rule-count publish gate owned by release
+    validation. A degraded source mix never fails the fetch process itself;
+    the workflow's rule-count gate decides whether the merged output publishes.
+
     Returns:
-        Exit code (0 for success, 1 for failure)
+        0 after fetching completes, even when many or all individual sources
+        fail. Non-zero only when no URLs are loaded from --sources, or when
+        the source-health report cannot be written (OSError).
     """
     parser = argparse.ArgumentParser(description="Fetch blocklist sources with caching")
     parser.add_argument("--sources", required=True, help="Path to sources.txt file")
