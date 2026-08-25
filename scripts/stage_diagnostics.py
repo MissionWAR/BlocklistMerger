@@ -226,6 +226,7 @@ def compiler_stage_summaries_from_stats(stats: StatsSource) -> StageSummaries:
         "tld_wildcard": _stat(stats, "tld_wildcard_pruned"),
         "denyallow": _stat(stats, "denyallow_wildcard_pruned"),
         "apex_covered": _stat(stats, "apex_covered_wildcard_pruned"),
+        "wcs_covered": _stat(stats, "wildcard_covered_sub_pruned"),
         "whitelist_conflict": _stat(stats, "whitelist_conflict_pruned"),
         "local_hostname": _stat(stats, "local_hostname_pruned"),
     }

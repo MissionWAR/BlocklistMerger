@@ -610,7 +610,9 @@ class TestCompilerProofLedgerPlumbing:
         proved the removal population exact before the default flipped, and
         passing False explicitly restores pre-v1.2 keep-everything behavior.
         The Phase 16 apex flag joins keyword-only with production-off default
-        False until its own shadow gate sanctions the flip.
+        False until its own shadow gate sanctions the flip. The Phase 19
+        wildcard_covers_subs_pruning flag likewise joins keyword-only and
+        default-off, accepted-but-unwired until any shadow-gated flip.
         """
         signature = inspect.signature(compile_rules)
         parameters = signature.parameters
@@ -621,6 +623,7 @@ class TestCompilerProofLedgerPlumbing:
             "proof_ledger",
             "denyallow_pruning",
             "wildcard_apex_pruning",
+            "wildcard_covers_subs_pruning",
         ]
         assert parameters["proof_ledger"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["proof_ledger"].default is None
@@ -628,6 +631,8 @@ class TestCompilerProofLedgerPlumbing:
         assert parameters["denyallow_pruning"].default is True
         assert parameters["wildcard_apex_pruning"].kind is inspect.Parameter.KEYWORD_ONLY
         assert parameters["wildcard_apex_pruning"].default is False
+        assert parameters["wildcard_covers_subs_pruning"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters["wildcard_covers_subs_pruning"].default is False
         assert "stage_summaries" not in CompileStats.__dataclass_fields__
 
     def test_compiler_stage_summaries_are_aggregate_only_and_preserve_output(self):

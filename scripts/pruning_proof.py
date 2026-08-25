@@ -49,6 +49,7 @@ REASON_DUPLICATE_RULE: Final[str] = "duplicate_rule"
 REASON_PARENT_COVERED: Final[str] = "parent_covered"
 REASON_WILDCARD_COVERED: Final[str] = "wildcard_covered"
 REASON_TLD_WILDCARD_COVERED: Final[str] = "tld_wildcard_covered"
+REASON_WILDCARD_COVERS_SUB: Final[str] = "wildcard_covers_sub"
 REASON_DENYALLOW_COVERED: Final[str] = "denyallow_covered"
 REASON_EXCEPTION_COVERED: Final[str] = "exception_covered"
 REASON_KEPT_BECAUSE_UNCERTAIN: Final[str] = "kept_because_uncertain"
@@ -93,6 +94,7 @@ __all__ = [
     "REASON_TLD_WILDCARD_COVERED",
     "REASON_UNSUPPORTED_MODIFIER_REMOVED",
     "REASON_WILDCARD_COVERED",
+    "REASON_WILDCARD_COVERS_SUB",
     "CappedProofLedger",
     "ProofRecord",
     "ProofLedger",

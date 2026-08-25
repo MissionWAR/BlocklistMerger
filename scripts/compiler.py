@@ -266,6 +266,7 @@ class CompileStats:
         tld_wildcard_pruned: Rules pruned by TLD wildcards (e.g., ||*.autos^)
         denyallow_wildcard_pruned: Rules pruned by admissible $denyallow wildcard coverage
         apex_covered_wildcard_pruned: TLD wildcard variants pruned by surviving apex coverage
+        wildcard_covered_sub_pruned: Sub rules pruned by surviving wildcard coverage
         duplicate_pruned: Exact duplicate rules removed
         whitelist_conflict_pruned: Rules removed due to whitelist conflicts
         local_hostname_pruned: Local hostnames (localhost, etc.) skipped
@@ -306,6 +307,7 @@ class CompileStats:
     tld_wildcard_pruned: int = 0
     denyallow_wildcard_pruned: int = 0
     apex_covered_wildcard_pruned: int = 0
+    wildcard_covered_sub_pruned: int = 0
     duplicate_pruned: int = 0
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
@@ -1705,6 +1707,7 @@ def compile_rules(
     proof_ledger: ProofLedger | None = None,
     denyallow_pruning: bool = True,
     wildcard_apex_pruning: bool = False,
+    wildcard_covers_subs_pruning: bool = False,
 ) -> CompileStats:
     """
     Compile and deduplicate rules with format compression.
@@ -1731,6 +1734,14 @@ def compile_rules(
             production default): compiled output is byte-identical to legacy
             behavior and the apex-covered counter stays 0 everywhere. ON: each
             removed TLD wildcard is individually proven against its surviving apex.
+        wildcard_covers_subs_pruning: Remove a subdomain rule only when a surviving
+            same-key TLD wildcard provably covers it with equal-or-broader modifier
+            scope; every removal is individually recorded in the proof ledger.
+            OFF (the production default) leaves compiled output byte-identical to
+            legacy behavior with the wildcard-covered-sub counter at 0 everywhere.
+            True is reserved for the later Direction-B removal pass -- until that
+            wiring lands this flag is accepted and ignored, producing output and
+            counters identical to OFF in this milestone.
 
     Returns:
         CompileStats with metrics about the compilation process

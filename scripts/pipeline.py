@@ -90,6 +90,7 @@ class PipelineStats(TypedDict):
     tld_wildcard_pruned: int
     denyallow_wildcard_pruned: int
     apex_covered_wildcard_pruned: int
+    wildcard_covered_sub_pruned: int
     duplicate_pruned: int
     whitelist_conflict_pruned: int
     local_hostname_pruned: int
@@ -347,6 +348,7 @@ def _new_pipeline_stats() -> PipelineStats:
         "tld_wildcard_pruned": 0,
         "denyallow_wildcard_pruned": 0,
         "apex_covered_wildcard_pruned": 0,
+        "wildcard_covered_sub_pruned": 0,
         "duplicate_pruned": 0,
         "whitelist_conflict_pruned": 0,
         "local_hostname_pruned": 0,
@@ -693,6 +695,7 @@ def process_files_with_profile(
     stats["tld_wildcard_pruned"] = compile_stats.tld_wildcard_pruned
     stats["denyallow_wildcard_pruned"] = compile_stats.denyallow_wildcard_pruned
     stats["apex_covered_wildcard_pruned"] = compile_stats.apex_covered_wildcard_pruned
+    stats["wildcard_covered_sub_pruned"] = compile_stats.wildcard_covered_sub_pruned
     stats["duplicate_pruned"] = compile_stats.duplicate_pruned
     stats["whitelist_conflict_pruned"] = compile_stats.whitelist_conflict_pruned
     stats["local_hostname_pruned"] = compile_stats.local_hostname_pruned
