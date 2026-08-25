@@ -1,0 +1,8 @@
+# Phase 18 repo-wide `ruff format .` normalization (milestone v1.3 closure).
+# Pure formatting - no semantic change; string-literal contents untouched.
+# Full test suite proven green immediately before and after this commit
+# (773 passed, 9 skipped, 3 deselected). Lint (`ruff check .`) exit 0.
+59c99f60ea748e33955eb0de0de7c207b9089f08
+
+# To use locally:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
