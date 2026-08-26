@@ -80,6 +80,7 @@ from scripts.pruning_proof import (
     REASON_TLD_WILDCARD_COVERED,
     REASON_UNSUPPORTED_MODIFIER_REMOVED,
     REASON_WILDCARD_COVERED,
+    REASON_WILDCARD_COVERS_SUB,
     ProofLedger,
     RuleFacet,
 )
@@ -1686,6 +1687,7 @@ def _write_output(
     *,
     exception_index: ExceptionIndex | None = None,
     apex_survivor_index: dict[str, list[RuleEntry]] | None = None,
+    wildcard_covers_subs_pruning: bool = False,
 ) -> None:
     """Phase 4: Write deduplicated rules to output atomically.
 
@@ -1704,10 +1706,21 @@ def _write_output(
             when provided each wildcard record is additionally proven against
             a surviving same-key apex and skipped when covered; None keeps
             the legacy emission path instruction-for-instruction.
+        wildcard_covers_subs_pruning: When True every plain subdomain record
+            is additionally proven against surviving same-key TLD wildcards --
+            witnesses collected only at their actual-write points -- and is
+            skipped when provably covered; False keeps the legacy emission
+            path instruction-for-instruction.
     """
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_suffix(".tmp")
+
+    # Direction-B witness index (PRUNE-02): built only when flagged ON; None
+    # keeps the legacy emission path free of any work beyond this binding.
+    wcs_survivor_index: dict[str, list[RuleEntry]] | None = (
+        {} if wildcard_covers_subs_pruning else None
+    )
 
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
         for records in abp_wildcards.values():
@@ -1751,9 +1764,31 @@ def _write_output(
                             continue
                 f.write(record.rule + "\n")
                 stats.abp_kept += 1
+                if wcs_survivor_index is not None:
+                    # Direction-B witnessing (PRUNE-02): strictly after both
+                    # early-continue screens above -- only wildcards that
+                    # actually wrote may witness (survivorship ordering).
+                    wcs_survivor_index.setdefault(record.domain, []).append(record)
 
         for records in pruned_abp.values():
             for record in records:
+                if wcs_survivor_index is not None:
+                    witnesses = wcs_survivor_index.get(get_tld(record.domain))
+                    if witnesses:
+                        covering_wildcard = _wildcard_covers_sub(
+                            record, witnesses, get_tld(record.domain)
+                        )
+                        if covering_wildcard is not None:
+                            stats.wildcard_covered_sub_pruned += 1
+                            _record_proven_pruning(
+                                proof_ledger,
+                                reason=REASON_WILDCARD_COVERS_SUB,
+                                candidate=record,
+                                covering=covering_wildcard,
+                            )
+                            # Skips BOTH the write and the abp_kept bump, or
+                            # total_output corrupts while bytes stay correct.
+                            continue
                 f.write(record.rule + "\n")
                 stats.abp_kept += 1
 
@@ -1884,6 +1919,7 @@ def compile_rules(
         proof_ledger=proof_ledger,
         exception_index=exception_index,
         apex_survivor_index=apex_survivor_index,
+        wildcard_covers_subs_pruning=wildcard_covers_subs_pruning,
     )
 
     return stats
