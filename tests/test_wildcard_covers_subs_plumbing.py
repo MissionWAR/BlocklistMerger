@@ -40,6 +40,7 @@ from scripts.compiler import (
 from scripts.pipeline import PipelineStats, _new_pipeline_stats, process_files
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
+    REASON_KEPT_BECAUSE_UNCERTAIN,
     REASON_TLD_WILDCARD_COVERED,
     REASON_WILDCARD_COVERED,
     REASON_WILDCARD_COVERS_SUB,
@@ -954,3 +955,239 @@ class TestWcsEmissionGolden:
         assert stats.wildcard_covered_sub_pruned == tally
         assert stats.total_output == stats.abp_kept + stats.other_kept
         assert stats.total_output == 1
+
+
+# ----------------------------------------------------------------------
+# Phase 20 plan 20-02 appended region: post-emission SEMANTICS legs.
+#
+# Everything below drives _write_output() DIRECTLY -- research
+# consequence C1 holds that nonzero emission is invisible through
+# compile_rules(). Storages are builder-contract only (_parse_abp_rule
+# records over production key derivations; real public suffixes per
+# D-19-06); every literal was scratch-captured under py -3.14 before
+# being pasted (capture-not-predict).
+# ----------------------------------------------------------------------
+
+
+def _drive_emission(
+    abp_wildcards,
+    pruned_abp,
+    proof_ledger,
+    wildcard_covers_subs_pruning=False,
+    apex_survivor_index=None,
+):
+    """One canonical direct-drive invocation of _write_output() (20-02).
+
+    Mirrors the module's _compile body (tempfile + stripped-nonempty
+    utf-8 read-back) at the write seam: positional arguments follow the
+    pre-wiring signature order (output_file, stats, abp_wildcards,
+    pruned_abp, exceptions, other_rules, proof_ledger); the flag-era
+    kwargs ride keyword-only. Returns (rules, stats) with a fresh
+    CompileStats per call; the caller owns the ledger so by_reason
+    evidence stays inspectable after the drive.
+    """
+    stats = CompileStats()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = os.path.join(tmpdir, "output.txt")
+        _write_output(
+            output,
+            stats,
+            abp_wildcards,
+            pruned_abp,
+            [],
+            set(),
+            proof_ledger,
+            wildcard_covers_subs_pruning=wildcard_covers_subs_pruning,
+            apex_survivor_index=apex_survivor_index,
+        )
+        with open(output, encoding="utf-8") as f:
+            rules = [line.strip() for line in f if line.strip()]
+    return rules, stats
+
+
+class TestWcsMisKeyedWitnessSilentSkip:
+    """D-20-01 FINAL call: ineligible witnesses skip SILENTLY (WR-01).
+
+    Confirms the 19-REVIEW-FIX WR-01 skip semantics through the REAL
+    Loop-A population + Loop-B probe path wired in 20-01 -- not by
+    calling the predicate directly: hand-placed ineligible occupants in
+    a wildcard bucket reach the predicate exactly as production records
+    would. Every leg demands: candidate survives, counter 0, EXACT-
+    equality empty ledger, no exception. Teeth-proven non-vacuous by the
+    WR-01 mutation cycle documented in 20-02-SUMMARY.md (leg A1 alone
+    goes red when the skip is mutated into a return).
+    """
+
+    @staticmethod
+    def _candidate():
+        """Parse the plain same-key subdomain candidate."""
+        record = _parse_abp_rule("||sub.autos^")
+        assert record is not None
+        assert not record.is_wildcard
+        assert record.domain == "sub.autos"
+        assert get_tld(record.domain) == "autos"
+        return record
+
+    def test_a1_nonwildcard_occupant_is_skipped_silently(self):
+        """An apex-shaped occupant witnesses nothing: keep, counter 0, silence.
+
+        The hand-placed ``||autos^`` record (is_wildcard False) survives
+        Loop A, lands in index["autos"] via the real population, and is
+        fetched by the real probe -- then the WR-01 leg refuses it. The
+        publish path must not crash and the ledger must not hear about it.
+        """
+        witness = _parse_abp_rule("||autos^")
+        assert witness is not None
+        assert not witness.is_wildcard  # deliberately ineligible occupant
+        assert witness.domain == "autos"
+        ledger = CappedProofLedger()
+
+        rules, stats = _drive_emission(
+            {"autos": [witness]},
+            {"sub.autos": [self._candidate()]},
+            ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert rules == ["||autos^", "||sub.autos^"]
+        assert stats.wildcard_covered_sub_pruned == 0
+        assert ledger.summary()["by_reason"] == {}
+        assert stats.total_output == 2
+
+    def test_a2_foreign_keyed_wildcard_never_reaches_the_autos_probe(self):
+        """A cross-key wildcard lands in its OWN bucket: the probe finds nothing.
+
+        Population keys survivors by record.domain, so the foreign
+        ``other.com`` wildcard is unreachable from the same-key "autos"
+        probe regardless of which bucket it was hand-placed into: the
+        candidate keeps with zero counter movement and an empty ledger.
+        """
+        mis_keyed = _parse_abp_rule("||*.other.com^")
+        assert mis_keyed is not None
+        assert mis_keyed.is_wildcard
+        assert mis_keyed.domain == "other.com"  # foreign suffix: own bucket
+        ledger = CappedProofLedger()
+
+        rules, stats = _drive_emission(
+            {"autos": [mis_keyed]},
+            {"sub.autos": [self._candidate()]},
+            ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert rules == ["||*.other.com^", "||sub.autos^"]
+        assert stats.wildcard_covered_sub_pruned == 0
+        assert ledger.summary()["by_reason"] == {}
+
+    def test_a3_mis_keyed_neighbor_leaves_genuine_attribution_exact(self):
+        """One polluted bucket still yields EXACTLY ONE record (D-19-04).
+
+        The mis-keyed neighbor corrupts nothing: it is written by Loop A
+        but keyed into its own foreign bucket, so the genuine TLD-form
+        witness prunes the candidate exactly once -- by_reason equals
+        {REASON_WILDCARD_COVERS_SUB: 1} EXACT, the sample cites the
+        genuine covering rule, and the candidate line is absent.
+        """
+        mis_keyed = _parse_abp_rule("||*.other.com^")
+        assert mis_keyed is not None
+        assert mis_keyed.is_wildcard
+        assert mis_keyed.domain == "other.com"  # foreign suffix: own bucket
+        genuine = _parse_abp_rule("||*.autos^")
+        assert genuine is not None
+        assert genuine.is_wildcard and genuine.domain == "autos"  # TLD-form fixture
+        ledger = CappedProofLedger()
+
+        rules, stats = _drive_emission(
+            {"autos": [mis_keyed, genuine]},
+            {"sub.autos": [self._candidate()]},
+            ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert rules == ["||*.other.com^", "||*.autos^"]
+        assert "||sub.autos^" not in rules
+        assert stats.wildcard_covered_sub_pruned == 1
+        assert ledger.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 1}
+        matches = [
+            record for record in ledger.records
+            if record.reason == REASON_WILDCARD_COVERS_SUB
+        ]
+        assert len(matches) == 1
+        sample = matches[0].sample
+        assert sample["candidate_rule"] == "||sub.autos^"
+        assert sample["covering_rule"] == "||*.autos^"
+        assert sample["modifier_scope_proven"] is True
+        assert stats.total_output == 2
+
+
+class TestWcsFailedProofSilentKeep:
+    """D-20-02 FINAL call: failed proofs KEEP silently -- ZERO ledger noise.
+
+    Phase 3 records uncertain keeps via _record_uncertain_keep(); the
+    wired write-time site must NOT: a failed modifier-scope proof leaves
+    no proven record AND no kept_because_uncertain entry, so the ON-OFF
+    ledger delta outside the wcs family stays exactly zero and Phase-21's
+    five-leg signature stays clean of flag-dependent bucket noise.
+    """
+
+    @staticmethod
+    def _storages():
+        """Build the narrower-witness/broader-candidate pairing."""
+        witness = _parse_abp_rule("||*.autos^$dnstype=AAAA")
+        assert witness is not None
+        assert witness.is_wildcard and witness.domain == "autos"  # TLD-form fixture
+        candidate = _parse_abp_rule("||sub.autos^")
+        assert candidate is not None
+        assert not candidate.modifiers  # broader scope: the oracle must refuse
+        return {"autos": [witness]}, {"sub.autos": [candidate]}
+
+    def test_b1_failed_scope_proof_keeps_candidate_without_any_record(self):
+        """Narrower value-signature cannot cover: keep, counter 0, EMPTY ledger.
+
+        The eligible same-key witness exists, so the probe fires -- but
+        the scope oracle refuses the narrower $dnstype signature against
+        the modifier-free child (the 19-04 dnstype row). The keep is
+        UNRECORDED: by_reason equals {} EXACT, which subsumes both
+        absence checks -- no wcs record AND no kept_because_uncertain
+        entry ever reaches the ledger from this site.
+        """
+        wildcards, plains = self._storages()
+        ledger = CappedProofLedger()
+
+        rules, stats = _drive_emission(
+            wildcards,
+            plains,
+            ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert rules == ["||*.autos^$dnstype=AAAA", "||sub.autos^"]
+        assert stats.wildcard_covered_sub_pruned == 0
+        assert ledger.summary()["by_reason"] == {}
+        assert stats.total_output == 2
+
+    def test_b2_uncertain_tally_stasis_holds_in_both_flag_states(self):
+        """Full by_reason equality OFF vs ON; uncertain tally 0 in both.
+
+        Drives the identical storages twice with fresh ledgers: the wired
+        site never calls the uncertain-keep recorder, so the whole ledger
+        vocabulary is flag-invariant here (stasis per D-20-02).
+        """
+        wildcards, plains = self._storages()
+        ledger_off = CappedProofLedger()
+        ledger_on = CappedProofLedger()
+
+        rules_off, _ = _drive_emission(wildcards, plains, ledger_off)
+        rules_on, _ = _drive_emission(
+            wildcards,
+            plains,
+            ledger_on,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        by_reason_off = ledger_off.summary()["by_reason"]
+        by_reason_on = ledger_on.summary()["by_reason"]
+        assert by_reason_off.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0) == 0
+        assert by_reason_on.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0) == 0
+        assert by_reason_off == by_reason_on
+        assert rules_off == rules_on
