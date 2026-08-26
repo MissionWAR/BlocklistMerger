@@ -1488,3 +1488,176 @@ class TestWcsComboMatrix:
         assert rules_c2 == rules_c4
         assert by_reason_c2 == by_reason_c4
         assert stats_c2.tld_wildcard_pruned == stats_c4.tld_wildcard_pruned
+
+
+class TestWcsDeterminismAcrossRuns:
+    """SC4: repeated largest-flagged-stack compiles are byte-identical.
+
+    Mirrors the apex sibling's determinism template
+    (test_apex_wildcard_plumbing.py::test_flagged_compile_is_deterministic_across_runs):
+    two same-process compiles of one composite fixture with a fresh ledger
+    per run. The stack is the LARGEST flagged configuration --
+    wildcard_covers_subs_pruning=True together with wildcard_apex_pruning=True
+    (denyallow left at its True default) -- so scope refusals ($dnstype
+    narrower witness, $important presence asymmetry), the exception screen,
+    and the apex interplay all execute INSIDE each repeated run rather than
+    being skipped vacuously. conftest.py's autouse _clear_lru_caches fixture
+    provides LRU hygiene between tests; no manual clear_caches() call is
+    needed here.
+    """
+
+    def test_largest_on_stack_compile_is_deterministic_across_runs(self):
+        """Two same-process flagged compiles are byte-equal with identical evidence.
+
+        Composite built wcs-flavored fresh for this family (per-TLD
+        wildcard/sub pairs over sixteen distinct real-public-suffix keys,
+        mirroring the apex sibling's construction-loop shape), plus a
+        $dnstype-scoped variant, a $important-asymmetric child, and an
+        exception-guarded domain. Literals captured under py -3.14 on
+        2026-08-26: both runs wrote identical bytes with wcs counter 0,
+        apex counter 2, tld-wildcard counter 17, and by_reason
+        {apex_covers_tld_wildcard: 2, exception_covered: 1,
+        kept_because_uncertain: 1, tld_wildcard_covered: 17}.
+        """
+        ledger_run1 = CappedProofLedger()
+        ledger_run2 = CappedProofLedger()
+        pair_tlds = [
+            "xyz",
+            "online",
+            "site",
+            "top",
+            "icu",
+            "club",
+            "shop",
+            "store",
+            "tech",
+            "cloud",
+            "space",
+            "website",
+            "fun",
+            "pro",
+            "cyou",
+            "live",
+        ]
+        composite = []
+        for tld in pair_tlds:
+            composite.append(f"||*.{tld}^")
+            composite.append(f"||sub.{tld}^")
+        composite += [
+            "||*.autos^$dnstype=AAAA",
+            "||sub.autos^",
+            "||autos^",
+            "||*.autos^",
+            "||*.com^",
+            "||ads.com^$important",
+            "@@||whi.test^",
+            "||whi.test^",
+        ]
+
+        rules_run1, stats_run1 = _compile(
+            composite,
+            proof_ledger=ledger_run1,
+            wildcard_covers_subs_pruning=True,
+            wildcard_apex_pruning=True,
+        )
+        rules_run2, stats_run2 = _compile(
+            composite,
+            proof_ledger=ledger_run2,
+            wildcard_covers_subs_pruning=True,
+            wildcard_apex_pruning=True,
+        )
+
+        assert rules_run1 == rules_run2
+        assert (
+            stats_run1.wildcard_covered_sub_pruned
+            == stats_run2.wildcard_covered_sub_pruned
+        )
+        assert stats_run1.wildcard_covered_sub_pruned == 0
+        assert (
+            stats_run1.apex_covered_wildcard_pruned
+            == stats_run2.apex_covered_wildcard_pruned
+        )
+        assert stats_run1.tld_wildcard_pruned == stats_run2.tld_wildcard_pruned
+        by_reason_run1 = ledger_run1.summary()["by_reason"]
+        by_reason_run2 = ledger_run2.summary()["by_reason"]
+        assert by_reason_run1 == by_reason_run2
+
+
+class TestWcsFenceInclusionClosure:
+    """D-19-07 fence-inclusion obligation closed in its TWO reachable forms.
+
+    The compile-level form ("flagged-run reason sets contain the wcs
+    reason") is unreachable per research C1 -- emission never fires through
+    real compile_rules() today -- so a genuine DIRECT-DRIVEN ON run stands
+    in. Form 1 (driven bucket): fired emission demonstrably reaches the
+    stage-diagnostics surface -- summaries[COMPILER_STAGE_PRUNE]["reasons"]
+    equals {"wcs_covered": 1} EXACT via compiler_stage_summaries_from_stats(),
+    which auto-picks-up wildcard_covered_sub_pruned through the missing-key-
+    safe ``_stat`` getter; scripts/stage_diagnostics.py is consumed READ-ONLY
+    with zero module edits (D-20-04). Form 2 (ledger fence): the wired-site
+    ledger carries single-family attribution -- summary()["by_reason"]
+    equals {REASON_WILDCARD_COVERS_SUB: 1} EXACT with tally == counter
+    (D-19-04 1:1 pairing). The injected-projection equality leg in
+    test_apex_wildcard_plumbing.py
+    (test_wildcard_covered_sub_counter_key_producer_consumer_equality)
+    remains the standing projection fence and is deliberately NOT duplicated
+    or edited here. Exact dict-equality asserts throughout -- never
+    membership-only checks -- so flag-dependent bucket noise cannot reach
+    Phase 21 silently. Both methods consume the module-level _drive_emission
+    helper; no new drive plumbing.
+    """
+
+    @staticmethod
+    def _storages():
+        """Build the witness/candidate storages shared by both fence drives."""
+        witness = _parse_abp_rule("||*.autos^")
+        assert witness is not None
+        assert witness.is_wildcard and witness.domain == "autos"  # TLD-form fixture
+        candidate = _parse_abp_rule("||sub.autos^")
+        assert candidate is not None
+        assert not candidate.is_wildcard and get_tld(candidate.domain) == "autos"
+        return {"autos": [witness]}, {"sub.autos": [candidate]}
+
+    def test_driven_on_run_surfaces_wcs_bucket_in_prune_stage_exact(self):
+        """Form 1: fired emission projects {"wcs_covered": 1} EXACT + coherence trio.
+
+        Captured from the same drive under py -3.14 on 2026-08-26:
+        emitted == total_output == 1, discarded == 1, processed == 2
+        (processed = total_output + sum(pruned.values())).
+        """
+        wildcards, plains = self._storages()
+        ledger = CappedProofLedger()
+
+        rules, stats = _drive_emission(
+            wildcards,
+            plains,
+            ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+        summaries = compiler_stage_summaries_from_stats(stats)
+        prune_stage = summaries[COMPILER_STAGE_PRUNE]
+
+        assert stats.wildcard_covered_sub_pruned == 1
+        assert rules == ["||*.autos^"]
+        assert prune_stage["reasons"] == {"wcs_covered": 1}
+        assert prune_stage["emitted"] == stats.total_output
+        assert prune_stage["emitted"] == 1
+        assert prune_stage["discarded"] == 1
+        assert prune_stage["processed"] == 2
+
+    def test_driven_on_run_ledger_carries_single_family_attribution_exact(self):
+        """Form 2: by_reason == {REASON_WILDCARD_COVERS_SUB: 1} EXACT; tally == counter."""
+        wildcards, plains = self._storages()
+        ledger = CappedProofLedger()
+
+        _, stats = _drive_emission(
+            wildcards,
+            plains,
+            ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert ledger.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 1}
+        tally = ledger.summary()["by_reason"][REASON_WILDCARD_COVERS_SUB]
+        assert tally == stats.wildcard_covered_sub_pruned
+        assert stats.wildcard_covered_sub_pruned == 1
