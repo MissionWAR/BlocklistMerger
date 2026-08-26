@@ -428,3 +428,213 @@ class TestWcsCoveragePredicate:
         covered = _wildcard_covers_sub(candidate, [plain, scoped], tld)
 
         assert covered is plain
+
+
+# ----------------------------------------------------------------------
+# PRUNE-03 conservative-keep matrix (Phase 19 plan 19-04).
+#
+# Tuple layout: (id, input lines, expected OFF output, expected ON output,
+# expected OFF counter, expected ON counter). Output write order everywhere:
+# abp_wildcards loop first, pruned_abp second. Every expectation below was
+# captured from real compile_rules() under py -3.14 on 2026-08-26 and
+# re-verified by a fresh capture run at authoring time (capture-not-predict);
+# verdicts derive solely from _wildcard_covers_sub() legs and the
+# pre-existing legacy prune families -- never copied from Direction-A
+# verdicts. Counters are the wcs family counter, silent everywhere here.
+# ----------------------------------------------------------------------
+
+ROWS = (
+    (
+        "apex-exclusion-com-apex",
+        ["||com^", "||*.com^"],
+        ["||*.com^", "||com^"],
+        ["||*.com^", "||com^"],
+        0,
+        0,
+    ),
+    (
+        "apex-exclusion-com-sub",
+        ["||a.com^", "||*.com^"],
+        ["||*.com^"],
+        ["||*.com^"],
+        0,
+        0,
+    ),
+    (
+        "apex-exclusion-com-deep-sub",
+        ["||b.a.com^", "||*.com^"],
+        ["||*.com^"],
+        ["||*.com^"],
+        0,
+        0,
+    ),
+    (
+        "badfilter-carrier-witness-keep",
+        ["||*.autos^$badfilter", "||sub.autos^"],
+        ["||sub.autos^"],
+        ["||sub.autos^"],
+        0,
+        0,
+    ),
+    (
+        "important-presence-asymmetry-keep",
+        ["||*.autos^", "||sub.autos^$important"],
+        ["||*.autos^", "||sub.autos^$important"],
+        ["||*.autos^", "||sub.autos^$important"],
+        0,
+        0,
+    ),
+    (
+        "dnstype-narrower-value-signature-keep",
+        ["||*.autos^$dnstype=AAAA", "||sub.autos^$dnstype=A|AAAA"],
+        ["||*.autos^$dnstype=AAAA", "||sub.autos^$dnstype=A|AAAA"],
+        ["||*.autos^$dnstype=AAAA", "||sub.autos^$dnstype=A|AAAA"],
+        0,
+        0,
+    ),
+    (
+        "denyallow-divergent-subtree-keep",
+        ["||*.autos^$denyallow=a.autos^", "||a.autos^"],
+        ["||*.autos^$denyallow=a.autos^", "||a.autos^"],
+        ["||*.autos^$denyallow=a.autos^", "||a.autos^"],
+        0,
+        0,
+    ),
+    (
+        "cross-key-impossibility-co-uk",
+        ["||*.co.uk^$client=10.0.0.1", "||example.co.uk^"],
+        ["||*.co.uk^$client=10.0.0.1", "||example.co.uk^"],
+        ["||*.co.uk^$client=10.0.0.1", "||example.co.uk^"],
+        0,
+        0,
+    ),
+)
+
+
+class TestWcsKeepMatrix:
+    """PRUNE-03 conservative-keep matrix asserted in BOTH flag states, plus dives."""
+
+    @pytest.mark.parametrize(
+        (
+            "lines",
+            "expected_off_output",
+            "expected_on_output",
+            "expected_off_counter",
+            "expected_on_counter",
+        ),
+        [pytest.param(*row[1:], id=row[0]) for row in ROWS],
+    )
+    def test_wcs_keep_matrix_rows_verdicts_both_flag_states(
+        self,
+        lines,
+        expected_off_output,
+        expected_on_output,
+        expected_off_counter,
+        expected_on_counter,
+    ):
+        """Eight conservative-keep rows in both flag states through the real compiler.
+
+        Per-row oracle map (roles swapped vs Direction-A; branches of
+        modifier_scope_covers(), rule_semantics.py:650-700, reached through
+        _find_covering_parent_record() or refused by _wildcard_covers_sub()):
+        - apex-exclusion-com-apex: the _wildcard_covers_sub() domain-leg apex
+          carve-out encodes AGH HasSuffix direction safety -- ``||*.com^``
+          suffix-matches dot-com hosts and can never cover the apex ``com``
+          itself. No wcs emission site exists yet, so today the keep is
+          structural; the row forward-pins Phase-20 direction safety.
+        - apex-exclusion-com-sub / -deep-sub: pruned TODAY by the LEGACY
+          tld-wildcard family (increment+record adjacency at
+          compiler.py:1569-1575) while the wcs predicate would likewise admit
+          coverage (strict same-key domain leg + the empty-modifier scope
+          branch at :660-661). The rows pin wcs-zero pre-emission plus
+          single-family attribution: one rule => one reason => one counter,
+          which Phase 20's D-19-04 precedence must preserve.
+        - badfilter-carrier-witness-keep: the $badfilter wildcard is
+          discarded upstream at parse classification (rule_effect_disable),
+          and the oracle NO_COVERAGE_MODIFIERS wholesale reject (:673-674)
+          is the backstop if a disabled rule ever leaked into storage.
+        - important-presence-asymmetry-keep: presence asymmetry rejects --
+          the parent lacks $important while the child carries it (:679-687).
+        - dnstype-narrower-value-signature-keep: a narrower witness
+          value-signature cannot cover a broader child (:697-698).
+        - denyallow-divergent-subtree-keep: honest dual guard -- the oracle
+          wholesale-rejects denyallow carriers (:673-674), AND the divergence
+          leg via _denyallow_allow_set / _domain_disjoint_from_all finds the
+          candidate subtree intersecting the admissible allow-set, so the
+          keep holds even if carrier rejection were ever relaxed.
+        - cross-key-impossibility-co-uk: strict same-key projection
+          structurally forbids witnessing (D-16-02 lineage); the secondary
+          guard is the narrow-scope parent-without-child reject (:693-698),
+          which also keeps the LEGACY family silent on this pairing.
+
+        Anchors drift -- re-grep before citing. Every leg runs on a fresh
+        CappedProofLedger; one claim per assert.
+        """
+        ledger_off = CappedProofLedger()
+        ledger_on = CappedProofLedger()
+
+        rules_off, stats_off = _compile(lines, proof_ledger=ledger_off)
+
+        assert rules_off == expected_off_output
+        assert stats_off.wildcard_covered_sub_pruned == expected_off_counter
+        summary_off = ledger_off.summary()
+        assert REASON_WILDCARD_COVERS_SUB not in summary_off["by_reason"]
+
+        rules_on, stats_on = _compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert rules_on == expected_on_output
+        assert stats_on.wildcard_covered_sub_pruned == expected_on_counter
+        summary_on = ledger_on.summary()
+        assert REASON_WILDCARD_COVERS_SUB not in summary_on["by_reason"]
+
+    def test_wcs_matrix_legacy_attribution_is_single_family(self):
+        """Sub-prune fixture: exactly ONE legacy reason family fires, in both legs.
+
+        The legacy tld-wildcard removal records under REASON_TLD_WILDCARD_COVERED
+        and bumps its own counter; the wcs family stays silent (counter 0, no
+        ledger entry) even though the same pairing would be wcs-eligible once
+        Phase 20 wires emission. Exact-dict equality proves no other reason
+        fired alongside.
+        """
+        lines = ["||a.com^", "||*.com^"]
+
+        ledger_off = CappedProofLedger()
+        _, stats_off = _compile(lines, proof_ledger=ledger_off)
+
+        assert stats_off.tld_wildcard_pruned == 1
+        assert ledger_off.summary()["by_reason"] == {REASON_TLD_WILDCARD_COVERED: 1}
+        assert stats_off.wildcard_covered_sub_pruned == 0
+
+        ledger_on = CappedProofLedger()
+        _, stats_on = _compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert stats_on.tld_wildcard_pruned == 1
+        assert ledger_on.summary()["by_reason"] == {REASON_TLD_WILDCARD_COVERED: 1}
+        assert stats_on.wildcard_covered_sub_pruned == 0
+
+    def test_wcs_matrix_badfilter_discard_evidence_pinned_in_both_legs(self):
+        """Badfilter row evidence pin: upstream discard counted in both legs.
+
+        Mirrors the apex sibling row5 dive: rule_effect_disable counts the
+        classification regardless of flag state, and the disabled rule never
+        reaches either output list.
+        """
+        lines = ["||*.autos^$badfilter", "||sub.autos^"]
+
+        rules_off, stats_off = _compile(lines)
+
+        assert stats_off.rule_effect_disable == 1
+        assert "||*.autos^$badfilter" not in rules_off
+
+        rules_on, stats_on = _compile(lines, wildcard_covers_subs_pruning=True)
+
+        assert stats_on.rule_effect_disable == 1
+        assert "||*.autos^$badfilter" not in rules_on
