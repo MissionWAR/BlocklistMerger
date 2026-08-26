@@ -32,6 +32,7 @@ from scripts.compiler import (
     _record_proven_pruning,
     _rule_storage_key,
     _wildcard_covers_sub,
+    _write_output,
     compile_rules,
     get_tld,
     normalize_domain,
@@ -836,3 +837,120 @@ class TestWcsNormalizationRoundTrips:
         wildcard_record = _parse_abp_rule("||*.com^")
         assert wildcard_record is not None
         assert wildcard_record.domain == get_tld(wildcard_record.domain)
+
+
+class TestWcsEmissionGolden:
+    """Direct-drive both-state emission golden against _write_output() (PRUNE-02).
+
+    Compile-level emission is provably zero-yield today (phase 3's TLD
+    branch runs the same scope oracle over a strict superset of any
+    write-time survivor pool), so nonzero emission behavior is exercisable
+    ONLY by driving _write_output() directly with builder-contract
+    storages. This golden pins BOTH flag states at the wired site:
+
+    - OFF (kwarg omitted): legacy path instruction-for-instruction --
+      both lines written in loop order (wildcard loop first, then the
+      plain loop), counter 0, ledger empty, paired total.
+    - ON: exactly the witnessed sub pruned -- output keeps only the
+      wildcard line, counter 1, exactly ONE canonical ledger record,
+      tally == counter 1:1 (D-19-04), paired total.
+
+    Every literal below was captured from real runs under py -3.14 at
+    authoring time (capture-not-predict); records are built strictly via
+    _parse_abp_rule over the real-public-suffix vocabulary (autos,
+    D-19-06). compile_rules() is deliberately NEVER called here --
+    compile-level identity legs belong to later plans.
+    """
+
+    def test_flag_off_keeps_legacy_emission_with_zero_counter_and_empty_ledger(
+        self,
+        tmp_path,
+    ):
+        """OFF leg: both lines written in loop order; counter 0; ledger empty.
+
+        Mirrors the apex_survivor_index OFF contract ("None keeps the
+        legacy emission path instruction-for-instruction"): omitting the
+        kwarg entirely must write BOTH storages' lines with zero wcs
+        accounting anywhere.
+        """
+        witness = _parse_abp_rule("||*.autos^")
+        candidate = _parse_abp_rule("||sub.autos^")
+        assert witness is not None
+        assert witness.is_wildcard and witness.domain == "autos"  # TLD-form fixture
+        assert candidate is not None
+        assert not candidate.is_wildcard
+
+        stats = CompileStats()
+        ledger = CappedProofLedger()
+        output_path = tmp_path / "off.txt"
+        _write_output(
+            str(output_path),
+            stats,
+            {"autos": [witness]},
+            {"sub.autos": [candidate]},
+            [],
+            set(),
+            ledger,
+        )
+
+        with open(output_path, encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        assert lines == ["||*.autos^", "||sub.autos^"]
+        assert stats.wildcard_covered_sub_pruned == 0
+        summary = ledger.summary()
+        assert REASON_WILDCARD_COVERS_SUB not in summary["by_reason"]
+        assert stats.total_output == stats.abp_kept + stats.other_kept
+        assert stats.total_output == 2
+
+    def test_flag_on_prunes_only_the_witnessed_sub_with_single_proven_record(
+        self,
+        tmp_path,
+    ):
+        """ON leg: witnessed sub skipped with 1:1 counter+ledger accounting.
+
+        The sole surviving same-key wildcard witnesses at its actual-write
+        point, so the plain sub is proven-covered by _wildcard_covers_sub()
+        and skipped: output keeps only the wildcard line, the counter bumps
+        exactly once, and exactly ONE canonical record lands carrying the
+        full sample shape (D-19-02) with tally == counter (D-19-04).
+        """
+        witness = _parse_abp_rule("||*.autos^")
+        candidate = _parse_abp_rule("||sub.autos^")
+        assert witness is not None
+        assert witness.is_wildcard and witness.domain == "autos"  # TLD-form fixture
+        assert candidate is not None
+        assert not candidate.is_wildcard
+
+        stats = CompileStats()
+        ledger = CappedProofLedger()
+        output_path = tmp_path / "on.txt"
+        _write_output(
+            str(output_path),
+            stats,
+            {"autos": [witness]},
+            {"sub.autos": [candidate]},
+            [],
+            set(),
+            ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        with open(output_path, encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        assert lines == ["||*.autos^"]
+        assert stats.wildcard_covered_sub_pruned == 1
+        matches = [
+            record for record in ledger.records if record.reason == REASON_WILDCARD_COVERS_SUB
+        ]
+        assert len(matches) == 1
+        sample = matches[0].sample
+        assert sample["candidate_rule"] == "||sub.autos^"
+        assert sample["covering_rule"] == "||*.autos^"
+        assert sample["modifier_scope_proven"] is True
+        tally = ledger.summary()["by_reason"][REASON_WILDCARD_COVERS_SUB]
+        assert tally == 1
+        assert stats.wildcard_covered_sub_pruned == tally
+        assert stats.total_output == stats.abp_kept + stats.other_kept
+        assert stats.total_output == 1
