@@ -30,9 +30,11 @@ from scripts.compiler import (
     CompileStats,
     _parse_abp_rule,
     _record_proven_pruning,
+    _rule_storage_key,
     _wildcard_covers_sub,
     compile_rules,
     get_tld,
+    normalize_domain,
 )
 from scripts.pipeline import PipelineStats, _new_pipeline_stats, process_files
 from scripts.pruning_proof import (
@@ -638,3 +640,179 @@ class TestWcsKeepMatrix:
 
         assert stats_on.rule_effect_disable == 1
         assert "||*.autos^$badfilter" not in rules_on
+
+
+# ----------------------------------------------------------------------
+# Forward-pinned Phase-20 traps + EVID-02 normalization round-trips
+# (Phase 19 plan 19-04). Fixture expectations below were captured from
+# real compile_rules() under py -3.14 on 2026-08-26 and re-verified by a
+# fresh capture run at authoring time (capture-not-predict).
+# ----------------------------------------------------------------------
+
+
+class TestWcsForwardPinnedTraps:
+    """D-19-09 executable spec: fixtures Phase 20's emission wiring keeps green.
+
+    These traps carry hard observable claims driven through the REAL
+    compiler in both flag states. Phase 20 adds wcs attribution teeth on
+    top of today's behavior; any emission change that breaks survivorship
+    ordering or double-counts a removal fails here loudly first.
+    """
+
+    def test_self_exceptiond_wildcard_survivorship_keeps_sub_both_states(self):
+        """A wildcard failing its OWN exception screen leaves its bare sub alive.
+
+        Survivorship ordering (research Pitfall 1): the wildcard is removed at
+        the whitelist-conflict stage, upstream of any witnessing -- a dead
+        wildcard must never witness. The exact-signature exception
+        ``@@||*.autos^$client=10.0.0.1`` screens only the identical blocker;
+        the bare sub survives in both flag states with the wcs family silent.
+        Phase 20 keeps this green while adding attribution teeth.
+        """
+        lines = [
+            "@@||*.autos^$client=10.0.0.1",
+            "||*.autos^$client=10.0.0.1",
+            "||sub.autos^",
+        ]
+
+        ledger_off = CappedProofLedger()
+        rules_off, stats_off = _compile(lines, proof_ledger=ledger_off)
+
+        assert rules_off == ["||sub.autos^"]
+        assert stats_off.whitelist_conflict_pruned == 1
+        assert stats_off.wildcard_covered_sub_pruned == 0
+        assert REASON_WILDCARD_COVERS_SUB not in ledger_off.summary()["by_reason"]
+        assert "||sub.autos^" in rules_off
+
+        ledger_on = CappedProofLedger()
+        rules_on, stats_on = _compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert rules_on == ["||sub.autos^"]
+        assert stats_on.whitelist_conflict_pruned == 1
+        assert stats_on.wildcard_covered_sub_pruned == 0
+        assert REASON_WILDCARD_COVERS_SUB not in ledger_on.summary()["by_reason"]
+        assert "||sub.autos^" in rules_on
+
+    def test_multi_coverer_removal_recorded_exactly_once_compile_level(self):
+        """Two candidate coverers yield exactly ONE removal record (D-19-04/09b).
+
+        Compile-level completion of the D-19-04 no-double-count contract
+        (19-02 pinned the predicate half): the sub removal records under the
+        legacy tld-wildcard family exactly once -- by_reason equals
+        {REASON_TLD_WILDCARD_COVERED: 1} as an EXACT dict -- both wildcards
+        survive, and the wcs family stays silent in both flag states. Phase
+        20's precedence rule must keep exactly-one-record-per-removal.
+        """
+        lines = [
+            "||*.autos^",
+            "||*.autos^$client=10.0.0.1",
+            "||sub.autos^$client=10.0.0.1",
+        ]
+
+        ledger_off = CappedProofLedger()
+        rules_off, stats_off = _compile(lines, proof_ledger=ledger_off)
+
+        assert rules_off == ["||*.autos^", "||*.autos^$client=10.0.0.1"]
+        assert stats_off.tld_wildcard_pruned == 1
+        assert ledger_off.summary()["by_reason"] == {REASON_TLD_WILDCARD_COVERED: 1}
+        assert stats_off.wildcard_covered_sub_pruned == 0
+        assert REASON_WILDCARD_COVERS_SUB not in ledger_off.summary()["by_reason"]
+
+        ledger_on = CappedProofLedger()
+        rules_on, stats_on = _compile(
+            lines,
+            proof_ledger=ledger_on,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert rules_on == ["||*.autos^", "||*.autos^$client=10.0.0.1"]
+        assert stats_on.tld_wildcard_pruned == 1
+        assert ledger_on.summary()["by_reason"] == {REASON_TLD_WILDCARD_COVERED: 1}
+        assert stats_on.wildcard_covered_sub_pruned == 0
+        assert REASON_WILDCARD_COVERS_SUB not in ledger_on.summary()["by_reason"]
+
+
+class TestWcsNormalizationRoundTrips:
+    """EVID-02: exactly ONE canonical key path exists and variants resolve through it.
+
+    The canonical path is normalize_domain -> get_tld -> _rule_storage_key.
+    These pins prove case and trailing-dot variants collapse THROUGH that
+    single path, that punycode labels stay DISTINCT opaque keys (no folding
+    beyond the canonical path is claimed), and that the path's unit behavior
+    matches production derivations only.
+    """
+
+    def test_case_variant_pair_collapses_via_canonical_path(self):
+        """Case-variant ABP pair collapses to one rule; first-seen text survives.
+
+        The storage key collapsed (duplicate_pruned == 1) while the SURVIVING
+        TEXT keeps first-seen casing -- captured from real output.
+        """
+        rules, stats = _compile(["||ADS.Example.COM^", "||ads.example.com^"])
+
+        assert len(rules) == 1
+        assert rules == ["||ADS.Example.COM^"]
+        assert stats.duplicate_pruned == 1
+
+    def test_hosts_form_case_and_trailing_dot_roundtrip_collapses(self):
+        """Hosts hostname lands on an identical signature to the explicit rule.
+
+        The hosts-form entry passes through the same canonical path (case
+        folding plus trailing-dot trim via normalize_domain) BEFORE
+        compression, so it collapses onto the explicit lowercase ABP rule.
+        """
+        rules, stats = _compile(["0.0.0.0 ADS.Example.COM.", "||ads.example.com^"])
+
+        assert rules == ["||ads.example.com^"]
+        assert stats.duplicate_pruned == 1
+
+    def test_punycode_labels_stay_distinct_opaque_keys(self):
+        """Punycode and unicode-label twins survive as TWO distinct rules.
+
+        Honesty contract: a repo-wide search finds NO IDNA/punycode
+        conversion anywhere in scripts/ (verified again at authoring capture,
+        2026-08-26); xn-- labels are opaque keys and the unicode label parses
+        and stores verbatim. NO unicode-equivalence is claimed -- these two
+        rules are distinct keys by design, and duplicate_pruned reads 0. Any
+        future folding change MUST consciously revisit this pin.
+        """
+        rules, stats = _compile(["||xn--e1afmkfd.xn--p1ai^", "||пример.рф^"])
+
+        assert len(rules) == 2
+        assert "||xn--e1afmkfd.xn--p1ai^" in rules
+        assert "||пример.рф^" in rules
+        assert stats.duplicate_pruned == 0
+
+    def test_canonical_path_unit_pins(self):
+        """Direct pins over production derivations only (no hand-invented keys).
+
+        Pins the canonical path end to end: normalize_domain folds case and
+        trailing dots (reaching punycode LABELS too -- they are plain
+        strings), storage keys equal for case variants, unicode labels parse
+        opaquely untransformed, and get_tld("com") proves com reaches the
+        real wildcard buckets (D-19-06 bucket discipline).
+        """
+        record_mixed_case = _parse_abp_rule("||ADS.Example.COM^")
+        record_lower_case = _parse_abp_rule("||ads.example.com^")
+        assert record_mixed_case is not None
+        assert record_lower_case is not None
+
+        assert normalize_domain("ADS.Example.COM.") == "ads.example.com"
+        assert normalize_domain("XN--E1AFMKFD.XN--P1AI.") == "xn--e1afmkfd.xn--p1ai"
+
+        mixed_key = _rule_storage_key(record_mixed_case)
+        lower_key = _rule_storage_key(record_lower_case)
+        assert mixed_key == lower_key
+
+        unicode_record = _parse_abp_rule("||пример.рф^")
+        assert unicode_record is not None
+        assert unicode_record.domain == "пример.рф"
+
+        assert get_tld("com") == "com"
+        wildcard_record = _parse_abp_rule("||*.com^")
+        assert wildcard_record is not None
+        assert wildcard_record.domain == get_tld(wildcard_record.domain)
