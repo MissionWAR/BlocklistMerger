@@ -1841,12 +1841,14 @@ def compile_rules(
             removed TLD wildcard is individually proven against its surviving apex.
         wildcard_covers_subs_pruning: Remove a subdomain rule only when a surviving
             same-key TLD wildcard provably covers it with equal-or-broader modifier
-            scope; every removal is individually recorded in the proof ledger.
-            OFF (the production default) leaves compiled output byte-identical to
-            legacy behavior with the wildcard-covered-sub counter at 0 everywhere.
-            True is reserved for the later Direction-B removal pass -- until that
-            wiring lands this flag is accepted and ignored, producing output and
-            counters identical to OFF in this milestone.
+            scope; every removal is individually proven against a wildcard that
+            itself shipped in the final output and individually recorded in the
+            proof ledger, with witnesses collected only at actual-write points so
+            skipped wildcards never witness. Ineligible (mis-keyed) witnesses are
+            skipped silently and candidates whose proof fails are kept silently
+            without ledger entries. OFF (the production default) leaves compiled
+            output byte-identical to legacy behavior with the
+            wildcard-covered-sub counter at 0 everywhere.
 
     Returns:
         CompileStats with metrics about the compilation process
