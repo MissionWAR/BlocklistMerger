@@ -2096,7 +2096,8 @@ class TestCompilerCliSummary:
 
     Drives the real ``python -m scripts.compiler`` entry point so the __main__
     Pruned block is proven end-to-end, mirroring the capsys plane in
-    tests/test_pipeline.py for print_summary().
+    tests/test_pipeline.py for print_summary(); Phase 19 D-19-03 extends the
+    same symmetric contract to the wildcard-covered-subs line.
     """
 
     def _run_compiler(self, input_text, tmp_path):
@@ -2128,6 +2129,22 @@ class TestCompilerCliSummary:
         assert "Pruned:" in result.stdout
         assert "Apex-covered wildcards:" in result.stdout
         assert "Denyallow wildcards:" in result.stdout
+
+    def test_cli_pruned_block_reports_wildcard_covered_subs_line(self, tmp_path):
+        """Standalone compiler CLI prints the D-19-03 Wildcard-covered subs line."""
+        input_text = "\n".join(
+            [
+                "! comment line",
+                "||example.com^",
+                "||ads.example.net^$",
+                "0.0.0.0 trackers.example.org",
+            ]
+        )
+        result = self._run_compiler(input_text, tmp_path)
+
+        assert result.returncode == 0
+        assert "Pruned:" in result.stdout
+        assert "Wildcard-covered subs:" in result.stdout
 
 
 if __name__ == "__main__":

@@ -615,7 +615,9 @@ class TestProcessFiles:
         """Pipeline summary should make URL-path and invalid drops visible.
 
         Also pins the v1.2 IN-01 denyallow backfill line and the new
-        apex-covered surfacing (D-06/D-07) with a seeded denyallow magnitude.
+        apex-covered surfacing (D-06/D-07) with a seeded denyallow magnitude,
+        plus the Phase 19 D-19-03 wildcard-covered-subs surfacing with its own
+        distinct magnitude so each line's provenance stays attributable.
         """
         stats = {
             "files_processed": 1,
@@ -633,6 +635,7 @@ class TestProcessFiles:
             "tld_wildcard_pruned": 0,
             "denyallow_wildcard_pruned": 1234567,
             "apex_covered_wildcard_pruned": 0,
+            "wildcard_covered_sub_pruned": 7654321,
             "duplicate_pruned": 0,
             "whitelist_conflict_pruned": 0,
             "local_hostname_pruned": 0,
@@ -661,7 +664,9 @@ class TestProcessFiles:
         assert "Compression policy:" in output
         assert "Denyallow wildcards:" in output
         assert "Apex-covered wildcards:" in output
+        assert "Wildcard-covered subs:" in output
         assert "1,234,567" in output
+        assert "7,654,321" in output
 
 
 class TestSaveStatsJson:
@@ -686,6 +691,7 @@ class TestSaveStatsJson:
             "tld_wildcard_pruned": 50,
             "denyallow_wildcard_pruned": 25,
             "apex_covered_wildcard_pruned": 0,
+            "wildcard_covered_sub_pruned": 0,
             "duplicate_pruned": 50,
             "whitelist_conflict_pruned": 0,
             "local_hostname_pruned": 0,
@@ -770,6 +776,7 @@ class TestSaveStatsJson:
         )
         assert data["statistics"]["url_path_removed"] == 0
         assert data["statistics"]["invalid_removed"] == 0
+        assert data["statistics"]["wildcard_covered_sub_pruned"] == 0
         assert data["statistics"]["duplicate_pruned"] == 50
         assert data["statistics"]["abp_kept"] == 400
         assert data["statistics"]["other_kept"] == 100
