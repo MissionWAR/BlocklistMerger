@@ -660,3 +660,32 @@ def test_proof_report_schema_version_stays_at_one():
     from scripts.pruning_proof import PROOF_REPORT_SCHEMA_VERSION
 
     assert PROOF_REPORT_SCHEMA_VERSION == 1
+
+
+# This leg complements the 19-01 OFF-side omission legs: injecting a synthetic
+# stats Mapping is a PROJECTION check proving the stage-diagnostics entry
+# consumes exactly the D-19-01 counter spelling and publishes under the bucket
+# key locked in 19-01 — it is NOT the flagged-run fence-inclusion assertion
+# (flagged-run ledger reason sets containing the new reason), which lands with
+# Phase 20's actual emission per D-19-07.
+
+
+def test_wildcard_covered_sub_counter_key_producer_consumer_equality():
+    """Phase 19 D-19-07: the wcs counter key must be spelled identically on every
+    producer/consumer surface or the seven-layer chain silently decouples."""
+    from scripts.compiler import CompileStats
+    from scripts.pipeline import PipelineStats, _new_pipeline_stats
+    from scripts.stage_diagnostics import (
+        COMPILER_STAGE_PRUNE,
+        compiler_stage_summaries_from_stats,
+    )
+
+    assert "wildcard_covered_sub_pruned" in CompileStats.__dataclass_fields__
+    assert "wildcard_covered_sub_pruned" in PipelineStats.__annotations__
+    assert _new_pipeline_stats()["wildcard_covered_sub_pruned"] == 0
+    assert (
+        compiler_stage_summaries_from_stats({"wildcard_covered_sub_pruned": 7})[
+            COMPILER_STAGE_PRUNE
+        ]["reasons"]
+        == {"wcs_covered": 7}
+    )
