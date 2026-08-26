@@ -40,6 +40,7 @@ from scripts.compiler import (
 from scripts.pipeline import PipelineStats, _new_pipeline_stats, process_files
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
+    REASON_APEX_COVERS_TLD_WILDCARD,
     REASON_KEPT_BECAUSE_UNCERTAIN,
     REASON_TLD_WILDCARD_COVERED,
     REASON_WILDCARD_COVERED,
@@ -1191,3 +1192,144 @@ class TestWcsFailedProofSilentKeep:
         assert by_reason_on.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0) == 0
         assert by_reason_off == by_reason_on
         assert rules_off == rules_on
+
+
+class TestWcsSurvivorshipAcrossFlags:
+    """SC2: an apex-killed wildcard never witnesses -- composition is correct.
+
+    Research Pitfall 1 survivorship ordering made mechanical: Loop-A's
+    apex-proof continue sits strictly BEFORE the wcs population point, so
+    a wildcard killed by its own same-key apex never reaches the write
+    point, never enters wcs_survivor_index, and can never witness. The
+    nominally-covered sub therefore SURVIVES while the apex prune is
+    recorded -- automatic flag-composition correctness proven through one
+    direct drive with a hand-built apex_survivor_index. The index is
+    lookup data only: the apex itself rides in pruned_abp so it still
+    writes (only Loop A/B writes lines).
+    """
+
+    def test_apex_killed_wildcard_never_witnesses_and_the_sub_survives(self):
+        """Apex-proof kill starves the witness pool: sub writes, counter 0.
+
+        One drive, both flags composed ON: the apex prune records exactly
+        once under its own reason family while the wcs family stays silent
+        -- the candidate line is present despite its nominally-covering
+        wildcard existing in the storages.
+        """
+        apex = _parse_abp_rule("||autos^")
+        assert apex is not None
+        assert not apex.is_wildcard
+        assert apex.domain == "autos"
+        witness = _parse_abp_rule("||*.autos^")
+        assert witness is not None
+        assert witness.is_wildcard and witness.domain == "autos"  # TLD-form fixture
+        candidate = _parse_abp_rule("||sub.autos^")
+        assert candidate is not None
+        assert not candidate.is_wildcard and get_tld(candidate.domain) == "autos"
+        ledger = CappedProofLedger()
+
+        rules, stats = _drive_emission(
+            {"autos": [witness]},
+            {"autos": [apex], "sub.autos": [candidate]},
+            ledger,
+            wildcard_covers_subs_pruning=True,
+            apex_survivor_index={"autos": [apex]},
+        )
+
+        assert rules == ["||autos^", "||sub.autos^"]
+        assert stats.apex_covered_wildcard_pruned == 1
+        assert stats.wildcard_covered_sub_pruned == 0
+        assert ledger.summary()["by_reason"] == {REASON_APEX_COVERS_TLD_WILDCARD: 1}
+        matches = [
+            record for record in ledger.records
+            if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
+        ]
+        assert len(matches) == 1
+        sample = matches[0].sample
+        assert sample["candidate_rule"] == "||*.autos^"
+        assert sample["covering_rule"] == "||autos^"
+        assert stats.total_output == 2
+
+
+class TestWcsPairedAccountingTotals:
+    """SC3: skip accounting stays paired and total in BOTH flag states.
+
+    ROADMAP SC3 + Anti-Pattern 5 (one continue guarding write AND bump,
+    detected via total_output == written-line-count in both states): each
+    leg independently pins the two identities, and the ON leg re-drives
+    OFF for cross-leg stasis -- kept_because_uncertain unchanged (write-
+    time removals come out of the written set, NOT out of the phase-3
+    uncertain bucket per D-20-02; the corpus-level -N reconciliation is
+    Phase 21's), non-wcs reason keys identical, multi-pair attribution
+    exactly 1:1 (D-19-04).
+    """
+
+    @staticmethod
+    def _storages():
+        """Build two independent key pairs over distinct real suffixes."""
+        w1 = _parse_abp_rule("||*.autos^")
+        assert w1 is not None
+        assert w1.is_wildcard and w1.domain == "autos"  # TLD-form fixture
+        w2 = _parse_abp_rule("||*.com^")
+        assert w2 is not None
+        assert w2.is_wildcard and w2.domain == "com"  # TLD-form fixture
+        c1 = _parse_abp_rule("||sub.autos^")
+        assert c1 is not None
+        assert not c1.is_wildcard and get_tld(c1.domain) == "autos"
+        c2 = _parse_abp_rule("||ads.com^")
+        assert c2 is not None
+        assert not c2.is_wildcard and get_tld(c2.domain) == "com"
+        return {"autos": [w1], "com": [w2]}, {"sub.autos": [c1], "ads.com": [c2]}
+
+    def test_sc3_off_leg_writes_all_four_lines_with_zero_accounting(self):
+        """Flag OFF: bucket insertion order output, counter 0, empty ledger."""
+        wildcards, plains = self._storages()
+        ledger = CappedProofLedger()
+
+        rules, stats = _drive_emission(wildcards, plains, ledger)
+
+        assert rules == ["||*.autos^", "||*.com^", "||sub.autos^", "||ads.com^"]
+        assert stats.abp_kept == 4
+        assert stats.other_kept == 0
+        assert stats.wildcard_covered_sub_pruned == 0
+        assert ledger.summary()["by_reason"] == {}
+        assert stats.total_output == stats.abp_kept + stats.other_kept
+        assert stats.total_output == len(rules)
+
+    def test_sc3_on_leg_skips_exactly_two_subs_one_to_one_with_stasis(self):
+        """Flag ON: exactly the witnessed subs skip; stasis holds across legs.
+
+        Multi-pair attribution is EXACTLY {REASON_WILDCARD_COVERS_SUB: 2}
+        -- one rule, one reason, one counter per pair, never aggregated.
+        The OFF leg is re-driven first inside this method so the cross-leg
+        stasis asserts compare fresh same-shape results.
+        """
+        wildcards, plains = self._storages()
+        ledger_off = CappedProofLedger()
+        rules_off, stats_off = _drive_emission(wildcards, plains, ledger_off)
+
+        ledger_on = CappedProofLedger()
+        rules_on, stats_on = _drive_emission(
+            wildcards,
+            plains,
+            ledger_on,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert rules_on == ["||*.autos^", "||*.com^"]
+        assert stats_on.wildcard_covered_sub_pruned == 2
+        assert ledger_on.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 2}
+        assert stats_on.abp_kept == 2
+        assert stats_on.other_kept == 0
+        assert stats_on.total_output == stats_on.abp_kept + stats_on.other_kept
+        assert stats_on.total_output == len(rules_on)
+
+        by_reason_off = ledger_off.summary()["by_reason"]
+        by_reason_on = ledger_on.summary()["by_reason"]
+        assert by_reason_off.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0) == 0
+        assert by_reason_on.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0) == 0
+        non_wcs_keys_off = {key for key in by_reason_off if key != REASON_WILDCARD_COVERS_SUB}
+        non_wcs_keys_on = {key for key in by_reason_on if key != REASON_WILDCARD_COVERS_SUB}
+        assert non_wcs_keys_off == non_wcs_keys_on
+        assert stats_off.total_output == stats_off.abp_kept + stats_off.other_kept
+        assert stats_off.total_output == len(rules_off)
