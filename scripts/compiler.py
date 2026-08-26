@@ -1915,6 +1915,7 @@ if __name__ == "__main__":
     print(f"  TLD wildcards:          {stats.tld_wildcard_pruned:,}")
     print(f"  Denyallow wildcards:    {stats.denyallow_wildcard_pruned:,}")
     print(f"  Apex-covered wildcards: {stats.apex_covered_wildcard_pruned:,}")
+    print(f"  Wildcard-covered subs:  {stats.wildcard_covered_sub_pruned:,}")
     print(f"  Duplicates:             {stats.duplicate_pruned:,}")
     print(f"  Whitelist conflicts:    {stats.whitelist_conflict_pruned:,}")
     print(f"  Local hostnames:        {stats.local_hostname_pruned:,}")

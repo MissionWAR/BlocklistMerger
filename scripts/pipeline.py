@@ -786,6 +786,7 @@ def print_summary(stats: PipelineStats) -> None:
     print(f"   TLD wildcards:          {stats['tld_wildcard_pruned']:>10,}")
     print(f"   Denyallow wildcards:    {stats['denyallow_wildcard_pruned']:>10,}")
     print(f"   Apex-covered wildcards: {stats['apex_covered_wildcard_pruned']:>10,}")
+    print(f"   Wildcard-covered subs:  {stats['wildcard_covered_sub_pruned']:>10,}")
     print(f"   Duplicates:             {stats['duplicate_pruned']:>10,}")
     print(f"   Whitelist conflict:     {stats['whitelist_conflict_pruned']:>10,}")
     print(f"   Local hostnames:        {stats['local_hostname_pruned']:>10,}")
