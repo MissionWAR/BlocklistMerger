@@ -958,6 +958,11 @@ class TestWcsEmissionGolden:
         assert stats.total_output == 1
 
 
+# Posture note (2026-08-26, plan 20-02): flagged emission went live behind
+# wildcard_covers_subs_pruning in 20-01; the module-header zero-behavior
+# paragraphs above describe the Phase-19 baseline era; classes below prove
+# post-emission semantics (D-20-01 / D-20-02 / SC2 / SC3).
+
 # ----------------------------------------------------------------------
 # Phase 20 plan 20-02 appended region: post-emission SEMANTICS legs.
 #
