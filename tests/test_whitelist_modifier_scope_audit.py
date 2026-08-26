@@ -462,6 +462,9 @@ class TestCorpusWhitelistAudit:
         - Uncertain keeps are counted but never asserted: their magnitude is
           an upstream-composition fact (research assumption A3), not a
           compiler-correctness contract.
+        - Zero-pairing pin: wildcard-covers-sub ledger tally ==
+          stats.wildcard_covered_sub_pruned == 0 under production-default
+          flags (Phase 19 plumbing inertness, D-19-10).
         """
         ledger = CappedProofLedger(sample_cap=10_000)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -483,6 +486,13 @@ class TestCorpusWhitelistAudit:
         # Cross-check: each whitelist prune produced exactly one proof record.
         exception_covered_records = summary["by_reason"].get(REASON_EXCEPTION_COVERED, 0)
         assert exception_covered_records == stats.whitelist_conflict_pruned
+
+        # Phase 19 zero-pairing pin at production-default flags (D-19-10):
+        # a different kwarg combination than either shadow leg, so
+        # premature wcs firing on the plain default path fails here too.
+        wcs_default = summary["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert wcs_default == stats.wildcard_covered_sub_pruned
+        assert wcs_default == 0
 
         # Dual-lock invariant scan across materialized proof samples.
         dual_lock_violations = [
