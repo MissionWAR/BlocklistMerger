@@ -49,6 +49,7 @@ from scripts.pruning_proof import (
     REASON_DENYALLOW_COVERED,
     REASON_EXCEPTION_COVERED,
     REASON_KEPT_BECAUSE_UNCERTAIN,
+    REASON_WILDCARD_COVERS_SUB,
     CappedProofLedger,
     RuleFacet,
     _capped_sample_record,
@@ -981,6 +982,26 @@ class TestShadowComparisonMachinery:
         assert apex_off == 0
         assert apex_on == result.on_stats.apex_covered_wildcard_pruned
         assert apex_on == 0
+
+    def test_wildcard_covers_sub_zero_pairing_in_both_shadow_legs(self):
+        """Fast fixture twin of the corpus gate's wildcard-covers-sub pins.
+
+        Locks D-19-10 count-identity for the family — the ledger
+        by_reason tally equals the paired CompileStats counter — in BOTH
+        flag legs through the genuine _run_shadow_comparison() machinery
+        via self._result(), both reading 0 until Phase 20 introduces the
+        flag-gated emission site. Four separate asserts, one claim each
+        (never chained).
+        """
+        result = self._result()
+        off_by_reason = result.off_ledger.summary()["by_reason"]
+        on_by_reason = result.on_ledger.summary()["by_reason"]
+        wcs_off = off_by_reason.get(REASON_WILDCARD_COVERS_SUB, 0)
+        wcs_on = on_by_reason.get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert wcs_off == result.off_stats.wildcard_covered_sub_pruned
+        assert wcs_off == 0
+        assert wcs_on == result.on_stats.wildcard_covered_sub_pruned
+        assert wcs_on == 0
 
 
 # ----------------------------------------------------------------------
