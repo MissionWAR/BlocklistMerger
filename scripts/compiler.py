@@ -1386,7 +1386,7 @@ def _wildcard_covers_sub(
 
     Iterates witnesses in storage (append) order so multi-variant keys
     resolve deterministically: exactly one witness or None, never a
-    collection. A witness proves coverage only after three legs, composed
+    collection. A witness proves coverage only after four legs, composed
     per witness with the first full pass winning:
 
     1. Domain eligibility (evaluated once, before iteration): the candidate
@@ -1397,12 +1397,19 @@ def _wildcard_covers_sub(
        outright. Strict same-key eligibility ONLY: no suffix relaxation, no
        registered-domain walking, no cross-key witnessing, ever (the D-16-02
        adjudication).
-    2. Scope proof: ``modifier_scope_covers(witness.modifiers,
+    2. Witness key eligibility (per witness): every witness must itself be a
+       TLD-form wildcard for this key -- ``witness.is_wildcard`` AND
+       ``witness.domain == tld``. Callers are NOT trusted to pre-filter:
+       a mis-keyed record (say ``||*.other.com^`` handed over with
+       ``tld="autos"``) is skipped instead of being allowed to prove
+       coverage, keeping strict same-key eligibility symmetric across the
+       candidate and witness sides (WR-01).
+    3. Scope proof: ``modifier_scope_covers(witness.modifiers,
        candidate.modifiers)`` is the SOLE authority on modifier coverage --
        no comparison logic is invented here. Carriers of NO_COVERAGE
        modifiers ($badfilter, $denyallow, $dnsrewrite) are rejected by the
        oracle wholesale.
-    3. Denyallow divergence: reuses ``_denyallow_allow_set`` +
+    4. Denyallow divergence: reuses ``_denyallow_allow_set`` +
        ``_domain_disjoint_from_all`` unchanged. When the witness carries an
        admissible $denyallow set sharing a subtree with the candidate,
        coverage is refused (the exemption carves out a region the wildcard
@@ -1410,7 +1417,9 @@ def _wildcard_covers_sub(
 
     Args:
         candidate: Plain blocking rule record under evaluation.
-        witnesses: Same-key surviving wildcard variants in storage order.
+        witnesses: Surviving wildcard variants in storage order, expected
+            same-key; each witness's own TLD-form eligibility is verified
+            here (leg 2) rather than assumed from the caller.
         tld: The wildcard storage key shared by the witnesses (from the
             parse-time ``get_tld`` bucketing).
 
@@ -1427,6 +1436,8 @@ def _wildcard_covers_sub(
     if candidate.domain == tld or not candidate.domain.endswith("." + tld):
         return None
     for witness in witnesses:
+        if not (witness.is_wildcard and witness.domain == tld):
+            continue  # mis-keyed: not a TLD-form wildcard for this key (WR-01)
         if not modifier_scope_covers(witness.modifiers, candidate.modifiers):
             continue
         allow_set = _denyallow_allow_set(witness.modifiers, tld)

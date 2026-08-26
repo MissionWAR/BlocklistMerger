@@ -347,6 +347,26 @@ class TestWcsCoveragePredicate:
 
         assert covered is None
 
+    def test_mis_keyed_witness_object_is_never_trusted_as_coverage(self):
+        """A witness failing its own TLD-form check cannot prove coverage.
+
+        WR-01 mirror of test_cross_key_candidate_is_structurally_uncoverable,
+        flipped to the witness side: the candidate sits strictly under the
+        key and the mis-keyed ``||*.other.com^`` record carries no rejecting
+        modifiers, so absent the eligibility leg the scope oracle would
+        admit it and hand back an unsound "covered" verdict. The guard must
+        skip such records instead of trusting caller bucket discipline --
+        Phase 20 wires this predicate into write-time emission, where one
+        mis-keyed bucket silently deletes blocking rules.
+        """
+        _, tld = self._witness_tld("||*.autos^")
+        mis_keyed = self._witness(["||*.other.com^"])[0]
+        candidate = self._candidate("||sub.autos^")
+
+        covered = _wildcard_covers_sub(candidate, [mis_keyed], tld)
+
+        assert covered is None
+
     def test_badfilter_carrier_witness_never_proves_coverage(self):
         """The oracle wholesale-rejects NO_COVERAGE carriers (:673-674).
 
