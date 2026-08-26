@@ -1338,3 +1338,153 @@ class TestWcsPairedAccountingTotals:
         assert non_wcs_keys_off == non_wcs_keys_on
         assert stats_off.total_output == stats_off.abp_kept + stats_off.other_kept
         assert stats_off.total_output == len(rules_off)
+
+
+# ----------------------------------------------------------------------
+# Phase 20 plan 20-03 appended region: compile-level IDENTITY plane
+# (SC5/D-20-03 combo matrix), SC4 determinism, and D-19-07 fence-
+# inclusion closure. Everything below runs through REAL compile_rules()
+# (or projects real driven stats) and documents DETERMINISTIC outcomes
+# scratch-captured under py -3.14 on 2026-08-26 before being pasted
+# (capture-not-predict). Per the load-bearing research finding (C2):
+# phase 3's TLD branch proves over a strict superset of any write-time
+# survivor pool, so compile-level B yield is STRUCTURALLY ZERO today --
+# these legs pin that stasis as positive claims, never shrinkage.
+# Nonzero-emission proof lives in the direct-drive region above.
+# ----------------------------------------------------------------------
+
+
+# Tuple layout: (id, compile_kwargs, expected output lines, expected
+# tld_wildcard_pruned, expected apex_covered_wildcard_pruned, expected
+# whitelist_conflict_pruned). Every value captured from real
+# compile_rules() runs under py -3.14 on 2026-08-26.
+COMBO_ROWS = (
+    (
+        "b0_denyallow0_apex0",
+        {"denyallow_pruning": False},
+        ["||*.autos^", "||autos^", "||ads.example.com^"],
+        1,
+        0,
+        0,
+    ),
+    (
+        "b0_denyallow1_apex0_production_defaults",
+        {},
+        ["||*.autos^", "||autos^", "||ads.example.com^"],
+        1,
+        0,
+        0,
+    ),
+    (
+        "b1_denyallow0_apex0",
+        {"wildcard_covers_subs_pruning": True, "denyallow_pruning": False},
+        ["||*.autos^", "||autos^", "||ads.example.com^"],
+        1,
+        0,
+        0,
+    ),
+    (
+        "b1_denyallow1_apex0",
+        {"wildcard_covers_subs_pruning": True},
+        ["||*.autos^", "||autos^", "||ads.example.com^"],
+        1,
+        0,
+        0,
+    ),
+    (
+        "b1_denyallow1_apex1",
+        {
+            "wildcard_covers_subs_pruning": True,
+            "wildcard_apex_pruning": True,
+        },
+        ["||autos^", "||ads.example.com^"],
+        1,
+        1,
+        0,
+    ),
+)
+
+
+class TestWcsComboMatrix:
+    """D-20-03/SC5: four (B x denyallow) combos plus the apex-present stack row.
+
+    Every configuration compiles FIXTURE_LINES through REAL compile_rules()
+    with a fresh CappedProofLedger and carries its own scratch-captured
+    deterministic outcome. In every row the sub dies to the LEGACY
+    tld-wildcard family (FIXTURE_LINES carries no denyallow carriers), so
+    the wcs family stays silent -- pinned as POSITIVE zeros (counter 0,
+    reason absent, tally == counter), never shrinkage (research C2).
+    The apex-present row reproduces the TL03 golden outcome at the compile
+    seam: wildcard_apex_pruning=True removes ||*.autos^ against its
+    surviving apex while the wcs family never fires (the killed wildcard
+    never witnesses).
+    """
+
+    @pytest.mark.parametrize(
+        (
+            "compile_kwargs",
+            "expected_output",
+            "expected_tld_wildcard",
+            "expected_apex_covered",
+            "expected_whitelist_conflict",
+        ),
+        [pytest.param(*row[1:], id=row[0]) for row in COMBO_ROWS],
+    )
+    def test_combo_row_documented_outcome_through_real_compile_rules(
+        self,
+        compile_kwargs,
+        expected_output,
+        expected_tld_wildcard,
+        expected_apex_covered,
+        expected_whitelist_conflict,
+    ):
+        """One documented combo row: captured bytes, counters, wcs silence."""
+        ledger = CappedProofLedger()
+
+        rules, stats = _compile(FIXTURE_LINES, proof_ledger=ledger, **compile_kwargs)
+
+        assert rules == expected_output
+        assert stats.wildcard_covered_sub_pruned == 0
+        assert stats.tld_wildcard_pruned == expected_tld_wildcard
+        assert stats.apex_covered_wildcard_pruned == expected_apex_covered
+        assert stats.whitelist_conflict_pruned == expected_whitelist_conflict
+        summary = ledger.summary()
+        assert REASON_WILDCARD_COVERS_SUB not in summary["by_reason"]
+        tally = summary["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert tally == stats.wildcard_covered_sub_pruned
+
+    def test_b_flag_flip_alone_is_observationally_inert_compiled(self):
+        """Flipping ONLY wildcard_covers_subs_pruning changes NOTHING observable.
+
+        Mechanical C2 identity pairings (D-20-03): c1-vs-c3 and c2-vs-c4
+        are compiled once each with fresh ledgers, then compared on rule
+        bytes, FULL by_reason dicts (exact dict equality -- byte-level,
+        not counter-only), and the tld-wildcard counter. Phase-3 superset
+        proof behind the identity: the write-time witness pool is strictly
+        contained in phase 3's proof pool (same keys, same oracle,
+        survivorship only shrinks), so compile-level B yield is
+        structurally zero today.
+        """
+        combos = {
+            "c1": {"denyallow_pruning": False},
+            "c2": {},
+            "c3": {"wildcard_covers_subs_pruning": True, "denyallow_pruning": False},
+            "c4": {"wildcard_covers_subs_pruning": True},
+        }
+        results = {}
+        for name, kwargs in combos.items():
+            ledger = CappedProofLedger()
+            rules, stats = _compile(FIXTURE_LINES, proof_ledger=ledger, **kwargs)
+            results[name] = (rules, stats, ledger.summary()["by_reason"])
+
+        rules_c1, stats_c1, by_reason_c1 = results["c1"]
+        rules_c3, stats_c3, by_reason_c3 = results["c3"]
+        assert rules_c1 == rules_c3
+        assert by_reason_c1 == by_reason_c3
+        assert stats_c1.tld_wildcard_pruned == stats_c3.tld_wildcard_pruned
+
+        rules_c2, stats_c2, by_reason_c2 = results["c2"]
+        rules_c4, stats_c4, by_reason_c4 = results["c4"]
+        assert rules_c2 == rules_c4
+        assert by_reason_c2 == by_reason_c4
+        assert stats_c2.tld_wildcard_pruned == stats_c4.tld_wildcard_pruned
