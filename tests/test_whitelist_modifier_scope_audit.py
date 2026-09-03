@@ -31,6 +31,7 @@ import copy
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -3529,3 +3530,151 @@ class TestApexShadowEquivalence:
         else:
             failed_timing = checks["timing_evidence_present"]
             print(f"[APEX SHADOW] timing_evidence_present FAILED: {failed_timing[0]}")
+
+
+# ----------------------------------------------------------------------
+# Direction-B shadow machinery unit layer (Phase 21, EVID-03 tracer).
+#
+# Fixture-scale twin layer for the dirb OFF/ON legs that 21-02 feeds the
+# frozen corpus. Proves the leg-runner shape, the uncapped-witnessing
+# WcsTallyingLedger, the HONEST-ZERO B-signature spelling, and the
+# flag-threading plus cache-hygiene structural contracts BEFORE any
+# corpus-scale execution exists.
+#
+# Honest-zero note (superset theorem, Phase-20 header): phase 3's TLD
+# branch runs the same scope oracle over a strict superset of any
+# write-time survivor pool, so full-compile yield is structurally zero --
+# every wcs-provable pair is already owned by phase 3 under
+# tld_wildcard_covered. These twins pin EXACTLY that shape at fixture
+# scale (tally == counter == removed == 0, OFF-identical-to-ON bytes,
+# OFF-side witnessing empty) rather than a nonzero yield no input could
+# produce through compile_rules(). See D1 in 21-01-SUMMARY.
+# ----------------------------------------------------------------------
+
+
+class TestDirbShadowMachinery:
+    """Unit-proven dirb two-leg shadow comparison over synthetic lines.
+
+    Fixture vocabulary mirrors the Phase-20 direct-drive golden
+    (``autos`` TLD-form wildcard plus covered sub, D-19-06) with one
+    unrelated same-file plain so the OFF universe carries both a
+    phase-3-owned pair and an uncoverable control.
+    """
+
+    DIRB_FIXTURE_LINES = [
+        "||*.autos^",
+        "||sub.autos^",
+        "||unrelated.xyz^",
+    ]
+
+    DIRB_WILDCARD_ONLY_LINES = ["||*.autos^"]
+
+    def _result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            return _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.DIRB_FIXTURE_LINES)),
+                Path(tmpdir),
+            )
+
+    def test_dirb_legs_keep_honest_zero_signature_on_fixture_lines(self):
+        """OFF/ON legs agree exactly with zero wcs accounting either side.
+
+        Pins the honest-zero B-signature spelling (tally == counter ==
+        removed == 0) with one claim per assert and exact equality only.
+        The covered sub never reaches the write-time probe: phase 3 owns
+        it first under tld_wildcard_covered, so both legs emit the same
+        bytes and both ledgers stay empty of the wcs family.
+        """
+        legs = self._result()
+
+        removed = set(legs.off_lines) - set(legs.on_lines)
+        added = set(legs.on_lines) - set(legs.off_lines)
+
+        # OFF output pins the phase-3-owned population
+        # (capture-not-predict under py -3.14 at authoring time).
+        assert legs.off_lines == ["||*.autos^", "||unrelated.xyz^"]
+        # OFF-identical-to-ON bytes: the flag moves nothing here.
+        assert legs.on_lines == legs.off_lines
+        # Empty diff sets, exact equality.
+        assert removed == set()
+        assert added == set()
+        # Counter pins 0 in BOTH legs.
+        assert legs.off_stats.wildcard_covered_sub_pruned == 0
+        assert legs.on_stats.wildcard_covered_sub_pruned == 0
+        # Tally == counter == removed (B3a/B3b honest-zero form).
+        assert legs.on_ledger.wcs_candidates == removed
+        assert legs.off_ledger.wcs_candidates == set()
+        assert legs.on_ledger.wcs_pairs == set()
+        assert legs.off_ledger.wcs_pairs == set()
+        on_tally = legs.on_ledger.summary()["by_reason"].get(
+            REASON_WILDCARD_COVERS_SUB, 0
+        )
+        assert on_tally == legs.on_stats.wildcard_covered_sub_pruned
+        off_tally = legs.off_ledger.summary()["by_reason"].get(
+            REASON_WILDCARD_COVERS_SUB, 0
+        )
+        assert off_tally == legs.off_stats.wildcard_covered_sub_pruned
+
+    def test_dirb_off_side_witnessing_empty_on_wildcard_only_fixture(self):
+        """A wildcard-only universe witnesses nothing on the OFF side."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.DIRB_WILDCARD_ONLY_LINES)),
+                Path(tmpdir),
+            )
+
+        assert legs.off_ledger.wcs_candidates == set()
+        assert legs.off_ledger.wcs_pairs == set()
+
+    def test_dirb_legs_clear_caches_between_legs_and_thread_the_flag(
+        self, monkeypatch
+    ):
+        """Pin the two structural contracts no yield assert can carry.
+
+        With honest-zero fixture yield the OFF/ON outputs are identical
+        whether the flag threads or is dropped (the D-21-09 fear), so
+        this twin spies the mechanism directly: ``clear_caches`` must
+        fire exactly once per run (between the legs, never inside one),
+        and the ON leg must forward ``wildcard_covers_subs_pruning=True``
+        into compile_rules while the OFF leg passes production defaults
+        with no extra kwargs. Both spies call through so behavior is
+        unperturbed.
+        """
+        module = sys.modules[__name__]
+        real_clear_caches = module.clear_caches
+        real_compile_rules = module.compile_rules
+        clear_calls: list[None] = []
+        forwarded_kwargs: list[dict[str, object]] = []
+
+        def recording_clear_caches() -> None:
+            clear_calls.append(None)
+            real_clear_caches()
+
+        def recording_compile_rules(lines, output_file, *args, **kwargs):
+            forwarded_kwargs.append(dict(kwargs))
+            return real_compile_rules(lines, output_file, *args, **kwargs)
+
+        monkeypatch.setattr(module, "clear_caches", recording_clear_caches)
+        monkeypatch.setattr(module, "compile_rules", recording_compile_rules)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.DIRB_FIXTURE_LINES)),
+                Path(tmpdir),
+            )
+
+        assert len(clear_calls) == 1
+        assert len(forwarded_kwargs) == 2
+        assert "wildcard_covers_subs_pruning" not in forwarded_kwargs[0]
+        assert forwarded_kwargs[1].get("wildcard_covers_subs_pruning") is True
+        assert legs.on_lines == legs.off_lines
+
+    def test_dirb_dataset_paths_never_reference_apex_frozen_dir(self):
+        """Dirb evidence paths stay out of the apex frozen dir (T-21-06)."""
+        assert DIRB_SHADOW_DATASET_ID == os.environ.get(
+            "DIRB_SHADOW_DATASET_ID", "dirb-shadow-v1"
+        )
+        assert "apex" not in str(DIRB_FROZEN_CORPUS_DIR)
+        assert "apex" not in str(DIRB_FROZEN_MANIFEST_PATH)
+        assert "apex" not in str(DIRB_TIMING_OFF_REPORT_PATH)
+        assert "apex" not in str(DIRB_TIMING_ON_REPORT_PATH)
