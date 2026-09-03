@@ -28,6 +28,7 @@ import pytest
 import scripts.pruning_proof
 from scripts.compiler import (
     CompileStats,
+    _build_exception_index,
     _parse_abp_rule,
     _record_proven_pruning,
     _rule_storage_key,
@@ -41,6 +42,7 @@ from scripts.pipeline import PipelineStats, _new_pipeline_stats, process_files
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
     REASON_APEX_COVERS_TLD_WILDCARD,
+    REASON_EXCEPTION_COVERED,
     REASON_KEPT_BECAUSE_UNCERTAIN,
     REASON_TLD_WILDCARD_COVERED,
     REASON_WILDCARD_COVERED,
@@ -981,6 +983,7 @@ def _drive_emission(
     proof_ledger,
     wildcard_covers_subs_pruning=False,
     apex_survivor_index=None,
+    exceptions=None,
 ):
     """One canonical direct-drive invocation of _write_output() (20-02).
 
@@ -988,11 +991,15 @@ def _drive_emission(
     utf-8 read-back) at the write seam: positional arguments follow the
     pre-wiring signature order (output_file, stats, abp_wildcards,
     pruned_abp, exceptions, other_rules, proof_ledger); the flag-era
-    kwargs ride keyword-only. Returns (rules, stats) with a fresh
+    kwargs ride keyword-only. The exception index is built via the
+    production _build_exception_index() helper exactly as compile_rules()
+    does, so drives exercise the indexed exception screen -- not the
+    legacy scan. Returns (rules, stats) with a fresh
     CompileStats per call; the caller owns the ledger so by_reason
     evidence stays inspectable after the drive.
     """
     stats = CompileStats()
+    exception_list = list(exceptions) if exceptions else []
     with tempfile.TemporaryDirectory() as tmpdir:
         output = os.path.join(tmpdir, "output.txt")
         _write_output(
@@ -1000,15 +1007,58 @@ def _drive_emission(
             stats,
             abp_wildcards,
             pruned_abp,
-            [],
+            exception_list,
             set(),
             proof_ledger,
+            exception_index=_build_exception_index(exception_list),
             wildcard_covers_subs_pruning=wildcard_covers_subs_pruning,
             apex_survivor_index=apex_survivor_index,
         )
         with open(output, encoding="utf-8") as f:
             rules = [line.strip() for line in f if line.strip()]
     return rules, stats
+
+
+class TestWcsIndexedExceptionSeam:
+    """Direct drives thread the production exception index (WR-04).
+
+    Pins the exception+wcs composition that matters for survivorship at
+    the write seam: a wildcard killed by its OWN indexed exception screen
+    never witnesses, so the bare sub survives with the wcs family silent.
+    The exact-signature exception ``@@||*.autos^$client=10.0.0.1`` screens
+    only the identical blocker (same shape as the compile-level
+    self-exception trap) -- the modifier-free sub is out of its scope, so
+    the survivor set, the exception counter, and the exact by_reason pin
+    the indexed path end to end under flag ON.
+    """
+
+    def test_indexed_self_exception_starves_witness_pool_flag_on(self):
+        """Wildcard fails indexed screen: sub survives, exact exception ledger."""
+        witness = _parse_abp_rule("||*.autos^$client=10.0.0.1")
+        assert witness is not None
+        assert witness.is_wildcard and witness.domain == "autos"  # TLD-form fixture
+        candidate = _parse_abp_rule("||sub.autos^")
+        assert candidate is not None
+        assert not candidate.is_wildcard
+        exception = _parse_abp_rule("@@||*.autos^$client=10.0.0.1")
+        assert exception is not None
+        assert exception.is_exception
+        ledger = CappedProofLedger()
+
+        rules, stats = _drive_emission(
+            {"autos": [witness]},
+            {"sub.autos": [candidate]},
+            ledger,
+            wildcard_covers_subs_pruning=True,
+            exceptions=[exception],
+        )
+
+        assert rules == ["||sub.autos^"]
+        assert stats.whitelist_conflict_pruned == 1
+        assert stats.wildcard_covered_sub_pruned == 0
+        assert ledger.summary()["by_reason"] == {REASON_EXCEPTION_COVERED: 1}
+        assert stats.total_output == stats.abp_kept + stats.other_kept
+        assert stats.total_output == 1
 
 
 class TestWcsMisKeyedWitnessSilentSkip:
