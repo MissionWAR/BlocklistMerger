@@ -4257,3 +4257,329 @@ class TestDirbPositiveControls:
         assert list(DIRB_FROZEN_CORPUS_DIR.glob("*.txt")) == []
         assert DIRB_FROZEN_CORPUS_DIR != FROZEN_CORPUS_DIR
         assert "apex" not in DIRB_SHADOW_DATASET_ID
+
+
+# ----------------------------------------------------------------------
+# Direction-B slow gate plus fixture-scale spelling twins (Phase 21 plan
+# 21-02, D-21-01 plus D-21-10 plus carried-forward D-17-08).
+#
+# TestDirbShadowEquivalence clones the apex slow-gate skeleton as a
+# sibling class with dirb deltas and executes zero corpus legs in this
+# plan: without a freeze the corpus method skips with the dirb skip
+# reason. The B1-B10 plus R1 plus literal R2 spellings live in
+# _dirb_gate_checks (exact RESEARCH spellings, no ranges or thresholds,
+# uncertain STASIS per D-21-10 refusing the stale minus-N), exercised at
+# fixture scale by the spelling twins below and at corpus scale by the
+# slow gate in the 21-03 canonical run. Manifest emission reuses the
+# shared writer under the dirb-shadow-v1 stem with report type
+# dirb_shadow_gate, verdict as FIELD, and omitted proposed_guards,
+# writing before any assert so red runs leave forensics.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.slow
+class TestDirbShadowEquivalence:
+    """Corpus-scale dirb shadow-equivalence gate over the FROZEN dataset.
+
+    Sibling to TestApexShadowEquivalence with dirb deltas: frozen-corpus
+    line streamer over DIRB_FROZEN_CORPUS_DIR in sorted order,
+    manifest-digest pin before legs, _run_dirb_corpus_legs inside a
+    temporary workdir, removed versus added set-diff opening, exact
+    B1-B10 plus R1 plus literal R2 evaluation, live-audit R1
+    reconciliation (D-21-02), always-write manifest emission under the
+    dirb-shadow-v1 stem BEFORE any assert (D-17-08), one claim per
+    assert, and informational DIRB SHADOW prints. Timing merges in
+    Task 3; until then the timing slot stays honestly null. Zero corpus
+    legs execute outside the canonical 21-03 run: without a freeze this
+    method skips.
+    """
+
+    def _frozen_corpus_lines(self):
+        """Stream frozen dataset rows lazily (denyallow-gate glob idiom)."""
+        for corpus_file in sorted(DIRB_FROZEN_CORPUS_DIR.glob("*.txt")):
+            with open(corpus_file, encoding="utf-8-sig", errors="replace") as handle:
+                yield from handle
+
+    @pytest.mark.skipif(not DIRB_FROZEN_CORPUS_PRESENT, reason=DIRB_FROZEN_SKIP_REASON)
+    def test_dirb_full_corpus_shadow_equivalence(self):
+        """Prove flag ON removes ONLY the audit-expected population at scale.
+
+        Signature elements B1-B10 assert from computed values; R1
+        reconciles the removal count against the live audit expectation
+        (D-21-02, never a constant); R2 population_nonzero is literal per
+        D-21-01 (a zero corpus reading fails reconciliation by design and
+        routes to the D-21-05 stop-and-present). The manifest is written
+        before any claim is checked so a red run leaves forensics.
+        """
+        corpus_summary = _load_frozen_corpus_summary(DIRB_FROZEN_MANIFEST_PATH)
+        corpus_entries = build_corpus_manifest(DIRB_FROZEN_CORPUS_DIR)
+        frozen_digest = manifest_digest(corpus_entries)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(self._frozen_corpus_lines, Path(tmpdir))
+
+        removed = set(legs.off_lines) - set(legs.on_lines)
+        added = set(legs.on_lines) - set(legs.off_lines)
+        on_line_set = set(legs.on_lines)
+
+        audit_expected, audit_divergences = _audit_dirb_expectation(list(legs.off_lines))
+        checks = _dirb_gate_checks(legs, audit_expected=audit_expected)
+
+        off_total_records = legs.off_ledger.summary()["total_records"]
+        on_total_records = legs.on_ledger.summary()["total_records"]
+        off_by_reason = legs.off_ledger.summary()["by_reason"]
+        on_by_reason = legs.on_ledger.summary()["by_reason"]
+
+        whitelist_off = off_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+        whitelist_on = on_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+        denyallow_off = off_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+        denyallow_on = on_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+        kept_before = off_by_reason.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+        kept_after = on_by_reason.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+
+        # B7 scan: skip EXACTLY {wcs reason, uncertain reason}; whitelist
+        # and denyallow ride their own dedicated equality claims below and
+        # trivially double-cover inside these loops.
+        skipped_reasons = {REASON_WILDCARD_COVERS_SUB, REASON_KEPT_BECAUSE_UNCERTAIN}
+        mismatches_other_buckets: list[tuple[str, str]] = []
+        for reason, off_count in off_by_reason.items():
+            if reason in skipped_reasons:
+                continue
+            if on_by_reason.get(reason, 0) != off_count:
+                mismatches_other_buckets.append(("off-to-on", reason))
+        for reason, on_count in on_by_reason.items():
+            if reason in skipped_reasons:
+                continue
+            if off_by_reason.get(reason, 0) != on_count:
+                mismatches_other_buckets.append(("on-to-off", reason))
+
+        # B8 uses the UNCAPPED pairs set -- never capped samples.
+        pairs = legs.on_ledger.wcs_pairs
+        uncovered_pairs = [
+            (candidate_rule, covering_rule)
+            for candidate_rule, covering_rule in pairs
+            if candidate_rule not in removed or covering_rule not in on_line_set
+        ]
+
+        evidence: dict[str, object] = {
+            "input_rows": legs.off_stats.total_input,
+            "added_count": len(added),
+            "removed_count": len(removed),
+            "ledger": {
+                "off_total_records": off_total_records,
+                "on_total_records": on_total_records,
+                "delta_equals_removed": on_total_records - off_total_records == len(removed),
+            },
+            "whitelist_conflict_pruned": {"off": whitelist_off, "on": whitelist_on},
+            "kept_because_uncertain": {"off": kept_before, "on": kept_after},
+            "other_buckets_stable": not mismatches_other_buckets,
+            "off_output_sha256": legs.off_output_sha256,
+            "on_output_sha256": legs.on_output_sha256,
+            "leg_seconds": {"off": legs.off_seconds, "on": legs.on_seconds},
+        }
+
+        population: dict[str, object] = {
+            "total": len(removed),
+            "audit_expected": audit_expected,
+            "audit_divergences": list(audit_divergences),
+            "samples": [
+                _capped_sample_record(record)
+                for record in legs.on_ledger.records
+                if record.reason == REASON_WILDCARD_COVERS_SUB
+            ],
+        }
+
+        corpus_block = {
+            "dir": DIRB_FROZEN_CORPUS_DIR.relative_to(REPO_ROOT).as_posix(),
+            "file_count": len(corpus_entries),
+            "total_bytes": sum(entry.byte_size for entry in corpus_entries),
+            "manifest_sha256": frozen_digest,
+            "frozen": True,
+        }
+
+        # D-17-08 WRITE-BEFORE-ASSERT: forensics land on disk first; every
+        # claim below runs only after the versioned manifest exists.
+        # proposed_guards omitted (no flip pends for B; FLIP-01 is v1.5+)
+        # so the writer emits the reserved non-binding stub; timing stays
+        # null until Task 3 wires the median helper (never a gate input).
+        verdict, manifest = _evaluate_and_write_manifest(
+            checks=checks,
+            evidence=evidence,
+            population=population,
+            output_dir=SHADOW_GATE_OUTPUT_DIR,
+            filename_stem=DIRB_SHADOW_DATASET_ID,
+            report_type="dirb_shadow_gate",
+            flags=DIRB_SHADOW_FLAGS,
+            identity=_python_identity(),
+            corpus=corpus_block,
+            timing=None,
+            source_health=corpus_summary,
+        )
+
+        assert verdict == "pass"
+
+        # B1: input identity across legs (standalone claim).
+        assert legs.off_stats.total_input == legs.on_stats.total_input
+        # B1: input sanity at corpus scale (a silently-empty frozen
+        # dataset can never masquerade as a clean gate).
+        assert legs.off_stats.total_input > 1_000_000
+        # B2: added-lines empty -- write-time prunes can only vanish.
+        assert not added
+        # B3a: removed set equals the UNCAPPED ledger witness by identity.
+        assert legs.on_ledger.wcs_candidates == removed
+        # B3b: removed count equals the paired stats counter.
+        assert legs.on_stats.wildcard_covered_sub_pruned == len(removed)
+        # B4: ON total exceeds OFF by EXACTLY the removal count -- an
+        # ON-side proven removal adds exactly one record while OFF-side
+        # write-time keeps emit nothing. Never claim totals equality.
+        assert on_total_records - off_total_records == len(removed)
+        # B5a: whitelist bucket identical across legs AND equal to each
+        # leg's own counter (three standalone claims).
+        assert whitelist_off == whitelist_on
+        assert whitelist_off == legs.off_stats.whitelist_conflict_pruned
+        assert whitelist_on == legs.on_stats.whitelist_conflict_pruned
+        # B5b: denyallow bucket identical -- both legs run production
+        # default denyallow pruning; the dirb flag is the only mover.
+        assert denyallow_off == denyallow_on
+        # B6: uncertain-keeps EQUALITY stasis (D-21-10 -- deliberately
+        # unlike a drop-by-prune-count; the stale minus-N spelling is
+        # refused per 21-RESEARCH OQ2).
+        assert kept_before == kept_after
+        # B7: every other attribution bucket byte-stable, both directions.
+        assert not mismatches_other_buckets
+        # B8a: pairing completeness -- one uncapped pair per removal.
+        assert len(pairs) == len(removed)
+        # B8b: survivor-coverer membership -- every covering member lives
+        # in the ON output set (PRUNE-02 survivor-only witnessing).
+        assert not uncovered_pairs
+        # B9: OFF-side witnessing stays empty: flag-OFF emits nothing.
+        assert legs.off_ledger.wcs_candidates == set()
+        assert legs.off_ledger.wcs_pairs == set()
+        # R1: reconciliation matches the live audit (D-21-02).
+        assert len(removed) == audit_expected
+        # R2: population nonzero (D-21-01 literal -- a zero corpus reading
+        # fails here by design and routes to stop-and-present).
+        assert len(removed) > 0
+
+        # Informational evidence block (magnitudes are calibration facts,
+        # never verdict inputs -- Pitfall 11).
+        print(f"\n[DIRB SHADOW] total_input={legs.off_stats.total_input:,}")
+        print(f"[DIRB SHADOW] removed={len(removed):,}")
+        print(
+            f"[DIRB SHADOW] audit_expected={audit_expected} "
+            f"divergences={len(audit_divergences)}"
+        )
+        for divergence in audit_divergences[:10]:
+            print(f"[DIRB SHADOW] divergence: {divergence}")
+        print(f"[DIRB SHADOW] off_output_sha256={legs.off_output_sha256[:16]}")
+        print(f"[DIRB SHADOW] on_output_sha256={legs.on_output_sha256[:16]}")
+        print(
+            f"[DIRB SHADOW] off_leg_seconds={legs.off_seconds:.1f} "
+            f"on_leg_seconds={legs.on_seconds:.1f}"
+        )
+        manifest_path = SHADOW_GATE_OUTPUT_DIR / f"{DIRB_SHADOW_DATASET_ID}.json"
+        print(f"[DIRB SHADOW] verdict={verdict} manifest={manifest_path}")
+        print("[DIRB SHADOW] timing=not measured (median wiring lands in Task 3)")
+
+
+class TestDirbShadowGateChecksSpelling:
+    """Fixture-scale twins pinning the B1-B10 plus R1 plus literal R2 spellings.
+
+    RED-first: FAILS before _dirb_gate_checks exists, PASSES after. Runs
+    the 21-01 _run_dirb_corpus_legs over the honest-zero fixture plus the
+    live _audit_dirb_expectation, then pins every checks-dict spelling
+    with exact equality. Scale-dependent keys read False here by
+    construction (3-row fixture, zero removals); the slow gate asserts
+    them True at corpus scale.
+    """
+
+    def _fixture_checks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(
+                _shadow_line_factory(list(TestDirbShadowMachinery.DIRB_FIXTURE_LINES)),
+                Path(tmpdir),
+            )
+        audit_expected, audit_divergences = _audit_dirb_expectation(list(legs.off_lines))
+        return legs, audit_expected, audit_divergences, _dirb_gate_checks(
+            legs, audit_expected=audit_expected
+        )
+
+    def test_b_spellings_hold_exact_at_fixture_scale(self):
+        """Every checks-dict spelling carries exact-equality form."""
+        _, audit_expected, audit_divergences, checks = self._fixture_checks()
+        assert audit_expected == 0
+        assert audit_divergences == []
+        assert checks["input_identity"] == (True, True)
+        assert checks["input_rows_sanity"] == (False, True)
+        assert checks["added_empty"] == (True, True)
+        assert checks["removed_equals_uncapped_tally"] == (True, True)
+        assert checks["removed_equals_counter"] == (True, True)
+        assert checks["total_records_delta_equals_removed"] == (True, True)
+        assert checks["whitelist_bucket_identical"] == (True, True)
+        assert checks["denyallow_bucket_identical"] == (True, True)
+        assert checks["uncertain_keeps_stasis"] == (True, True)
+        assert checks["other_buckets_stable_both_directions"] == (True, True)
+        assert checks["coverer_membership_complete"] == (True, True)
+        assert checks["off_side_witnessing_empty"] == (True, True)
+        assert checks["reconciliation_matches_audit"] == (True, True)
+        assert checks["population_nonzero"] == (False, True)
+
+    def test_r2_literal_fails_verdict_with_forensics_on_zero_removal(self):
+        """A zero-removal fixture run yields verdict fail, never silent pass."""
+        _, _, _, checks = self._fixture_checks()
+        assert checks["population_nonzero"] == (False, True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            verdict, manifest = _evaluate_and_write_manifest(
+                checks=checks,
+                evidence={"input_rows": 3, "removed_count": 0},
+                population={"total": 0, "audit_expected": 0, "audit_divergences": []},
+                output_dir=output_dir,
+                filename_stem="dirb-shadow-v1",
+                report_type="dirb_shadow_gate",
+                flags=DIRB_SHADOW_FLAGS,
+            )
+            assert verdict == "fail"
+            assert manifest["verdict"] == "fail"
+            assert manifest["checks"]["population_nonzero"] == {
+                "observed": False,
+                "expected": True,
+                "ok": False,
+            }
+            assert (output_dir / "dirb-shadow-v1.json").is_file()
+            assert (output_dir / "dirb-shadow-v1.md").is_file()
+
+    def test_write_before_assert_leaves_dirb_forensics_on_forced_fail(self):
+        """A forced failing check yields verdict fail with dirb siblings on disk."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            verdict, manifest = _evaluate_and_write_manifest(
+                checks={"input_identity": (1, 2)},
+                evidence={},
+                population={},
+                output_dir=output_dir,
+                filename_stem="dirb-shadow-v1",
+                report_type="dirb_shadow_gate",
+                flags=DIRB_SHADOW_FLAGS,
+            )
+            assert verdict == "fail"
+            assert manifest["verdict"] == "fail"
+            assert manifest["report_type"] == "dirb_shadow_gate"
+            assert manifest["flags"] == DIRB_SHADOW_FLAGS
+            assert (output_dir / "dirb-shadow-v1.json").is_file()
+            assert (output_dir / "dirb-shadow-v1.md").is_file()
+            md_text = (output_dir / "dirb-shadow-v1.md").read_text(encoding="utf-8")
+            assert "Dirb Shadow Gate: FAIL" in md_text
+            assert "- Verdict: fail" in md_text
+
+    def test_slow_gate_wiring_skips_without_freeze(self):
+        """The corpus method stays slow-gated on the dirb present-flag."""
+        marks = {
+            mark.name
+            for mark in (
+                TestDirbShadowEquivalence.test_dirb_full_corpus_shadow_equivalence.pytestmark
+            )
+        }
+        assert "slow" in marks
+        assert "skipif" in marks
+        assert DIRB_SHADOW_DATASET_ID in DIRB_FROZEN_SKIP_REASON
