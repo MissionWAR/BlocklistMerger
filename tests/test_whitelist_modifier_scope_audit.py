@@ -28,9 +28,11 @@ Pattern source: tests/test_cross_format_audit.py (Phase 12 audit suites).
 """
 
 import copy
+import gc
 import hashlib
 import json
 import os
+import statistics
 import sys
 import tempfile
 import time
@@ -4427,10 +4429,10 @@ class TestDirbShadowEquivalence:
     B1-B10 plus R1 plus literal R2 evaluation, live-audit R1
     reconciliation (D-21-02), always-write manifest emission under the
     dirb-shadow-v1 stem BEFORE any assert (D-17-08), one claim per
-    assert, and informational DIRB SHADOW prints. Timing merges in
-    Task 3; until then the timing slot stays honestly null. Zero corpus
-    legs execute outside the canonical 21-03 run: without a freeze this
-    method skips.
+    assert, and informational DIRB SHADOW prints. Timing merges here via
+    _dirb_timing_medians as informational-only evidence (D-21-04, never a
+    checks input). Zero corpus legs execute outside the canonical 21-03
+    run: without a freeze this method skips.
     """
 
     def _frozen_corpus_lines(self):
@@ -4539,8 +4541,20 @@ class TestDirbShadowEquivalence:
         # D-17-08 WRITE-BEFORE-ASSERT: forensics land on disk first; every
         # claim below runs only after the versioned manifest exists.
         # proposed_guards omitted (no flip pends for B; FLIP-01 is v1.5+)
-        # so the writer emits the reserved non-binding stub; timing stays
-        # null until Task 3 wires the median helper (never a gate input).
+        # so the writer emits the reserved non-binding stub. Timing merges
+        # here via _dirb_timing_medians over the same frozen dir with
+        # digest-pinned same_corpus plus determinism cross-ties plus leg
+        # seconds -- informational only, never a checks input (D-21-04).
+        timing_block = _dirb_timing_medians(
+            self._frozen_corpus_lines,
+            frozen_digest=frozen_digest,
+            corpus_dir=DIRB_FROZEN_CORPUS_DIR,
+        )
+        timing_block["cross_tie_off"] = (
+            timing_block["off"]["output_sha256"] == legs.off_output_sha256
+        )
+        timing_block["cross_tie_on"] = timing_block["on"]["output_sha256"] == legs.on_output_sha256
+        timing_block["leg_seconds"] = {"off": legs.off_seconds, "on": legs.on_seconds}
         verdict, manifest = _evaluate_and_write_manifest(
             checks=checks,
             evidence=evidence,
@@ -4551,7 +4565,7 @@ class TestDirbShadowEquivalence:
             flags=DIRB_SHADOW_FLAGS,
             identity=_python_identity(),
             corpus=corpus_block,
-            timing=None,
+            timing=timing_block,
             source_health=corpus_summary,
         )
 
@@ -4615,7 +4629,11 @@ class TestDirbShadowEquivalence:
         )
         manifest_path = SHADOW_GATE_OUTPUT_DIR / f"{DIRB_SHADOW_DATASET_ID}.json"
         print(f"[DIRB SHADOW] verdict={verdict} manifest={manifest_path}")
-        print("[DIRB SHADOW] timing=not measured (median wiring lands in Task 3)")
+        print(
+            f"[DIRB SHADOW] timing medians off={timing_block['off']['median_seconds']}s "
+            f"on={timing_block['on']['median_seconds']}s "
+            f"same_corpus={timing_block['same_corpus']}"
+        )
 
 
 class TestDirbShadowGateChecksSpelling:
@@ -4736,6 +4754,90 @@ class TestDirbShadowGateChecksSpelling:
 # caller-supplied line factory; the slow gate passes its frozen corpus
 # factory plus the pinned digest at canonical-run time.
 # ----------------------------------------------------------------------
+
+
+# D-20-04 binding: any future benchmark-CLI stamping for the wcs flag
+# belongs to the flip milestone only -- this helper must never grow a
+# benchmark surface or a compile_flags echo.
+def _dirb_timing_medians(
+    line_factory: Callable[[], Iterable[str]],
+    *,
+    frozen_digest: str,
+    corpus_dir: Path | None = None,
+    runs: int = 3,
+) -> dict[str, object]:
+    """Measure median-of-N compile cost per flag state, informational only.
+
+    Per D-21-04 plus D-21-08 plus carried-forward D-20-04: reuses the
+    median-leg hygiene (gc.collect plus clear_caches between every run,
+    perf_counter walls, per-run output sha via _streaming_sha256,
+    statistics median rounded to six decimals) with zero benchmark
+    surface -- drives compile_rules directly, never the benchmark CLI,
+    and emits no passes, bar percent, or compile-flags echo fields, so no
+    consumer can mistake timing for a gate. OFF runs at production
+    defaults; ON adds only wildcard_covers_subs_pruning=True, so the dirb
+    flag is the sole mover. Digest-pinned merge: timing_corpus_digest
+    recomputes from corpus_dir when given, else echoes frozen_digest at
+    fixture scale; same_corpus is False on any mismatch so foreign-corpus
+    evidence can never bless a manifest. Each leg's output_sha256 is the
+    LAST run's digest for the gate's determinism cross-tie.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workdir = Path(tmpdir)
+
+        def _measure(extra_kwargs: dict[str, object]) -> tuple[list[float], list[str]]:
+            durations: list[float] = []
+            shas: list[str] = []
+            for index in range(runs):
+                gc.collect()
+                clear_caches()
+                output_path = workdir / f"dirb_timing_{index}.txt"
+                start_ns = time.perf_counter_ns()
+                compile_rules(line_factory(), str(output_path), **extra_kwargs)
+                elapsed = round((time.perf_counter_ns() - start_ns) / 1_000_000_000, 6)
+                durations.append(elapsed)
+                shas.append(_streaming_sha256(output_path))
+            return durations, shas
+
+        off_durations, off_shas = _measure({})
+        on_durations, on_shas = _measure({"wildcard_covers_subs_pruning": True})
+
+    off_median = round(statistics.median(off_durations), 6)
+    on_median = round(statistics.median(on_durations), 6)
+    if off_median > 0:
+        relative_overhead: float | None = round(_overhead_percent(off_median, on_median), 2)
+    else:
+        # Zero baseline over a tiny fixture: no relative percent is
+        # definable, so the informational slot stays honestly null.
+        relative_overhead = None
+
+    if corpus_dir is not None:
+        timing_digest = manifest_digest(build_corpus_manifest(corpus_dir))
+    else:
+        timing_digest = frozen_digest
+
+    def _leg_block(durations: list[float], shas: list[str], median: float) -> dict[str, object]:
+        return {
+            "runs": runs,
+            "durations_seconds": list(durations),
+            "median_seconds": median,
+            "output_sha256_stable": len(set(shas)) == 1,
+            "output_sha256": shas[-1],
+        }
+
+    return {
+        "methodology": (
+            "in-gate median-of-N per leg over caller-supplied lines with "
+            "gc.collect plus clear_caches between every run; informational "
+            "only, never gating"
+        ),
+        "runs": runs,
+        "off": _leg_block(off_durations, off_shas, off_median),
+        "on": _leg_block(on_durations, on_shas, on_median),
+        "relative_overhead_percent": relative_overhead,
+        "timing_corpus_digest": timing_digest,
+        "same_corpus": timing_digest == frozen_digest,
+    }
 
 
 class TestDirbTimingMedians:
