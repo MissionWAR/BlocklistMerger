@@ -3433,17 +3433,30 @@ def _audit_dirb_expectation(off_lines: list[str]) -> tuple[int, list[str]]:
     candidate-witness-tld triple counts exactly what the ON leg could
     remove -- no second logic path (D-19-05). A wildcard is admitted as
     a witness only when its domain equals its own get_tld result;
-    wildcard-form plains are skipped per plain-only scope; output lines
-    that fail production parsing raise loudly instead of skipping
-    silently. audit-says-X is the live bar for the later R1
-    reconciliation owned by 21-02 (never a constant, never the
-    inherited context magnitude).
+    wildcard-form plains are skipped per plain-only scope. Output lines
+    that fail production parsing are handled by shape: ABP-shaped rows
+    (``||``/``@@||`` prefix) must always re-parse -- production only
+    writes those from parsed records, so a failure raises loudly;
+    non-ABP rows are skipped WITH record -- production preserves them
+    verbatim via other_rules (regex, decorative comments carrying ``|``
+    or ``*``), the write-time probe iterates parsed plain records only
+    and can never see them, so skipping replicates production ordering
+    exactly while the skip summary in divergences keeps the drop
+    auditable in committed forensics. audit-says-X is the live bar for
+    the later R1 reconciliation owned by 21-02 (never a constant, never
+    the inherited context magnitude).
     """
     survivors: dict[str, list] = {}
     plains: list = []
+    skipped_unparsable: list[str] = []
     for line in off_lines:
         record = _parse_abp_rule(line)
-        assert record is not None, f"audit input failed production parse: {line!r}"
+        if record is None:
+            assert not line.startswith(("||", "@@||")), (
+                f"audit input failed production parse: {line!r}"
+            )
+            skipped_unparsable.append(line)
+            continue
         if record.is_wildcard and record.domain == get_tld(record.domain):
             survivors.setdefault(record.domain, []).append(record)
         elif not record.is_wildcard:
@@ -3456,6 +3469,11 @@ def _audit_dirb_expectation(off_lines: list[str]) -> tuple[int, list[str]]:
         if witnesses and _wildcard_covers_sub(candidate, witnesses, tld) is not None:
             expected += 1
             divergences.append(candidate.rule)
+    if skipped_unparsable:
+        samples = "; ".join(skipped_unparsable[:10])
+        divergences.append(
+            f"UNPARSABLE_SKIPPED total={len(skipped_unparsable)} samples=[{samples}]"
+        )
     return expected, divergences
 
 
@@ -3951,10 +3969,19 @@ class TestDirbAuditExpectation:
         assert expected == 0
         assert divergences == []
 
-    def test_audit_raises_loudly_on_unparsable_output_line(self):
-        """Output lines that fail production parsing never skip silently."""
+    def test_audit_raises_loudly_on_unparsable_abp_shaped_line(self):
+        """ABP-shaped output that fails production parsing never skips."""
         with pytest.raises(AssertionError):
-            _audit_dirb_expectation(["||*.autos^", "this is not a rule"])
+            _audit_dirb_expectation(["||*.autos^", "||"])
+
+    def test_audit_skips_other_rules_lines_with_recorded_forensics(self):
+        """Non-ABP rows production preserves verbatim skip WITH record."""
+        expected, divergences = _audit_dirb_expectation(
+            ["||*.autos^", "||sub.autos^", "!  |", "/^regex$/"]
+        )
+        assert expected == 1
+        assert divergences[0] == "||sub.autos^"
+        assert divergences[1] == ("UNPARSABLE_SKIPPED total=2 samples=[!  |; /^regex$/]")
 
 
 class TestDirbStasisAndWriterReuse:
