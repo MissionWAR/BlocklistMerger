@@ -4729,16 +4729,22 @@ class TestDirbShadowGateChecksSpelling:
             assert "Dirb Shadow Gate: FAIL" in md_text
             assert "- Verdict: fail" in md_text
 
-    def test_slow_gate_wiring_skips_without_freeze(self):
-        """The corpus method stays slow-gated on the dirb present-flag."""
-        marks = {
+    def test_corpus_gate_stays_gated_without_freeze(self):
+        """The corpus method stays slow-gated on the dirb present-flag.
+
+        The class-level slow mark lives on the class object while the
+        skipif mark lives on the method, so both owners are pinned: the
+        skip reason must name the dirb dataset id.
+        """
+        class_marks = {mark.name for mark in getattr(TestDirbShadowEquivalence, "pytestmark", [])}
+        method_marks = {
             mark.name
             for mark in (
                 TestDirbShadowEquivalence.test_dirb_full_corpus_shadow_equivalence.pytestmark
             )
         }
-        assert "slow" in marks
-        assert "skipif" in marks
+        assert "slow" in class_marks
+        assert "skipif" in method_marks
         assert DIRB_SHADOW_DATASET_ID in DIRB_FROZEN_SKIP_REASON
 
 
