@@ -4722,3 +4722,81 @@ class TestDirbShadowGateChecksSpelling:
         assert "slow" in marks
         assert "skipif" in marks
         assert DIRB_SHADOW_DATASET_ID in DIRB_FROZEN_SKIP_REASON
+
+
+# ----------------------------------------------------------------------
+# In-gate median-of-3 timing helper (Phase 21 plan 21-02, D-21-04 plus
+# D-21-08 plus carried-forward D-20-04).
+#
+# Records cost informationally with benchmark-grade hygiene
+# (gc.collect plus clear_caches between every run, perf_counter walls,
+# per-run output sha, statistics median) and digest-pinned merge, never
+# gating the verdict and never touching benchmark.py or any
+# compile_flags surface. Drives compile_rules directly over a
+# caller-supplied line factory; the slow gate passes its frozen corpus
+# factory plus the pinned digest at canonical-run time.
+# ----------------------------------------------------------------------
+
+
+class TestDirbTimingMedians:
+    """Median-of-3 helper twins: hygiene, digest refusal, zero surface."""
+
+    TIMING_FIXTURE_LINES = [
+        "||*.autos^",
+        "||sub.autos^",
+        "||unrelated.xyz^",
+    ]
+
+    def _factory(self):
+        return _shadow_line_factory(list(self.TIMING_FIXTURE_LINES))
+
+    def test_median_helper_returns_three_runs_with_middle_median_and_stable_sha(self):
+        """Three durations per leg with the median equal to the middle value."""
+        block = _dirb_timing_medians(self._factory(), frozen_digest="fixture-scale")
+        assert block["runs"] == 3
+        assert len(block["off"]["durations_seconds"]) == 3
+        assert len(block["on"]["durations_seconds"]) == 3
+        assert block["off"]["median_seconds"] == sorted(block["off"]["durations_seconds"])[1]
+        assert block["on"]["median_seconds"] == sorted(block["on"]["durations_seconds"])[1]
+        assert block["off"]["output_sha256_stable"] is True
+        assert block["on"]["output_sha256_stable"] is True
+        assert block["same_corpus"] is True
+
+    def test_digest_mismatch_refuses_merge_with_same_corpus_false(self):
+        """Timing evidence against a foreign digest never blesses a manifest."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            corpus_dir = Path(tmpdir)
+            (corpus_dir / "a.txt").write_text("||*.autos^\n", encoding="utf-8")
+            block = _dirb_timing_medians(
+                self._factory(),
+                frozen_digest="0" * 64,
+                corpus_dir=corpus_dir,
+            )
+        assert block["same_corpus"] is False
+        assert block["timing_corpus_digest"] != "0" * 64
+
+    def test_timing_block_carries_no_gate_or_benchmark_surface(self):
+        """No passes, bar, or compile-flags echo anywhere in dirb timing."""
+        block = _dirb_timing_medians(self._factory(), frozen_digest="fixture-scale")
+        assert "passes" not in block
+        assert "bar_percent" not in block
+        assert "compile_flags" not in block
+        assert "on_compile_flags" not in block
+        assert "compile_flags" not in block["off"]
+        assert "compile_flags" not in block["on"]
+
+    def test_timing_keys_never_enter_the_verdict_checks_dict(self):
+        """A slow run can only go red via R2, never via wall-clock spread."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.TIMING_FIXTURE_LINES)),
+                Path(tmpdir),
+            )
+        checks = _dirb_gate_checks(legs, audit_expected=0)
+        block = _dirb_timing_medians(self._factory(), frozen_digest="fixture-scale")
+        assert not [name for name in checks if "timing" in name]
+        assert not (set(block) & set(checks))
+        failing = sorted(
+            name for name, (observed, expected) in checks.items() if observed != expected
+        )
+        assert failing == ["input_rows_sanity", "population_nonzero"]
