@@ -655,6 +655,64 @@ class ApexTallyingLedger(CappedProofLedger):
         )
 
 
+class WcsTallyingLedger(CappedProofLedger):
+    """CappedProofLedger that tallies every wildcard-covers-sub candidate.
+
+    Phase 21 dirb-shadow twin of ApexTallyingLedger (same
+    tally-before-delegating pattern): when an incoming decision carries
+    REASON_WILDCARD_COVERS_SUB, the candidate facet is resolved
+    eagerly and its emitted rule text joins ``wcs_candidates`` BEFORE
+    delegating to super() unchanged. Additionally records
+    ``(candidate, covering)`` normalized-rule pairs in ``wcs_pairs`` so
+    signature element B8 (survivor-coverer membership) can be asserted
+    past any sample cap -- capped samples hold at most sample_cap records
+    per bucket and are display evidence only. Both sets are uncapped but
+    bounded by the wildcard-removal population itself (tiny vs millions
+    of input rows). ``normalized_rule`` equals the exact text
+    _write_output() emits, so set identity against output-file lines is
+    sound.
+    """
+
+    def __init__(self, sample_cap: int = DEFAULT_SAMPLE_CAP) -> None:
+        super().__init__(sample_cap=sample_cap)
+        self.wcs_candidates: set[str] = set()
+        self.wcs_pairs: set[tuple[str, str]] = set()
+
+    def append_decision(
+        self,
+        *,
+        decision_id: str,
+        decision_type: str,
+        outcome: str,
+        proof_status: str,
+        reason: str,
+        candidate_factory: Callable[[], RuleFacet],
+        covering_factory: Callable[[], RuleFacet | None],
+        strict_agh_delta: str,
+        project_policy_delta: str,
+        sample_factory: Callable[[], dict[str, object] | None] | None = None,
+    ) -> None:
+        """Tally wcs candidates and pairs uncapped, then delegate unchanged."""
+        if reason == REASON_WILDCARD_COVERS_SUB:
+            candidate_rule = candidate_factory().normalized_rule
+            self.wcs_candidates.add(candidate_rule)
+            covering_facet = covering_factory()
+            if covering_facet is not None:
+                self.wcs_pairs.add((candidate_rule, covering_facet.normalized_rule))
+        super().append_decision(
+            decision_id=decision_id,
+            decision_type=decision_type,
+            outcome=outcome,
+            proof_status=proof_status,
+            reason=reason,
+            candidate_factory=candidate_factory,
+            covering_factory=covering_factory,
+            strict_agh_delta=strict_agh_delta,
+            project_policy_delta=project_policy_delta,
+            sample_factory=sample_factory,
+        )
+
+
 class ShadowComparisonResult(NamedTuple):
     """Paired flag-OFF/flag-ON compile outcomes for shadow-gate assertions.
 
@@ -3087,6 +3145,39 @@ _FROZEN_SKIP_REASON: Final[str] = (
     f"--dataset-id {APEX_SHADOW_DATASET_ID}"
 )
 
+DIRB_SHADOW_DATASET_ID: Final[str] = os.environ.get("DIRB_SHADOW_DATASET_ID", "dirb-shadow-v1")
+"""Versioned frozen-dataset id (D-17-07 pattern): env-overridable so a
+flip-day re-run writes -v2 manifests without editing this gate. The set
+stays natural-only per D-21-09 (no seeded pairs); dirb code paths never
+import apex path symbols and never write under the apex frozen dir
+(T-21-06)."""
+
+DIRB_FROZEN_CORPUS_DIR: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "frozen" / DIRB_SHADOW_DATASET_ID / "raw"
+)
+DIRB_FROZEN_MANIFEST_PATH: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "frozen" / DIRB_SHADOW_DATASET_ID / "manifest.json"
+)
+DIRB_TIMING_OFF_REPORT_PATH: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "runs" / "dirb-off.json"
+)
+DIRB_TIMING_ON_REPORT_PATH: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "runs" / "dirb-on.json"
+)
+
+DIRB_FROZEN_CORPUS_PRESENT: Final[bool] = DIRB_FROZEN_CORPUS_DIR.is_dir() and any(
+    DIRB_FROZEN_CORPUS_DIR.glob("*.txt")
+)
+
+DIRB_FROZEN_SKIP_REASON: Final[str] = (
+    f"frozen dataset reports/benchmarks/frozen/{DIRB_SHADOW_DATASET_ID}/raw is absent; "
+    "Stage-A it first: py -3.14 -m scripts.downloader --sources config/sources.txt "
+    "--outdir lists/_raw --cache .cache --health-report reports/source-health.json && "
+    "py -3.14 -m scripts.benchmark_pipeline freeze --input-dir lists/_raw "
+    "--source-health-report reports/source-health.json "
+    f"--dataset-id {DIRB_SHADOW_DATASET_ID}"
+)
+
 DEGRADED_SOURCE_STATUSES: Final[frozenset[str]] = frozenset(
     {"failed", "stale_cache", "fallback_cache"}
 )
@@ -3161,6 +3252,28 @@ class ApexCorpusLegs(NamedTuple):
     on_output_sha256: str
 
 
+class DirbCorpusLegs(NamedTuple):
+    """Paired dirb-flag legs over fixture or frozen lines plus digests.
+
+    Same 10-field shape as ApexCorpusLegs, typed to WcsTallyingLedger so
+    the uncapped ``wcs_candidates``/``wcs_pairs`` witnesses travel with
+    each leg. The shas hash each leg's real output FILE before teardown
+    for the determinism cross-tie. Fresh-iterator discipline rides
+    _compile_shadow_leg via _shadow_line_factory.
+    """
+
+    off_lines: list[str]
+    on_lines: list[str]
+    off_stats: CompileStats
+    on_stats: CompileStats
+    off_ledger: WcsTallyingLedger
+    on_ledger: WcsTallyingLedger
+    off_seconds: float
+    on_seconds: float
+    off_output_sha256: str
+    on_output_sha256: str
+
+
 def _run_apex_corpus_legs(
     line_source: Callable[[], Iterable[str]],
     workdir: Path,
@@ -3201,6 +3314,61 @@ def _run_apex_corpus_legs(
     on_output_sha256 = _streaming_sha256(on_output)
 
     return ApexCorpusLegs(
+        off_lines=off_lines,
+        on_lines=on_lines,
+        off_stats=off_stats,
+        on_stats=on_stats,
+        off_ledger=off_ledger,
+        on_ledger=on_ledger,
+        off_seconds=off_seconds,
+        on_seconds=on_seconds,
+        off_output_sha256=off_output_sha256,
+        on_output_sha256=on_output_sha256,
+    )
+
+
+def _run_dirb_corpus_legs(
+    line_source: Callable[[], Iterable[str]],
+    workdir: Path,
+) -> DirbCorpusLegs:
+    """Run the dirb OFF/ON shadow legs over caller-supplied lines in-process.
+
+    The OFF leg passes NO extra compile kwargs (production defaults:
+    denyallow_pruning=True, wildcard_apex_pruning=False,
+    wildcard_covers_subs_pruning=False); the ON leg adds ONLY
+    ``wildcard_covers_subs_pruning=True`` so the dirb flag is the sole
+    moving part (D-21-02 substrate staging). compiler.clear_caches() runs
+    BETWEEN legs because the module LRU caches are process-global and
+    conftest only clears between tests (research Pitfall 6). Each leg's
+    output FILE is hashed BEFORE ``workdir`` teardown so both digests
+    survive for the determinism cross-tie. Fresh-iterator discipline rides
+    _compile_shadow_leg via _shadow_line_factory; both legs tally through
+    WcsTallyingLedger with the shared 10,000-entry sample cap.
+    """
+    off_output = workdir / "dirb_off.txt"
+    off_stats, off_ledger, off_seconds = _compile_shadow_leg(
+        line_source,
+        off_output,
+        ledger_factory=WcsTallyingLedger,
+    )
+    off_lines = _read_output_lines(off_output)
+    off_output_sha256 = _streaming_sha256(off_output)
+
+    # Cache hygiene between legs: the ON leg must not inherit warmed
+    # domain/TLD caches from the OFF leg.
+    clear_caches()
+
+    on_output = workdir / "dirb_on.txt"
+    on_stats, on_ledger, on_seconds = _compile_shadow_leg(
+        line_source,
+        on_output,
+        ledger_factory=WcsTallyingLedger,
+        wildcard_covers_subs_pruning=True,
+    )
+    on_lines = _read_output_lines(on_output)
+    on_output_sha256 = _streaming_sha256(on_output)
+
+    return DirbCorpusLegs(
         off_lines=off_lines,
         on_lines=on_lines,
         off_stats=off_stats,
@@ -3606,13 +3774,9 @@ class TestDirbShadowMachinery:
         assert legs.off_ledger.wcs_candidates == set()
         assert legs.on_ledger.wcs_pairs == set()
         assert legs.off_ledger.wcs_pairs == set()
-        on_tally = legs.on_ledger.summary()["by_reason"].get(
-            REASON_WILDCARD_COVERS_SUB, 0
-        )
+        on_tally = legs.on_ledger.summary()["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
         assert on_tally == legs.on_stats.wildcard_covered_sub_pruned
-        off_tally = legs.off_ledger.summary()["by_reason"].get(
-            REASON_WILDCARD_COVERS_SUB, 0
-        )
+        off_tally = legs.off_ledger.summary()["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
         assert off_tally == legs.off_stats.wildcard_covered_sub_pruned
 
     def test_dirb_off_side_witnessing_empty_on_wildcard_only_fixture(self):
@@ -3626,9 +3790,7 @@ class TestDirbShadowMachinery:
         assert legs.off_ledger.wcs_candidates == set()
         assert legs.off_ledger.wcs_pairs == set()
 
-    def test_dirb_legs_clear_caches_between_legs_and_thread_the_flag(
-        self, monkeypatch
-    ):
+    def test_dirb_legs_clear_caches_between_legs_and_thread_the_flag(self, monkeypatch):
         """Pin the two structural contracts no yield assert can carry.
 
         With honest-zero fixture yield the OFF/ON outputs are identical
@@ -3671,9 +3833,7 @@ class TestDirbShadowMachinery:
 
     def test_dirb_dataset_paths_never_reference_apex_frozen_dir(self):
         """Dirb evidence paths stay out of the apex frozen dir (T-21-06)."""
-        assert DIRB_SHADOW_DATASET_ID == os.environ.get(
-            "DIRB_SHADOW_DATASET_ID", "dirb-shadow-v1"
-        )
+        assert os.environ.get("DIRB_SHADOW_DATASET_ID", "dirb-shadow-v1") == DIRB_SHADOW_DATASET_ID
         assert "apex" not in str(DIRB_FROZEN_CORPUS_DIR)
         assert "apex" not in str(DIRB_FROZEN_MANIFEST_PATH)
         assert "apex" not in str(DIRB_TIMING_OFF_REPORT_PATH)
