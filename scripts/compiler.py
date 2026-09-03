@@ -1381,7 +1381,7 @@ def _find_denyallow_covering_variant(
 def _wildcard_covers_sub(
     candidate: RuleEntry,
     witnesses: list[RuleEntry],
-    tld: str,
+    tld: str | None,
 ) -> RuleEntry | None:
     """Return the FIRST surviving wildcard variant provably covering a candidate.
 
@@ -1422,7 +1422,7 @@ def _wildcard_covers_sub(
             same-key; each witness's own TLD-form eligibility is verified
             here (leg 2) rather than assumed from the caller.
         tld: The wildcard storage key shared by the witnesses (from the
-            parse-time ``get_tld`` bucketing).
+            parse-time ``get_tld`` bucketing); None refuses coverage outright.
 
     Returns:
         The first witness passing all legs, or None when no witness provably
@@ -1436,6 +1436,8 @@ def _wildcard_covers_sub(
         so a second emission site would double-count one removal in
         two reason families (D-19-04).
     """
+    if tld is None:
+        return None
     if candidate.domain == tld or not candidate.domain.endswith("." + tld):
         return None
     for witness in witnesses:
@@ -1775,11 +1777,14 @@ def _write_output(
         for records in pruned_abp.values():
             for record in records:
                 if wcs_survivor_index is not None:
-                    witnesses = wcs_survivor_index.get(get_tld(record.domain))
+                    tld = get_tld(record.domain)
+                    if tld is None:
+                        f.write(record.rule + "\n")
+                        stats.abp_kept += 1
+                        continue
+                    witnesses = wcs_survivor_index.get(tld)
                     if witnesses:
-                        covering_wildcard = _wildcard_covers_sub(
-                            record, witnesses, get_tld(record.domain)
-                        )
+                        covering_wildcard = _wildcard_covers_sub(record, witnesses, tld)
                         if covering_wildcard is not None:
                             stats.wildcard_covered_sub_pruned += 1
                             _record_proven_pruning(
