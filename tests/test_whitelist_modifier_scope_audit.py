@@ -4284,8 +4284,22 @@ class TestDirbPositiveControls:
         assert forwarded_kwargs[1].get("wildcard_covers_subs_pruning") is True
 
     def test_frozen_set_stays_natural_only_with_no_seed_files(self):
-        """No seed text file exists under any dirb frozen path (T-21-07)."""
-        assert list(DIRB_FROZEN_CORPUS_DIR.glob("*.txt")) == []
+        """No seed text file exists under any dirb frozen path (T-21-07).
+
+        Pre-freeze this pins the empty dir; post-freeze (the 21-03
+        canonical run) the dir legitimately holds the 86 fetched natural
+        files, so the claim becomes manifest parity -- every frozen file
+        is provenance-pinned by the freezer, and any hand-planted seed
+        file would break parity (or fail validate_manifest's
+        unexpected-file check).
+        """
+        frozen_names = sorted(path.name for path in DIRB_FROZEN_CORPUS_DIR.glob("*.txt"))
+        if not DIRB_FROZEN_MANIFEST_PATH.is_file():
+            assert frozen_names == []
+        else:
+            manifest = json.loads(DIRB_FROZEN_MANIFEST_PATH.read_text(encoding="utf-8"))
+            manifest_names = sorted(source["filename"] for source in manifest["sources"])
+            assert frozen_names == manifest_names
         assert DIRB_FROZEN_CORPUS_DIR != FROZEN_CORPUS_DIR
         assert "apex" not in DIRB_SHADOW_DATASET_ID
 
