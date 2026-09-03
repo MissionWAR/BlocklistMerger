@@ -1650,11 +1650,15 @@ def _render_shadow_markdown(manifest: Mapping[str, object]) -> str:
     """
     verdict = str(manifest.get("verdict", "unknown"))
     banner = "PASS" if verdict == "pass" else "FAIL"
+    # Gate title derives from the report type so the dirb emission carries
+    # honest provenance while apex output stays byte-identical (21-02 gate
+    # emission; the default report_type keeps the apex title).
+    gate_name = "Dirb" if str(manifest.get("report_type")) == "dirb_shadow_gate" else "Apex"
     population = manifest.get("population") or {}
     buckets = population.get("buckets") or {}
 
     lines: list[str] = [
-        f"# Apex Shadow Gate: {banner}",
+        f"# {gate_name} Shadow Gate: {banner}",
         "",
         f"- Verdict: {verdict}",
         f"- Schema version: {manifest.get('schema_version')}",
@@ -1718,6 +1722,8 @@ def _evaluate_and_write_manifest(
     population: Mapping[str, object],
     output_dir: Path,
     filename_stem: str = "apex-shadow-v1",
+    report_type: str = "apex_shadow_gate",
+    flags: Mapping[str, object] | None = None,
     identity: Mapping[str, object] | None = None,
     corpus: Mapping[str, object] | None = None,
     timing: Mapping[str, object] | None = None,
@@ -1743,6 +1749,12 @@ def _evaluate_and_write_manifest(
             ONLY from this parameter plus the fixed stem (T-17-01-A).
         filename_stem: Versioned stem without extension (D-17-07;
             default ``apex-shadow-v1``, flip-day re-run writes v2).
+        report_type: Manifest report discriminator (default
+            ``apex_shadow_gate``; the 21-02 dirb gate passes
+            ``dirb_shadow_gate`` -- 21-01 staged this parameterization).
+        flags: Manifest flag-provenance block (default None keeps the
+            legacy apex flag block so apex output stays byte-identical;
+            the 21-02 dirb gate passes DIRB_SHADOW_FLAGS).
         identity: Optional provenance block (python/platform/git revision).
         corpus: Optional frozen-corpus provenance incl. manifest SHA-256.
         timing: Optional timing block; serializes as null until measured
@@ -1764,16 +1776,20 @@ def _evaluate_and_write_manifest(
 
     manifest: dict[str, object] = {
         "schema_version": SHADOW_REPORT_SCHEMA_VERSION,
-        "report_type": "apex_shadow_gate",
+        "report_type": report_type,
         "verdict": verdict,
         "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "identity": dict(identity) if identity is not None else None,
         "corpus": dict(corpus) if corpus is not None else None,
-        "flags": {
-            "denyallow_pruning": True,
-            "wildcard_apex_pruning_off": False,
-            "wildcard_apex_pruning_on": True,
-        },
+        "flags": (
+            dict(flags)
+            if flags is not None
+            else {
+                "denyallow_pruning": True,
+                "wildcard_apex_pruning_off": False,
+                "wildcard_apex_pruning_on": True,
+            }
+        ),
         "signature": dict(evidence),
         "population": dict(population),
         "checks": evaluated_checks,
@@ -3186,6 +3202,19 @@ DIRB_FROZEN_SKIP_REASON: Final[str] = (
     f"--dataset-id {DIRB_SHADOW_DATASET_ID}"
 )
 
+DIRB_SHADOW_FLAGS: Final[dict[str, object]] = {
+    "denyallow_pruning": True,
+    "wildcard_apex_pruning": False,
+    "wildcard_covers_subs_pruning_off": False,
+    "wildcard_covers_subs_pruning_on": True,
+}
+"""Manifest flag-provenance block for the dirb gate (21-02 emission).
+
+Mirrors the RESEARCH dirb manifest skeleton: both legs run production
+defaults except the ON leg adding only wildcard_covers_subs_pruning, so
+the dirb flag is the sole mover. Passed as the writer's ``flags`` arg;
+apex callers omit it and keep the legacy apex block byte-identical."""
+
 DEGRADED_SOURCE_STATUSES: Final[frozenset[str]] = frozenset(
     {"failed", "stale_cache", "fallback_cache"}
 )
@@ -4277,6 +4306,116 @@ class TestDirbPositiveControls:
 # ----------------------------------------------------------------------
 
 
+def _dirb_gate_checks(
+    legs: DirbCorpusLegs,
+    *,
+    audit_expected: int,
+) -> dict[str, tuple[object, object]]:
+    """Evaluate the B1-B10 plus R1 plus literal R2 signature spellings.
+
+    Exact RESEARCH spellings with one claim per key and no ranges or
+    thresholds anywhere: input identity plus input rows sanity over one
+    million, added empty, removed equals uncapped tally, removed equals
+    wildcard_covered_sub_pruned counter, total_records delta equals
+    removed, whitelist identical across legs and equal to each leg's
+    by_reason tally, denyallow identical, uncertain STASIS, other-buckets
+    stable both directions skipping exactly the wcs plus uncertain
+    reasons, coverer membership complete over uncapped wcs_pairs,
+    OFF-side witnessing empty, R1 reconciliation of removed count against
+    the live audit expectation (D-21-02, never a constant), R2
+    population_nonzero literal (D-21-01 -- a zero corpus reading fails
+    reconciliation by design). B10 determinism rides the timing block's
+    sha-stability plus the evidence shas, deliberately NOT a checks key:
+    timing never gates per D-21-04. Shared by the fixture-scale spelling
+    twins and the corpus-scale slow gate so both pin one signature.
+    """
+    removed = set(legs.off_lines) - set(legs.on_lines)
+    added = set(legs.on_lines) - set(legs.off_lines)
+    on_line_set = set(legs.on_lines)
+
+    off_total_records = legs.off_ledger.summary()["total_records"]
+    on_total_records = legs.on_ledger.summary()["total_records"]
+    off_by_reason = legs.off_ledger.summary()["by_reason"]
+    on_by_reason = legs.on_ledger.summary()["by_reason"]
+
+    whitelist_off = off_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+    whitelist_on = on_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+    denyallow_off = off_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+    denyallow_on = on_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+    kept_before = off_by_reason.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+    kept_after = on_by_reason.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+
+    skipped_reasons = {REASON_WILDCARD_COVERS_SUB, REASON_KEPT_BECAUSE_UNCERTAIN}
+    mismatches_other_buckets: list[tuple[str, str]] = []
+    for reason, off_count in off_by_reason.items():
+        if reason in skipped_reasons:
+            continue
+        if on_by_reason.get(reason, 0) != off_count:
+            mismatches_other_buckets.append(("off-to-on", reason))
+    for reason, on_count in on_by_reason.items():
+        if reason in skipped_reasons:
+            continue
+        if off_by_reason.get(reason, 0) != on_count:
+            mismatches_other_buckets.append(("on-to-off", reason))
+
+    pairs = legs.on_ledger.wcs_pairs
+    uncovered_pairs = [
+        (candidate_rule, covering_rule)
+        for candidate_rule, covering_rule in pairs
+        if candidate_rule not in removed or covering_rule not in on_line_set
+    ]
+
+    return {
+        "input_identity": (
+            legs.off_stats.total_input == legs.on_stats.total_input,
+            True,
+        ),
+        "input_rows_sanity": (legs.off_stats.total_input > 1_000_000, True),
+        "added_empty": (added == set(), True),
+        "removed_equals_uncapped_tally": (
+            legs.on_ledger.wcs_candidates == removed,
+            True,
+        ),
+        "removed_equals_counter": (
+            legs.on_stats.wildcard_covered_sub_pruned == len(removed),
+            True,
+        ),
+        "total_records_delta_equals_removed": (
+            on_total_records - off_total_records == len(removed),
+            True,
+        ),
+        "whitelist_bucket_identical": (
+            (
+                whitelist_off == whitelist_on
+                and whitelist_off == legs.off_stats.whitelist_conflict_pruned
+                and whitelist_on == legs.on_stats.whitelist_conflict_pruned
+            ),
+            True,
+        ),
+        "denyallow_bucket_identical": (denyallow_off == denyallow_on, True),
+        # B6 STASIS per D-21-10: the uncertain recorder is reachable only
+        # from the flag-independent phase-3 site, so tallies are identical
+        # across legs. The stale v1.4 "uncertain delta == -N" spelling is
+        # explicitly refused (21-RESEARCH OQ2): it asserts a delta the code
+        # cannot produce.
+        "uncertain_keeps_stasis": (kept_before == kept_after, True),
+        "other_buckets_stable_both_directions": (
+            mismatches_other_buckets == [],
+            True,
+        ),
+        "coverer_membership_complete": (
+            len(pairs) == len(removed) and not uncovered_pairs,
+            True,
+        ),
+        "off_side_witnessing_empty": (
+            legs.off_ledger.wcs_candidates == set() and legs.off_ledger.wcs_pairs == set(),
+            True,
+        ),
+        "reconciliation_matches_audit": (len(removed) == audit_expected, True),
+        "population_nonzero": (len(removed) > 0, True),
+    }
+
+
 @pytest.mark.slow
 class TestDirbShadowEquivalence:
     """Corpus-scale dirb shadow-equivalence gate over the FROZEN dataset.
@@ -4465,10 +4604,7 @@ class TestDirbShadowEquivalence:
         # never verdict inputs -- Pitfall 11).
         print(f"\n[DIRB SHADOW] total_input={legs.off_stats.total_input:,}")
         print(f"[DIRB SHADOW] removed={len(removed):,}")
-        print(
-            f"[DIRB SHADOW] audit_expected={audit_expected} "
-            f"divergences={len(audit_divergences)}"
-        )
+        print(f"[DIRB SHADOW] audit_expected={audit_expected} divergences={len(audit_divergences)}")
         for divergence in audit_divergences[:10]:
             print(f"[DIRB SHADOW] divergence: {divergence}")
         print(f"[DIRB SHADOW] off_output_sha256={legs.off_output_sha256[:16]}")
@@ -4500,8 +4636,11 @@ class TestDirbShadowGateChecksSpelling:
                 Path(tmpdir),
             )
         audit_expected, audit_divergences = _audit_dirb_expectation(list(legs.off_lines))
-        return legs, audit_expected, audit_divergences, _dirb_gate_checks(
-            legs, audit_expected=audit_expected
+        return (
+            legs,
+            audit_expected,
+            audit_divergences,
+            _dirb_gate_checks(legs, audit_expected=audit_expected),
         )
 
     def test_b_spellings_hold_exact_at_fixture_scale(self):
