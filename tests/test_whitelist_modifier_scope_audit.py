@@ -3923,3 +3923,126 @@ class TestDirbAuditExpectation:
         """Output lines that fail production parsing never skip silently."""
         with pytest.raises(AssertionError):
             _audit_dirb_expectation(["||*.autos^", "this is not a rule"])
+
+
+class TestDirbStasisAndWriterReuse:
+    """Uncertain STASIS twin plus staged writer-reuse proof (21-01 Task 3).
+
+    RED rationale (no implementation surface exists in this task -- both
+    twins pin behavior over Task-1 machinery, so the RED state is the
+    twins' absence): the STASIS spelling below is asserted as strict
+    equality because the stale minus-N delta cannot be produced by the
+    code -- _record_uncertain_keep is reachable only from the
+    flag-independent phase-3 site -- and a minus-N twin would fail for
+    that mechanism reason (21-RESEARCH OQ2, D-21-10).
+    """
+
+    DIRB_UNCERTAIN_LINES = [
+        "||*.com^",
+        "||foo.com^$important",
+    ]
+
+    def _legs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            return _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.DIRB_UNCERTAIN_LINES)),
+                Path(tmpdir),
+            )
+
+    # 21-02 S7 shape note: the slow gate's other-buckets stability scan
+    # skips EXACTLY {REASON_WILDCARD_COVERS_SUB,
+    # REASON_KEPT_BECAUSE_UNCERTAIN}; whitelist and denyallow ride their
+    # own dedicated equality claims below (no slow gate is built here).
+    def test_dirb_uncertain_keeps_hold_stasis_across_legs(self):
+        """Uncertain keeps are identical across OFF/ON legs (D-21-10).
+
+        Asserts strict equality, never a minus-N delta (the stale v1.4
+        spec spelling refused per 21-RESEARCH OQ2). The fixture
+        exercises the uncertain path with exactly one uncertain keep per
+        leg (capture-not-predict under py -3.14 at authoring time).
+        """
+        legs = self._legs()
+        off_uncertain = legs.off_ledger.summary()["by_reason"].get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+        on_uncertain = legs.on_ledger.summary()["by_reason"].get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+        assert off_uncertain == 1
+        assert on_uncertain == off_uncertain
+
+    def test_dirb_manifest_writer_round_trip_under_dirb_stem(self):
+        """Reused writer emits dirb-stem JSON plus MD with a verdict FIELD.
+
+        Calls the existing _evaluate_and_write_manifest verbatim (no new
+        writer logic, staged D-17-08): all-ok checks round-trip
+        identically through JSON and MD with observed-expected-ok
+        entries. Staging note: the shared writer stamps its own
+        report_type/title values, so this twin pins FIELD presence (not
+        the dirb-specific strings) -- the dirb report_type
+        parameterization belongs to 21-02's gate emission, which may
+        extend the writer then.
+        """
+        checks: dict[str, tuple[object, object]] = {
+            "input_identity": (3 == 3, True),
+            "added_empty": (set() == set(), True),
+        }
+        evidence: dict[str, object] = {"input_rows": 3, "removed_count": 0}
+        population: dict[str, object] = {
+            "total": 0,
+            "audit_expected": 0,
+            "audit_divergences": [],
+        }
+        corpus: dict[str, object] = {
+            "dir": "reports/benchmarks/frozen/dirb-shadow-v1/raw",
+            "manifest_sha256": "0" * 64,
+            "frozen": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            verdict, manifest = _evaluate_and_write_manifest(
+                checks=checks,
+                evidence=evidence,
+                population=population,
+                output_dir=output_dir,
+                filename_stem="dirb-shadow-v1",
+                corpus=corpus,
+            )
+            json_path = output_dir / "dirb-shadow-v1.json"
+            md_path = output_dir / "dirb-shadow-v1.md"
+            assert json_path.is_file()
+            assert md_path.is_file()
+            assert verdict == "pass"
+            assert manifest["verdict"] == "pass"
+            assert manifest["schema_version"] == SHADOW_REPORT_SCHEMA_VERSION
+            assert "report_type" in manifest
+            assert manifest["corpus"] == corpus
+            assert manifest["checks"]["input_identity"] == {
+                "observed": True,
+                "expected": True,
+                "ok": True,
+            }
+            with open(json_path, encoding="utf-8") as handle:
+                assert json.load(handle) == manifest
+            assert "- Verdict: pass" in md_path.read_text(encoding="utf-8")
+
+    def test_dirb_manifest_writer_leaves_forensics_on_failing_check(self):
+        """A forced failing check yields verdict fail with files on disk."""
+        checks: dict[str, tuple[object, object]] = {
+            "input_identity": (3, 3),
+            "population_nonzero": (0, 1),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            verdict, manifest = _evaluate_and_write_manifest(
+                checks=checks,
+                evidence={},
+                population={},
+                output_dir=output_dir,
+                filename_stem="dirb-shadow-v1",
+            )
+            assert verdict == "fail"
+            assert manifest["verdict"] == "fail"
+            assert manifest["checks"]["population_nonzero"] == {
+                "observed": 0,
+                "expected": 1,
+                "ok": False,
+            }
+            assert (output_dir / "dirb-shadow-v1.json").is_file()
+            assert (output_dir / "dirb-shadow-v1.md").is_file()
