@@ -1429,10 +1429,12 @@ def _wildcard_covers_sub(
         covers the candidate.
 
     Note:
-        Intentionally UNCALLED by production code in this milestone: the
-        Phase 20 write-time emission site is this helper's future consumer.
-        Wiring it earlier would break the byte-identity guarantee, so do not
-        add callers casually.
+        Sole production caller is the write-time emission site in
+        `_write_output()` (Direction-B, flagged by
+        `wildcard_covers_subs_pruning`). Do not add other callers:
+        compile-level yield is structurally zero (Phase 3 superset),
+        so a second emission site would double-count one removal in
+        two reason families (D-19-04).
     """
     if candidate.domain == tld or not candidate.domain.endswith("." + tld):
         return None
