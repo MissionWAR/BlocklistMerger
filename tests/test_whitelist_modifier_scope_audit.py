@@ -46,6 +46,7 @@ from scripts.compiler import (
     CompileStats,
     _parse_abp_rule,
     _wildcard_covers_sub,
+    _write_output,
     clear_caches,
     compile_rules,
     get_tld,
@@ -4068,6 +4069,92 @@ class TestDirbStasisAndWriterReuse:
 # below); the corpus-leg kwargs spy proves flag threading at compile
 # level where outputs are identical.
 # ----------------------------------------------------------------------
+
+
+class DirbSeedDrive(NamedTuple):
+    """One direct-drive seed pair outcome under both flag states."""
+
+    off_lines: list[str]
+    on_lines: list[str]
+    off_stats: CompileStats
+    on_stats: CompileStats
+    off_ledger: WcsTallyingLedger
+    on_ledger: WcsTallyingLedger
+
+
+def _dirb_seed_storages(
+    wildcard_text: str,
+    plain_text: str,
+) -> tuple[dict[str, list], dict[str, list]]:
+    """Build builder-contract storages for one seed pair.
+
+    Records come strictly from production _parse_abp_rule; the wildcard
+    storage key derives from production get_tld with TLD-form admission
+    (mirroring the audit helper), and the plain key is the record's own
+    domain (the write-time probe re-derives the witness key itself, so
+    the plain key never influences coverage).
+    """
+    witness = _parse_abp_rule(wildcard_text)
+    candidate = _parse_abp_rule(plain_text)
+    assert witness is not None and candidate is not None
+    witness_key = get_tld(witness.domain)
+    assert witness_key is not None and witness.domain == witness_key
+    assert witness.is_wildcard and not candidate.is_wildcard
+    return ({witness_key: [witness]}, {candidate.domain: [candidate]})
+
+
+def _drive_dirb_seed(wildcard_text: str, plain_text: str) -> DirbSeedDrive:
+    """Drive one seed pair through _write_output() under both flag states.
+
+    Direct-drive form per D-21-09 (NOT the superseded corpus-embedded
+    form): compile_rules() cannot yield nonzero wcs removals (phase-3
+    superset), so the mechanism proof drives the wired site directly with
+    WcsTallyingLedger witnesses. clear_caches() runs between drives
+    because the module LRU caches are process-global (Pitfall 6).
+    """
+    abp_wildcards, pruned_abp = _dirb_seed_storages(wildcard_text, plain_text)
+
+    clear_caches()
+    off_stats = CompileStats()
+    off_ledger = WcsTallyingLedger()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        off_output = Path(tmpdir) / "seed_off.txt"
+        _write_output(
+            str(off_output),
+            off_stats,
+            abp_wildcards,
+            pruned_abp,
+            [],
+            set(),
+            off_ledger,
+        )
+        off_lines = _read_output_lines(off_output)
+
+    clear_caches()
+    on_stats = CompileStats()
+    on_ledger = WcsTallyingLedger()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        on_output = Path(tmpdir) / "seed_on.txt"
+        _write_output(
+            str(on_output),
+            on_stats,
+            abp_wildcards,
+            pruned_abp,
+            [],
+            set(),
+            on_ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+        on_lines = _read_output_lines(on_output)
+
+    return DirbSeedDrive(
+        off_lines=off_lines,
+        on_lines=on_lines,
+        off_stats=off_stats,
+        on_stats=on_stats,
+        off_ledger=off_ledger,
+        on_ledger=on_ledger,
+    )
 
 
 class TestDirbPositiveControls:
