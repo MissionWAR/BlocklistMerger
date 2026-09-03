@@ -4046,3 +4046,127 @@ class TestDirbStasisAndWriterReuse:
             }
             assert (output_dir / "dirb-shadow-v1.json").is_file()
             assert (output_dir / "dirb-shadow-v1.md").is_file()
+
+
+# ----------------------------------------------------------------------
+# Direction-B positive controls (Phase 21 plan 21-02, D-21-09).
+#
+# Seeds-as-legs form (NOT the superseded D-21-07 corpus-embedded form):
+# corpus-embedded seeds are unimplementable through compile_rules() --
+# phase 3 proves coverage with the bare oracle over a strict superset of
+# any write-time survivor pool, so any seed the probe would accept is
+# eaten by phase 3 first under tld_wildcard_covered and never reaches the
+# probe (21-01 D1, superset theorem). The 2-3 seeds below therefore live
+# as direct-drive _write_output() legs built through production
+# _parse_abp_rule plus production get_tld key derivation over real public
+# suffixes (autos vocabulary, D-19-06), with clearly marked synthetic ids:
+# s1 bare wildcard-plus-plain, s2 scoped-modifier pair exercising the
+# modifier_scope_covers oracle path, s3 deep-sub depth proof. OFF keeps
+# both lines with counter 0 and empty wcs sets; ON removes exactly the
+# seed plain with counter 1, uncapped tally equality, single-family ledger
+# EXACT, and paired totals. The frozen set stays natural-only (guard
+# below); the corpus-leg kwargs spy proves flag threading at compile
+# level where outputs are identical.
+# ----------------------------------------------------------------------
+
+
+class TestDirbPositiveControls:
+    """Direct-drive seed legs proving the probe fires, plus threading spy.
+
+    Corpus-scale threading distinguisher for the 21-03 close: seed legs
+    green plus audit zero plus R1 match resolves to honest zero for the
+    21-03 close, seed legs green plus audit nonzero plus R1 mismatch
+    resolves to mechanism divergence for investigation, seed legs red
+    resolves to harness break requiring fix and re-run.
+    """
+
+    # Seed ids are synthetic by construction (clearly marked); the frozen
+    # set stays natural-only (see the natural-only guard below).
+    S1_WILDCARD = "||*.autos^"  # synthetic seed s1 witness (bare)
+    S1_PLAIN = "||sub.autos^"  # synthetic seed s1 candidate (bare)
+    S2_WILDCARD = "||*.autos^$client=10.0.0.1"  # synthetic s2 witness (scoped)
+    S2_PLAIN = "||sub.autos^$client=10.0.0.1"  # synthetic s2 candidate (scoped)
+    S3_WILDCARD = "||*.autos^"  # synthetic seed s3 witness (bare)
+    S3_PLAIN = "||b.a.autos^"  # synthetic seed s3 candidate (deep sub)
+
+    def test_s1_bare_pair_off_keeps_both_with_zero_accounting(self):
+        """OFF leg writes both seed lines with zero wcs accounting."""
+        drive = _drive_dirb_seed(self.S1_WILDCARD, self.S1_PLAIN)
+        assert drive.off_lines == [self.S1_WILDCARD, self.S1_PLAIN]
+        assert drive.off_stats.wildcard_covered_sub_pruned == 0
+        assert drive.off_ledger.wcs_candidates == set()
+        assert drive.off_ledger.wcs_pairs == set()
+        assert drive.off_ledger.summary()["by_reason"] == {}
+
+    def test_s1_bare_pair_on_removes_plain_with_exact_single_family(self):
+        """ON leg removes exactly the seed plain with 1:1 ledger exactness."""
+        drive = _drive_dirb_seed(self.S1_WILDCARD, self.S1_PLAIN)
+        assert drive.on_lines == [self.S1_WILDCARD]
+        assert drive.on_stats.wildcard_covered_sub_pruned == 1
+        assert drive.on_ledger.wcs_candidates == {self.S1_PLAIN}
+        assert drive.on_ledger.wcs_pairs == {(self.S1_PLAIN, self.S1_WILDCARD)}
+        on_tally = drive.on_ledger.summary()["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert on_tally == drive.on_stats.wildcard_covered_sub_pruned
+        assert drive.on_ledger.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 1}
+        assert drive.on_stats.total_output == drive.on_stats.abp_kept + drive.on_stats.other_kept
+        assert drive.on_stats.total_output == 1
+
+    def test_s2_scoped_modifier_pair_proves_oracle_path_at_direct_drive_scale(self):
+        """Scoped witness plus matching scoped plain exercises the oracle path."""
+        drive = _drive_dirb_seed(self.S2_WILDCARD, self.S2_PLAIN)
+        assert drive.off_lines == [self.S2_WILDCARD, self.S2_PLAIN]
+        assert drive.off_stats.wildcard_covered_sub_pruned == 0
+        assert drive.on_lines == [self.S2_WILDCARD]
+        assert drive.on_stats.wildcard_covered_sub_pruned == 1
+        assert drive.on_ledger.wcs_candidates == {self.S2_PLAIN}
+        assert drive.on_ledger.wcs_pairs == {(self.S2_PLAIN, self.S2_WILDCARD)}
+        assert drive.on_ledger.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 1}
+        assert drive.on_stats.total_output == 1
+
+    def test_s3_deep_sub_pair_removes_on_with_exact_pairing(self):
+        """Depth does not shield a plain from a same-key TLD witness."""
+        drive = _drive_dirb_seed(self.S3_WILDCARD, self.S3_PLAIN)
+        assert drive.off_lines == [self.S3_WILDCARD, self.S3_PLAIN]
+        assert drive.off_stats.wildcard_covered_sub_pruned == 0
+        assert drive.on_lines == [self.S3_WILDCARD]
+        assert drive.on_stats.wildcard_covered_sub_pruned == 1
+        assert drive.on_ledger.wcs_candidates == {self.S3_PLAIN}
+        assert drive.on_ledger.wcs_pairs == {(self.S3_PLAIN, self.S3_WILDCARD)}
+        assert drive.on_ledger.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 1}
+        assert drive.on_stats.total_output == 1
+
+    def test_corpus_leg_forwards_flag_kwarg_into_compile_rules(self, monkeypatch):
+        """Spy proving the ON corpus leg threads the flag (D-21-09 fear).
+
+        With honest-zero fixture yield the OFF/ON outputs are identical
+        whether the flag threads or is dropped, so only a kwargs spy can
+        distinguish threaded from dropped: the OFF leg must pass
+        production defaults with no extra kwarg (negative control) while
+        the ON leg must forward wildcard_covers_subs_pruning=True. A
+        dropped kwarg turns the second claim red.
+        """
+        module = sys.modules[__name__]
+        real_compile_rules = module.compile_rules
+        forwarded_kwargs: list[dict[str, object]] = []
+
+        def recording_compile_rules(lines, output_file, *args, **kwargs):
+            forwarded_kwargs.append(dict(kwargs))
+            return real_compile_rules(lines, output_file, *args, **kwargs)
+
+        monkeypatch.setattr(module, "compile_rules", recording_compile_rules)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _run_dirb_corpus_legs(
+                _shadow_line_factory([self.S1_WILDCARD, self.S1_PLAIN]),
+                Path(tmpdir),
+            )
+
+        assert len(forwarded_kwargs) == 2
+        assert "wildcard_covers_subs_pruning" not in forwarded_kwargs[0]
+        assert forwarded_kwargs[1].get("wildcard_covers_subs_pruning") is True
+
+    def test_frozen_set_stays_natural_only_with_no_seed_files(self):
+        """No seed text file exists under any dirb frozen path (T-21-07)."""
+        assert list(DIRB_FROZEN_CORPUS_DIR.glob("*.txt")) == []
+        assert DIRB_FROZEN_CORPUS_DIR != FROZEN_CORPUS_DIR
+        assert "apex" not in DIRB_SHADOW_DATASET_ID
