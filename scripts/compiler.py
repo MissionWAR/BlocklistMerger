@@ -1776,6 +1776,13 @@ def _write_output(
 
         for records in pruned_abp.values():
             for record in records:
+                if record.is_wildcard:
+                    # Direction-B scope (PRUNE-02): the probe covers plain
+                    # subdomain records only, per the flag contract; wildcard
+                    # candidates keep via write+bump with no probe.
+                    f.write(record.rule + "\n")
+                    stats.abp_kept += 1
+                    continue
                 if wcs_survivor_index is not None:
                     tld = get_tld(record.domain)
                     if tld is None:

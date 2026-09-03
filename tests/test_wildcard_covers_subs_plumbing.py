@@ -1126,6 +1126,42 @@ class TestWcsMisKeyedWitnessSilentSkip:
         assert stats.total_output == 2
 
 
+class TestWcsWildcardCandidateKeep:
+    """Loop-B probes PLAIN candidates only -- wildcard candidates keep untouched.
+
+    The flag docstring promises "every plain subdomain record is additionally
+    proven" and the helper types its candidate as a plain blocking rule, so a
+    non-TLD wildcard sitting in pruned_abp (here ``||*.sub.autos^`` keyed via
+    the production ``_rule_storage_key``) must keep via write+bump with no
+    probe: both lines written, counter 0, by_reason exactly empty under flag
+    ON. Without the guard the same-key probe would fire and prune it.
+    """
+
+    def test_wildcard_candidate_survives_probe_untouched_flag_on(self):
+        """Non-TLD wildcard candidate keeps with zero counter/ledger movement."""
+        witness = _parse_abp_rule("||*.autos^")
+        assert witness is not None
+        assert witness.is_wildcard and witness.domain == "autos"  # TLD-form fixture
+        candidate = _parse_abp_rule("||*.sub.autos^")
+        assert candidate is not None
+        assert candidate.is_wildcard  # non-TLD wildcard: out of probe scope
+        assert get_tld(candidate.domain) == "autos"  # same key: probe fires unguarded
+        ledger = CappedProofLedger()
+
+        rules, stats = _drive_emission(
+            {"autos": [witness]},
+            {_rule_storage_key(candidate): [candidate]},
+            ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+
+        assert rules == ["||*.autos^", "||*.sub.autos^"]
+        assert stats.wildcard_covered_sub_pruned == 0
+        assert ledger.summary()["by_reason"] == {}
+        assert stats.total_output == stats.abp_kept + stats.other_kept
+        assert stats.total_output == 2
+
+
 class TestWcsFailedProofSilentKeep:
     """D-20-02 FINAL call: failed proofs KEEP silently -- ZERO ledger noise.
 
