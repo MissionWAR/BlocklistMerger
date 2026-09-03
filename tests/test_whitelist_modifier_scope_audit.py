@@ -42,7 +42,14 @@ from typing import Final, NamedTuple
 import pytest
 
 from scripts.benchmark import _python_identity, build_corpus_manifest, manifest_digest
-from scripts.compiler import CompileStats, clear_caches, compile_rules
+from scripts.compiler import (
+    CompileStats,
+    _parse_abp_rule,
+    _wildcard_covers_sub,
+    clear_caches,
+    compile_rules,
+    get_tld,
+)
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
     OUTCOME_KEPT,
@@ -3382,6 +3389,44 @@ def _run_dirb_corpus_legs(
     )
 
 
+def _audit_dirb_expectation(off_lines: list[str]) -> tuple[int, list[str]]:
+    """Derive the live wcs removal expectation from OFF-leg output (D-21-02).
+
+    Dedicated scan over the OFF-leg output universe, replicating
+    production ordering exactly: the OFF output IS the post-legacy
+    post-survivorship universe (phase 3 ate first, only shipped
+    wildcards witness, plain-only scope holds), so partitioning its
+    surviving TLD-form wildcards versus surviving plains and probing
+    every surviving plain with the real _wildcard_covers_sub
+    candidate-witness-tld triple counts exactly what the ON leg could
+    remove -- no second logic path (D-19-05). A wildcard is admitted as
+    a witness only when its domain equals its own get_tld result;
+    wildcard-form plains are skipped per plain-only scope; output lines
+    that fail production parsing raise loudly instead of skipping
+    silently. audit-says-X is the live bar for the later R1
+    reconciliation owned by 21-02 (never a constant, never the
+    inherited context magnitude).
+    """
+    survivors: dict[str, list] = {}
+    plains: list = []
+    for line in off_lines:
+        record = _parse_abp_rule(line)
+        assert record is not None, f"audit input failed production parse: {line!r}"
+        if record.is_wildcard and record.domain == get_tld(record.domain):
+            survivors.setdefault(record.domain, []).append(record)
+        elif not record.is_wildcard:
+            plains.append(record)
+    expected = 0
+    divergences: list[str] = []
+    for candidate in plains:
+        tld = get_tld(candidate.domain)
+        witnesses = survivors.get(tld) if tld is not None else None
+        if witnesses and _wildcard_covers_sub(candidate, witnesses, tld) is not None:
+            expected += 1
+            divergences.append(candidate.rule)
+    return expected, divergences
+
+
 @pytest.mark.slow
 class TestApexShadowEquivalence:
     """SAFE-03 production-flip gate over the FROZEN apex-shadow dataset.
@@ -3864,17 +3909,13 @@ class TestDirbAuditExpectation:
 
     def test_audit_counts_single_covered_plain_with_divergence_text(self):
         """One surviving witness plus one covered plain yields 1."""
-        expected, divergences = _audit_dirb_expectation(
-            list(self.AUDIT_SINGLE_PROOF_LINES)
-        )
+        expected, divergences = _audit_dirb_expectation(list(self.AUDIT_SINGLE_PROOF_LINES))
         assert expected == 1
         assert divergences == ["||sub.autos^"]
 
     def test_audit_zero_universe_yields_zero_with_empty_divergences(self):
         """Wildcards without same-key plains plus skipped forms yield 0."""
-        expected, divergences = _audit_dirb_expectation(
-            list(self.AUDIT_KNOWN_ZERO_LINES)
-        )
+        expected, divergences = _audit_dirb_expectation(list(self.AUDIT_KNOWN_ZERO_LINES))
         assert expected == 0
         assert divergences == []
 
