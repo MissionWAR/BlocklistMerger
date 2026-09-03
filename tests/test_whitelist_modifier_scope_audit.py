@@ -3838,3 +3838,47 @@ class TestDirbShadowMachinery:
         assert "apex" not in str(DIRB_FROZEN_MANIFEST_PATH)
         assert "apex" not in str(DIRB_TIMING_OFF_REPORT_PATH)
         assert "apex" not in str(DIRB_TIMING_ON_REPORT_PATH)
+
+
+class TestDirbAuditExpectation:
+    """Fast unit twins for the audit-first expectation helper (D-21-02).
+
+    The helper derives its count from the OFF-leg output universe with
+    the production oracle, so these twins feed it hand-built universes
+    (capture-not-predict literals under py -3.14 at authoring time) and
+    pin exact counts plus divergence texts -- never ranges, never a
+    hardcoded yield constant.
+    """
+
+    AUDIT_SINGLE_PROOF_LINES = [
+        "||*.autos^",
+        "||sub.autos^",
+        "||unrelated.xyz^",
+    ]
+
+    AUDIT_KNOWN_ZERO_LINES = [
+        "||*.autos^",
+        "||*.sub.autos^",
+        "||lonely.buzz^",
+    ]
+
+    def test_audit_counts_single_covered_plain_with_divergence_text(self):
+        """One surviving witness plus one covered plain yields 1."""
+        expected, divergences = _audit_dirb_expectation(
+            list(self.AUDIT_SINGLE_PROOF_LINES)
+        )
+        assert expected == 1
+        assert divergences == ["||sub.autos^"]
+
+    def test_audit_zero_universe_yields_zero_with_empty_divergences(self):
+        """Wildcards without same-key plains plus skipped forms yield 0."""
+        expected, divergences = _audit_dirb_expectation(
+            list(self.AUDIT_KNOWN_ZERO_LINES)
+        )
+        assert expected == 0
+        assert divergences == []
+
+    def test_audit_raises_loudly_on_unparsable_output_line(self):
+        """Output lines that fail production parsing never skip silently."""
+        with pytest.raises(AssertionError):
+            _audit_dirb_expectation(["||*.autos^", "this is not a rule"])
