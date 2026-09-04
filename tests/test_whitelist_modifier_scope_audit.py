@@ -4469,7 +4469,7 @@ def _dirb_gate_checks(
     legs: DirbCorpusLegs,
     *,
     audit_expected: int,
-) -> dict[str, tuple[object, object]]:
+) -> tuple[dict[str, tuple[object, object]], dict[str, object]]:
     """Evaluate the B1-B10 plus R1 plus literal R2 signature spellings.
 
     Exact RESEARCH spellings with one claim per key and no ranges or
@@ -4487,6 +4487,12 @@ def _dirb_gate_checks(
     sha-stability plus the evidence shas, deliberately NOT a checks key:
     timing never gates per D-21-04. Shared by the fixture-scale spelling
     twins and the corpus-scale slow gate so both pin one signature.
+
+    Returns:
+        ``(checks, details)`` where checks drives the verdict FIELD and
+        details carries the SAME computed objects (removed/added/ledger
+        tallies/mismatches/pairs) so evidence and asserts reuse them
+        without recomputation (WR-06 single-computation).
     """
     removed = set(legs.off_lines) - set(legs.on_lines)
     added = set(legs.on_lines) - set(legs.off_lines)
@@ -4524,7 +4530,7 @@ def _dirb_gate_checks(
         if candidate_rule not in removed or covering_rule not in on_line_set
     ]
 
-    return {
+    checks: dict[str, tuple[object, object]] = {
         "input_identity": (
             legs.off_stats.total_input == legs.on_stats.total_input,
             True,
@@ -4573,6 +4579,25 @@ def _dirb_gate_checks(
         "reconciliation_matches_audit": (len(removed) == audit_expected, True),
         "population_nonzero": (len(removed) > 0, True),
     }
+    details: dict[str, object] = {
+        "removed": removed,
+        "added": added,
+        "on_line_set": on_line_set,
+        "off_total_records": off_total_records,
+        "on_total_records": on_total_records,
+        "off_by_reason": off_by_reason,
+        "on_by_reason": on_by_reason,
+        "whitelist_off": whitelist_off,
+        "whitelist_on": whitelist_on,
+        "denyallow_off": denyallow_off,
+        "denyallow_on": denyallow_on,
+        "kept_before": kept_before,
+        "kept_after": kept_after,
+        "mismatches_other_buckets": mismatches_other_buckets,
+        "pairs": pairs,
+        "uncovered_pairs": uncovered_pairs,
+    }
+    return checks, details
 
 
 @pytest.mark.slow
@@ -4616,48 +4641,24 @@ class TestDirbShadowEquivalence:
         with tempfile.TemporaryDirectory() as tmpdir:
             legs = _run_dirb_corpus_legs(self._frozen_corpus_lines, Path(tmpdir))
 
-        removed = set(legs.off_lines) - set(legs.on_lines)
-        added = set(legs.on_lines) - set(legs.off_lines)
-        on_line_set = set(legs.on_lines)
-
         audit_expected, audit_divergences = _audit_dirb_expectation(list(legs.off_lines))
-        checks = _dirb_gate_checks(legs, audit_expected=audit_expected)
+        # WR-06 single-computation: checks and evidence share the helper's
+        # objects -- no inline recomputation that could drift from the gate.
+        checks, details = _dirb_gate_checks(legs, audit_expected=audit_expected)
 
-        off_total_records = legs.off_ledger.summary()["total_records"]
-        on_total_records = legs.on_ledger.summary()["total_records"]
-        off_by_reason = legs.off_ledger.summary()["by_reason"]
-        on_by_reason = legs.on_ledger.summary()["by_reason"]
-
-        whitelist_off = off_by_reason.get(REASON_EXCEPTION_COVERED, 0)
-        whitelist_on = on_by_reason.get(REASON_EXCEPTION_COVERED, 0)
-        denyallow_off = off_by_reason.get(REASON_DENYALLOW_COVERED, 0)
-        denyallow_on = on_by_reason.get(REASON_DENYALLOW_COVERED, 0)
-        kept_before = off_by_reason.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
-        kept_after = on_by_reason.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
-
-        # B7 scan: skip EXACTLY {wcs reason, uncertain reason}; whitelist
-        # and denyallow ride their own dedicated equality claims below and
-        # trivially double-cover inside these loops.
-        skipped_reasons = {REASON_WILDCARD_COVERS_SUB, REASON_KEPT_BECAUSE_UNCERTAIN}
-        mismatches_other_buckets: list[tuple[str, str]] = []
-        for reason, off_count in off_by_reason.items():
-            if reason in skipped_reasons:
-                continue
-            if on_by_reason.get(reason, 0) != off_count:
-                mismatches_other_buckets.append(("off-to-on", reason))
-        for reason, on_count in on_by_reason.items():
-            if reason in skipped_reasons:
-                continue
-            if off_by_reason.get(reason, 0) != on_count:
-                mismatches_other_buckets.append(("on-to-off", reason))
-
-        # B8 uses the UNCAPPED pairs set -- never capped samples.
-        pairs = legs.on_ledger.wcs_pairs
-        uncovered_pairs = [
-            (candidate_rule, covering_rule)
-            for candidate_rule, covering_rule in pairs
-            if candidate_rule not in removed or covering_rule not in on_line_set
-        ]
+        removed = details["removed"]
+        added = details["added"]
+        off_total_records = details["off_total_records"]
+        on_total_records = details["on_total_records"]
+        whitelist_off = details["whitelist_off"]
+        whitelist_on = details["whitelist_on"]
+        denyallow_off = details["denyallow_off"]
+        denyallow_on = details["denyallow_on"]
+        kept_before = details["kept_before"]
+        kept_after = details["kept_after"]
+        mismatches_other_buckets = details["mismatches_other_buckets"]
+        pairs = details["pairs"]
+        uncovered_pairs = details["uncovered_pairs"]
 
         evidence: dict[str, object] = {
             "input_rows": legs.off_stats.total_input,
@@ -4811,11 +4812,12 @@ class TestDirbShadowGateChecksSpelling:
                 Path(tmpdir),
             )
         audit_expected, audit_divergences = _audit_dirb_expectation(list(legs.off_lines))
+        checks, _ = _dirb_gate_checks(legs, audit_expected=audit_expected)
         return (
             legs,
             audit_expected,
             audit_divergences,
-            _dirb_gate_checks(legs, audit_expected=audit_expected),
+            checks,
         )
 
     def test_b_spellings_hold_exact_at_fixture_scale(self):
@@ -5057,7 +5059,7 @@ class TestDirbTimingMedians:
                 _shadow_line_factory(list(self.TIMING_FIXTURE_LINES)),
                 Path(tmpdir),
             )
-        checks = _dirb_gate_checks(legs, audit_expected=0)
+        checks, _ = _dirb_gate_checks(legs, audit_expected=0)
         block = _dirb_timing_medians(self._factory(), frozen_digest="fixture-scale")
         assert not [name for name in checks if "timing" in name]
         assert not (set(block) & set(checks))
