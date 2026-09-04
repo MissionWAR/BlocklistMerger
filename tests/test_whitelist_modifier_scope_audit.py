@@ -3452,9 +3452,8 @@ def _audit_dirb_expectation(off_lines: list[str]) -> tuple[int, list[str]]:
     for line in off_lines:
         record = _parse_abp_rule(line)
         if record is None:
-            assert not line.startswith(("||", "@@||")), (
-                f"audit input failed production parse: {line!r}"
-            )
+            if line.startswith(("||", "@@||")):
+                raise ValueError(f"audit input failed production parse: {line!r}")
             skipped_unparsable.append(line)
             continue
         if record.is_wildcard and record.domain == get_tld(record.domain):
@@ -3971,7 +3970,7 @@ class TestDirbAuditExpectation:
 
     def test_audit_raises_loudly_on_unparsable_abp_shaped_line(self):
         """ABP-shaped output that fails production parsing never skips."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             _audit_dirb_expectation(["||*.autos^", "||"])
 
     def test_audit_skips_other_rules_lines_with_recorded_forensics(self):
@@ -4154,10 +4153,13 @@ def _dirb_seed_storages(
     """
     witness = _parse_abp_rule(wildcard_text)
     candidate = _parse_abp_rule(plain_text)
-    assert witness is not None and candidate is not None
+    if witness is None or candidate is None:
+        raise ValueError(f"seed inputs must parse: {wildcard_text!r} {plain_text!r}")
     witness_key = get_tld(witness.domain)
-    assert witness_key is not None and witness.domain == witness_key
-    assert witness.is_wildcard and not candidate.is_wildcard
+    if witness_key is None or witness.domain != witness_key:
+        raise ValueError(f"seed witness must be TLD-form: {wildcard_text!r}")
+    if not witness.is_wildcard or candidate.is_wildcard:
+        raise ValueError(f"seed pair must be wildcard-plus-plain: {wildcard_text!r} {plain_text!r}")
     return ({witness_key: [witness]}, {candidate.domain: [candidate]})
 
 
