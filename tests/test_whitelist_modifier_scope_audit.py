@@ -32,6 +32,7 @@ import gc
 import hashlib
 import json
 import os
+import re
 import statistics
 import sys
 import tempfile
@@ -1475,6 +1476,9 @@ BUCKET_SINGLE_LABEL_SUFFIX_APEX: Final[str] = "single_label_suffix_apex"
 BUCKET_MULTIPART_SUFFIX_APEX: Final[str] = "multipart_suffix_apex"
 """Manifest population bucket names (RESEARCH E2 inventory verbatim)."""
 
+_FILENAME_STEM_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+"""Whitelist for evidence filename stems (WR-08): operator env must not escape."""
+
 
 def _classify_apex_bucket(key: str) -> str:
     """Classify one witness key into its D-01 apex-form bucket.
@@ -1769,6 +1773,8 @@ def _evaluate_and_write_manifest(
         ``(verdict, manifest)`` where manifest is the assembled dict both
         siblings were rendered from.
     """
+    if not _FILENAME_STEM_RE.fullmatch(filename_stem):
+        raise ValueError(f"refusing unsafe filename_stem: {filename_stem!r}")
     evaluated_checks = {
         name: {"observed": observed, "expected": expected, "ok": observed == expected}
         for name, (observed, expected) in checks.items()
@@ -2049,6 +2055,18 @@ class TestShadowManifestWriter:
 
         guards = manifest["proposed_guards"]
         assert guards["binding"] is False
+
+    def test_writer_rejects_hostile_filename_stem(self, tmp_path):
+        """WR-08: env-controlled stem cannot escape the output dir."""
+        for hostile in ("../escape", "a/b"):
+            with pytest.raises(ValueError, match="refusing unsafe filename_stem"):
+                _evaluate_and_write_manifest(
+                    checks={"check": (True, True)},
+                    evidence={"removed_count": 0},
+                    population=_summarize_population(set(), set()),
+                    output_dir=tmp_path,
+                    filename_stem=hostile,
+                )
 
 
 # ----------------------------------------------------------------------
