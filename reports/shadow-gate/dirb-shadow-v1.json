@@ -1,0 +1,181 @@
+{
+  "checks": {
+    "added_empty": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "coverer_membership_complete": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "denyallow_bucket_identical": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "input_identity": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "input_rows_sanity": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "off_side_witnessing_empty": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "other_buckets_stable_both_directions": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "population_nonzero": {
+      "expected": true,
+      "observed": false,
+      "ok": false
+    },
+    "reconciliation_matches_audit": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "removed_equals_counter": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "removed_equals_uncapped_tally": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "total_records_delta_equals_removed": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "uncertain_keeps_stasis": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    },
+    "whitelist_bucket_identical": {
+      "expected": true,
+      "observed": true,
+      "ok": true
+    }
+  },
+  "corpus": {
+    "dir": "reports/benchmarks/frozen/dirb-shadow-v1/raw",
+    "file_count": 86,
+    "frozen": true,
+    "manifest_sha256": "f470fcea85913281e6752385ac67ad2cb0e81e90248e6255175b83f5e6e2d604",
+    "total_bytes": 228954261
+  },
+  "created_at": "2026-09-03T15:56:17Z",
+  "flags": {
+    "denyallow_pruning": true,
+    "wildcard_apex_pruning": false,
+    "wildcard_covers_subs_pruning_off": false,
+    "wildcard_covers_subs_pruning_on": true
+  },
+  "identity": {
+    "git_revision": "34d8b68",
+    "package_version": "1.5.0",
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python_version": "3.14.6"
+  },
+  "population": {
+    "audit_divergences": [
+      "UNPARSABLE_SKIPPED total=5314 samples=[!  |; !  |Count: 786,172 rules!; !  |Licence: MPLv2,; !  |Size: 14.3 MB; ! These entries can be used in Firefox with regular browser extensions (uBO|AdGuard Browser Extension|ABP) by opening about:config, removing the \"addons.mozilla.com\" part from \"extensions.webextensions.restrictedDomains\", and then creating a new string called \"privacy.resistFingerprinting.block_mozAddonManager\" (That exact capitalisation must be used) set to (Boolean) true.; ! ||zhuangjizhuli.com^; ! ||zhuangjizhuli.net^; #    | As well, note that the format is different on old macs, so; #  * And of course, Emerging Threats covers 100s of different protocols with their signatures, extending FAR beyond; #  * Emerging Threats includes much more than blocking specific domains, such as blocking certain patterns in domains,]"
+    ],
+    "audit_expected": 0,
+    "samples": [],
+    "total": 0
+  },
+  "proposed_guards": {
+    "binding": false,
+    "note": "data-only draft; headroom derivation lands in Phase 17 plan 04",
+    "proposals": {}
+  },
+  "report_type": "dirb_shadow_gate",
+  "schema_version": 1,
+  "signature": {
+    "added_count": 0,
+    "input_rows": 10257217,
+    "kept_because_uncertain": {
+      "off": 568,
+      "on": 568
+    },
+    "ledger": {
+      "delta_equals_removed": true,
+      "off_total_records": 8730804,
+      "on_total_records": 8730804
+    },
+    "leg_seconds": {
+      "off": 594.0931811999999,
+      "on": 442.3744340000012
+    },
+    "off_output_sha256": "29c78613f59048ec6d6f16d1038b0e4a15a9a718012b842941f8095c88bd2bab",
+    "on_output_sha256": "29c78613f59048ec6d6f16d1038b0e4a15a9a718012b842941f8095c88bd2bab",
+    "other_buckets_stable": true,
+    "removed_count": 0,
+    "whitelist_conflict_pruned": {
+      "off": 181,
+      "on": 181
+    }
+  },
+  "source_health": {
+    "degraded_sources": 6,
+    "file_count": 86,
+    "present": true,
+    "total_bytes": 228954261,
+    "totals_by_status": {
+      "fresh_fetch": 46,
+      "stale_cache": 6,
+      "validated_cache": 34
+    }
+  },
+  "timing": {
+    "cross_tie_off": true,
+    "cross_tie_on": true,
+    "leg_seconds": {
+      "off": 594.0931811999999,
+      "on": 442.3744340000012
+    },
+    "methodology": "in-gate median-of-N per leg over caller-supplied lines with gc.collect plus clear_caches between every run; informational only, never gating",
+    "off": {
+      "durations_seconds": [
+        378.539097,
+        358.241102,
+        375.579514
+      ],
+      "median_seconds": 375.579514,
+      "output_sha256": "29c78613f59048ec6d6f16d1038b0e4a15a9a718012b842941f8095c88bd2bab",
+      "output_sha256_stable": true,
+      "runs": 3
+    },
+    "on": {
+      "durations_seconds": [
+        389.445956,
+        308.288397,
+        405.531376
+      ],
+      "median_seconds": 389.445956,
+      "output_sha256": "29c78613f59048ec6d6f16d1038b0e4a15a9a718012b842941f8095c88bd2bab",
+      "output_sha256_stable": true,
+      "runs": 3
+    },
+    "relative_overhead_percent": -3.69,
+    "runs": 3,
+    "same_corpus": true,
+    "timing_corpus_digest": "f470fcea85913281e6752385ac67ad2cb0e81e90248e6255175b83f5e6e2d604"
+  },
+  "verdict": "fail"
+}
