@@ -213,6 +213,41 @@ def test_readme_direction_a_closure_paragraph_is_contained_with_evidence_link() 
     assert "APEX_SHADOW_DATASET_ID" not in text
 
 
+def test_readme_direction_b_closure_paragraph_is_contained_with_evidence_link() -> None:
+    """README should keep the dirb-shadow verdict inside Scope and Non-Goals."""
+    text = _read_text(README)
+    scope_heading = _position(text, "## Scope and Non-Goals")
+    apex_start = _position(
+        text,
+        "**Apex-covered wildcard pruning (v1.3): measured, not enabled.**",
+    )
+    paragraph_start = _position(
+        text,
+        "**Wildcard-covers-sub pruning: measured, not enabled.**",
+    )
+    paragraph_end = text.find("\n\n", paragraph_start)
+    sources_heading = _position(text, "## 📋 Sources")
+
+    assert scope_heading < apex_start < paragraph_start < paragraph_end < sources_heading
+
+    paragraph = text[paragraph_start:paragraph_end]
+    required_fragments = [
+        "A full-corpus shadow run over 10,257,217 input rules",
+        "nothing remained that only the new pass can remove",
+        "-3.69% median wall-clock overhead, an informational figure that never gates",
+        "stays deliberately default-OFF and the direction is closed",
+    ]
+    for fragment in required_fragments:
+        assert fragment in paragraph
+
+    assert (
+        "[`reports/shadow-gate/dirb-shadow-v1.md`](reports/shadow-gate/dirb-shadow-v1.md)"
+        in paragraph
+    )
+
+    assert "DIRB_SHADOW_DATASET_ID" not in text
+
+
 def test_agh_semantics_matrix_is_publicly_discoverable() -> None:
     """README should link the AGH semantics baseline and preserve required vocabulary."""
     readme = _read_text(README)
