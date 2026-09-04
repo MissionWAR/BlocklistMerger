@@ -19,10 +19,8 @@
 
 ## Population
 - Total removals: 0
-- Pure-TLD share percent: None
-- Split bar percent: None (triggered: None)
-- single_label_suffix_apex: 0 (0.0%)
-- multipart_suffix_apex: 0 (0.0%)
+- Audit expected: 0
+- Audit divergences: 1
 
 ## Timing
 - methodology: in-gate median-of-N per leg over caller-supplied lines with gc.collect plus clear_caches between every run; informational only, never gating

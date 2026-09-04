@@ -1679,19 +1679,30 @@ def _render_shadow_markdown(manifest: Mapping[str, object]) -> str:
 
     lines.append("")
     lines.append("## Population")
-    lines.append(f"- Total removals: {population.get('total', 0)}")
-    lines.append(f"- Pure-TLD share percent: {population.get('pure_tld_share_percent')}")
-    lines.append(
-        f"- Split bar percent: {population.get('split_bar_percent')} "
-        f"(triggered: {population.get('reason_split_triggered')})"
-    )
-    for bucket_name in (BUCKET_SINGLE_LABEL_SUFFIX_APEX, BUCKET_MULTIPART_SUFFIX_APEX):
-        bucket = buckets.get(bucket_name) or {}
+    if str(manifest.get("report_type")) == "dirb_shadow_gate":
+        lines.append(f"- Total removals: {population.get('total', 0)}")
+        lines.append(f"- Audit expected: {population.get('audit_expected')}")
+        divergences = population.get("audit_divergences", [])
+        lines.append(f"- Audit divergences: {len(divergences)}")
+        for sample_record in population.get("samples", []):
+            if isinstance(sample_record, dict):
+                lines.append(f"  - sample: {sample_record.get('candidate_rule')}")
+            else:
+                lines.append(f"  - sample: {sample_record}")
+    else:
+        lines.append(f"- Total removals: {population.get('total', 0)}")
+        lines.append(f"- Pure-TLD share percent: {population.get('pure_tld_share_percent')}")
         lines.append(
-            f"- {bucket_name}: {bucket.get('count', 0)} ({bucket.get('share_percent', 0.0)}%)"
+            f"- Split bar percent: {population.get('split_bar_percent')} "
+            f"(triggered: {population.get('reason_split_triggered')})"
         )
-        for sample_record in bucket.get("samples", []):
-            lines.append(f"  - sample: {sample_record.get('candidate_rule')}")
+        for bucket_name in (BUCKET_SINGLE_LABEL_SUFFIX_APEX, BUCKET_MULTIPART_SUFFIX_APEX):
+            bucket = buckets.get(bucket_name) or {}
+            lines.append(
+                f"- {bucket_name}: {bucket.get('count', 0)} ({bucket.get('share_percent', 0.0)}%)"
+            )
+            for sample_record in bucket.get("samples", []):
+                lines.append(f"  - sample: {sample_record.get('candidate_rule')}")
 
     lines.append("")
     lines.append("## Timing")
@@ -2067,6 +2078,34 @@ class TestShadowManifestWriter:
         failing_manifest = dict(passing_manifest, verdict="fail")
         markdown_fail = _render_shadow_markdown(failing_manifest)
         assert "FAIL" in markdown_fail
+
+    def test_dirb_population_renders_audit_vocabulary_without_apex_buckets(self):
+        """WR-02: dirb Population shows audit counts, never apex None lines."""
+        dirb_manifest = {
+            "schema_version": 1,
+            "report_type": "dirb_shadow_gate",
+            "verdict": "fail",
+            "created_at": "2026-09-03T15:56:17Z",
+            "signature": {"removed_count": 0},
+            "population": {
+                "total": 0,
+                "audit_expected": 0,
+                "audit_divergences": ["UNPARSABLE_SKIPPED total=2 samples=[x]"],
+                "samples": [],
+            },
+            "timing": None,
+            "source_health": None,
+            "proposed_guards": {"binding": False},
+        }
+        markdown = _render_shadow_markdown(dirb_manifest)
+        assert "- Total removals: 0" in markdown
+        assert "- Audit expected: 0" in markdown
+        assert "- Audit divergences: 1" in markdown
+        assert "Pure-TLD share percent" not in markdown
+        assert "Split bar percent" not in markdown
+        assert "single_label_suffix_apex" not in markdown
+        assert "multipart_suffix_apex" not in markdown
+        assert "None" not in markdown.split("## Population")[1].split("## Timing")[0]
 
     def test_default_proposed_guards_carry_explicit_non_binding_marker(self, tmp_path):
         """D-17-09: the reserved slot is explicitly data-only/non-binding."""
