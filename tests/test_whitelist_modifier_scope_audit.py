@@ -1816,6 +1816,22 @@ def _evaluate_and_write_manifest(
         ),
     }
 
+    if str(report_type) == "dirb_shadow_gate":
+        _sig_block = manifest.get("signature")
+        if isinstance(_sig_block, dict) and "leg_seconds_note" not in _sig_block:
+            _sig_block["leg_seconds_note"] = (
+                "single-run walls WITH WcsTallyingLedger proof recording; "
+                "do not compare against timing medians"
+            )
+        _tim_block = manifest.get("timing")
+        if isinstance(_tim_block, dict):
+            _methodology = _tim_block.get("methodology")
+            if isinstance(_methodology, str) and "WITHOUT proof ledger" not in _methodology:
+                _tim_block["methodology"] = (
+                    f"{_methodology}; timing legs run WITHOUT proof ledger "
+                    "(direct compile_rules, no WcsTallyingLedger)"
+                )
+
     json_path = output_dir / f"{filename_stem}.json"
     md_path = output_dir / f"{filename_stem}.md"
     _atomic_write_json(json_path, manifest)
@@ -2075,6 +2091,39 @@ class TestShadowManifestWriter:
                     output_dir=tmp_path,
                     filename_stem=hostile,
                 )
+
+    def test_dirb_manifest_carries_leg_and_timing_annotations(self, tmp_path):
+        """WR-04: future dirb manifests annotate leg vs timing methodology."""
+        _, manifest = _evaluate_and_write_manifest(
+            checks={"check": (True, True)},
+            evidence={"removed_count": 0, "leg_seconds": {"off": 1.0, "on": 2.0}},
+            population={"total": 0, "audit_expected": 0, "audit_divergences": []},
+            output_dir=tmp_path,
+            filename_stem="dirb-shadow-wr04",
+            report_type="dirb_shadow_gate",
+            timing={"methodology": "in-gate median-of-N; informational only"},
+        )
+        signature = manifest["signature"]
+        assert isinstance(signature, dict)
+        assert "leg_seconds_note" in signature
+        assert "WcsTallyingLedger" in str(signature["leg_seconds_note"])
+        assert "do not compare" in str(signature["leg_seconds_note"])
+        timing = manifest["timing"]
+        assert isinstance(timing, dict)
+        assert "WITHOUT proof ledger" in str(timing.get("methodology"))
+
+    def test_apex_manifest_carries_no_dirb_annotations(self, tmp_path):
+        """WR-04: apex output stays byte-identical without dirb notes."""
+        _, manifest = _evaluate_and_write_manifest(
+            checks={"check": (True, True)},
+            evidence={"removed_count": 0, "leg_seconds": {"off": 1.0, "on": 2.0}},
+            population=_summarize_population(set(), set()),
+            output_dir=tmp_path,
+            filename_stem="apex-shadow-wr04",
+            timing={"methodology": "in-gate median-of-N; informational only"},
+        )
+        assert "leg_seconds_note" not in manifest["signature"]
+        assert "WITHOUT proof ledger" not in str(manifest["timing"]["methodology"])
 
 
 # ----------------------------------------------------------------------
