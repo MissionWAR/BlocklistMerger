@@ -1775,6 +1775,14 @@ def _evaluate_and_write_manifest(
     """
     if not _FILENAME_STEM_RE.fullmatch(filename_stem):
         raise ValueError(f"refusing unsafe filename_stem: {filename_stem!r}")
+    if filename_stem.startswith("dirb-shadow-"):
+        _probe_path = output_dir / f"{filename_stem}.json"
+        if _probe_path.exists() and os.environ.get("DIRB_SHADOW_OVERWRITE") != "1":
+            raise RuntimeError(
+                f"refusing to overwrite {_probe_path.name}; "
+                "set DIRB_SHADOW_DATASET_ID=dirb-shadow-v2 for a new stem "
+                "(see Closure Note item 4)"
+            )
     evaluated_checks = {
         name: {"observed": observed, "expected": expected, "ok": observed == expected}
         for name, (observed, expected) in checks.items()
