@@ -234,7 +234,8 @@ def test_readme_direction_b_closure_paragraph_is_contained_with_evidence_link() 
     required_fragments = [
         "A full-corpus shadow run over 10,257,217 input rules",
         "nothing remained that only the new pass can remove",
-        "-3.69% median wall-clock overhead, an informational figure that never gates",
+        "-3.69% median wall-clock overhead (ON median 389.45 s vs OFF median 375.58 s",
+        "slightly slower, well within run variance",
         "stays deliberately default-OFF and the direction is closed",
     ]
     for fragment in required_fragments:
