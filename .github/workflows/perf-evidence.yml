@@ -209,7 +209,10 @@ jobs:
         with:
           name: perf-evidence-${{ steps.stamp.outputs.date }}-${{ github.run_id }}
           path: |
+            reports/benchmarks/runs/pinned-timing.json
+            reports/benchmarks/runs/pinned-memory.json
+            reports/benchmarks/runs/live-timing.json
+            reports/benchmarks/runs/live-memory.json
             reports/perf-evidence/**
-            reports/benchmarks/**
           if-no-files-found: warn
           retention-days: 90
