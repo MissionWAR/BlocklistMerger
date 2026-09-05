@@ -107,9 +107,9 @@ jobs:
           echo "drifted=${DRIFTED}" >> "$GITHUB_OUTPUT"
           exit 0
 
-      # Live-leg cache posture: scratch directories only. This job never
-      # restores or saves any shared cache key family, and removal of stale
-      # runner caches stays owned by the publish workflow cleanup job.
+      # Live-leg cache posture: scratch cache only (.cache-perf). The corpus
+      # target reuses the conventional RAW_DIR path inside this run's ephemeral
+      # workspace; this job never restores/saves shared cache key families.
       - name: Fetch live sources
         run: |
           python -m scripts.downloader \
