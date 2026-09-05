@@ -9,6 +9,7 @@ permissions, SHA-pinned actions, dated artifact shape, and zero contact with
 publish lineage.
 """
 
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -213,6 +214,17 @@ def test_perf_evidence_rolling_baseline_resolver_is_guarded() -> None:
     assert "steps.baseline.outputs.run-id != ''" in text
     download = _step_section(text, "Download prior report")
     assert "continue-on-error: true" in download
+
+
+def test_perf_snapshot_env_is_coherent() -> None:
+    """Snapshot digest is 64-hex and the artifact name carries its 12-char prefix."""
+    text = _perf_text()
+
+    match = re.search(r"PERF_SNAPSHOT_DIGEST: ([0-9a-f]+)", text)
+    assert match is not None, "Missing PERF_SNAPSHOT_DIGEST env value"
+    digest = match.group(1)
+    assert re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+    assert f"PERF_SNAPSHOT_ARTIFACT: perf-snapshot-{digest[:12]}" in text
 
 
 def test_perf_evidence_run_blocks_avoid_untrusted_context() -> None:
