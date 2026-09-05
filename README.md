@@ -112,6 +112,22 @@ The scheduled release install is pinned by
 | Source health report | `--health-report reports/source-health.json` | Workflow diagnostic artifact. |
 | Pipeline stats | `--json-stats reports/pipeline-stats.json` | Workflow diagnostic artifact. |
 
+### Weekly perf evidence (advisory, never blocking)
+
+A separate `perf-evidence.yml` workflow measures timing plus peak-memory legs
+weekly on Tuesdays at 03:17 UTC, and every run can also start manually with
+`workflow_dispatch`. Evidence appears as dated `perf-evidence-<date>-<run id>`
+artifacts (kept 90 days) plus an advisory-labeled delta table in the run step
+summary.
+
+What never blocks: benchmark compare exit codes never gate publishing, and the
+workflow is never a required check — a red or missing perf run never stops a
+release.
+
+Fork notes: schedules stay OFF in forks until the fork owner enables Actions
+schedules. GitHub also auto-disables scheduled workflows after 60 days without
+repository activity — any manual dispatch re-enables the schedule.
+
 ---
 
 ## ⭐ Acknowledgments

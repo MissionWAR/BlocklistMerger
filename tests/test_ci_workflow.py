@@ -365,6 +365,8 @@ def test_readme_points_to_release_guard_promotion_documentation() -> None:
     assert "reports/release-evidence.json" in readme
     assert "workflow_dispatch" in readme
     assert "weekly heavy-evidence schedule is not active" in doc
+    assert "weekly perf-evidence" in doc
+    assert "never gates publishing" in doc
 
 
 def test_python_compatibility_audit_matrix_is_read_only_and_separate() -> None:
