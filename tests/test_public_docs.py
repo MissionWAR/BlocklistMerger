@@ -134,6 +134,12 @@ def test_ignore_policy_source_runtime_boundary() -> None:
     # The shadow-gate evidence home itself stays trackable (manifests are
     # versioned stems, so pin a future-shaped path, not just current files).
     assert _git_check_ignore("reports/shadow-gate/apex-shadow-v1.json") == 1
+    # IN-03: the absent v2 stem is deliberate — git check-ignore evaluates
+    # nonexistent paths, so this guards the documented flip-day stem pre-creation.
+    assert _git_check_ignore("reports/shadow-gate/apex-shadow-v2.json") == 1
+    # IN-05: local agent-tooling state must stay ignored, never staged publicly.
+    assert _git_check_ignore(".claude/settings.local.json") == 0
+    assert _git_check_ignore(".gsd/state.json") == 0
 
     tracked = _git_ls_files("lists", ".cache", "reports")
     bulk_tracked = [path for path in tracked if not path.startswith("reports/shadow-gate/")]
