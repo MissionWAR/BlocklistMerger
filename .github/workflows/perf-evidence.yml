@@ -107,16 +107,101 @@ jobs:
           echo "drifted=${DRIFTED}" >> "$GITHUB_OUTPUT"
           exit 0
 
-      - name: Download Prior Perf Evidence (skeleton)
-        # 22-02 wires the baseline run-id resolver; the skeleton only pins the
-        # supply-chain surface and stays inert until then.
-        if: false
+      # Live-leg cache posture: scratch directories only. This job never
+      # restores or saves any shared cache key family, and removal of stale
+      # runner caches stays owned by the publish workflow cleanup job.
+      - name: Fetch live sources
+        run: |
+          python -m scripts.downloader \
+            --sources "$SOURCES" \
+            --outdir "$RAW_DIR" \
+            --cache .cache-perf \
+            --concurrency 10 \
+            --timeout 25 \
+            --health-report reports/perf-evidence/source-health.json
+
+      - name: Run live timing leg
+        run: |
+          python -m scripts.benchmark --corpus "$RAW_DIR" --runs 3 \
+            --json reports/benchmarks/runs/live-timing.json
+
+      - name: Run live memory leg
+        run: |
+          python -m scripts.benchmark --corpus "$RAW_DIR" \
+            --track-memory --json reports/benchmarks/runs/live-memory.json
+
+      - name: Resolve baseline run id
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RID=$(gh run list --workflow perf-evidence.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty' || true)
+          echo "run-id=${RID}" >> "$GITHUB_OUTPUT"
+
+      - name: Download prior report
+        # Guarded on a resolved prior run; a missing baseline (first run,
+        # expiry) skips to the raw-only branches below, job stays green.
+        if: steps.baseline.outputs.run-id != ''
+        continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: perf-evidence-report
+          name: perf-evidence-baseline-report
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.run_id }}
+          run-id: ${{ steps.baseline.outputs.run-id }}
           path: previous
+
+      - name: Upload baseline report
+        # Stable name feeds next week's rolling compare for both legs (the
+        # pinned report is the trend leg; the live report enables the
+        # hash-match gate). The dated bundle below keeps the per-week copy.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: perf-evidence-baseline-report
+          path: |
+            reports/benchmarks/runs/pinned-timing.json
+            reports/benchmarks/runs/live-timing.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Compare pinned leg vs rolling baseline
+        # Document-only two-path form: the benchmark already ran above, so
+        # this step only renders the delta. Refusal, drift, missing-baseline,
+        # and below-floor verdicts all stay advisory by construction.
+        if: always()
+        continue-on-error: true
+        env:
+          PINNED_DRIFTED: ${{ steps.pinned-verify.outputs.drifted }}
+        run: |
+          if [ "${PINNED_DRIFTED}" = "true" ]; then
+            echo "Pinned leg drifted or missing: raw-only timing, no trend delta."
+            exit 0
+          fi
+          if [ ! -f previous/pinned-timing.json ] || [ ! -f reports/benchmarks/runs/pinned-timing.json ]; then
+            echo "No prior baseline report: raw-only timing, no trend delta."
+            exit 0
+          fi
+          python -m scripts.benchmark --compare previous/pinned-timing.json reports/benchmarks/runs/pinned-timing.json --min-improve-percent 15.0 || true
+          true
+
+      - name: Compare live leg vs rolling baseline
+        # Live deltas render only when the live corpus hash matches the prior
+        # live manifest; any drift falls back to raw absolutes, never a gate.
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ ! -f previous/live-timing.json ] || [ ! -f reports/benchmarks/runs/live-timing.json ]; then
+            echo "No prior live report: raw-only timing, no trend delta."
+            exit 0
+          fi
+          LIVE_PRE=$(python -c "import json,sys; data=json.load(open(sys.argv[1],encoding='utf-8')); print(data.get('manifest_sha256') or data.get('corpus',{}).get('manifest_sha256',''))" previous/live-timing.json 2>/dev/null || true)
+          LIVE_POST=$(python -c "import json,sys; data=json.load(open(sys.argv[1],encoding='utf-8')); print(data.get('manifest_sha256') or data.get('corpus',{}).get('manifest_sha256',''))" reports/benchmarks/runs/live-timing.json 2>/dev/null || true)
+          if [ -z "$LIVE_PRE" ] || [ "$LIVE_PRE" != "$LIVE_POST" ]; then
+            echo "Live corpus drifted since baseline: raw-only timing, no trend delta."
+            exit 0
+          fi
+          python -m scripts.benchmark --compare previous/live-timing.json reports/benchmarks/runs/live-timing.json --min-improve-percent 15.0 || true
+          true
 
       - name: Upload Perf Evidence (skeleton)
         if: always()
