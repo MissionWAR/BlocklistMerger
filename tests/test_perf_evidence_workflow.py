@@ -152,7 +152,7 @@ def test_perf_evidence_actions_are_sha_pinned() -> None:
 def test_perf_evidence_artifact_shape_and_install() -> None:
     """Dated artifact name with run id, 90-day retention, and pinned install line."""
     text = _perf_text()
-    upload_step = _step_section(text, "Upload Perf Evidence (skeleton)")
+    upload_step = _step_section(text, "Upload Perf Evidence")
     stamp_step = _step_section(text, "Stamp Evidence Date")
 
     assert "name: perf-evidence-" in upload_step
