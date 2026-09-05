@@ -179,6 +179,31 @@ def test_perf_evidence_has_no_publish_path_contact() -> None:
     assert "run-id:" in text
 
 
+def test_perf_evidence_compares_are_captured_and_always_run() -> None:
+    """Compare steps never gate: always-run with captured tool failures."""
+    text = _perf_text()
+    for step in (
+        "Compare pinned leg vs rolling baseline",
+        "Compare live leg vs rolling baseline",
+    ):
+        section = _step_section(text, step)
+        assert "if: always()" in section
+        assert "continue-on-error: true" in section
+        assert "|| true" in section
+
+
+def test_perf_evidence_evidence_steps_always_run() -> None:
+    """Receipts, summary, and baseline upload always run for partial evidence."""
+    text = _perf_text()
+    for step in (
+        "Collect Environment Receipts",
+        "Render Advisory Summary",
+        "Upload baseline report",
+    ):
+        section = _step_section(text, step)
+        assert "if: always()" in section
+
+
 def test_perf_evidence_run_blocks_avoid_untrusted_context() -> None:
     """Run blocks must not interpolate untrusted event context."""
     text = _perf_text()
