@@ -204,6 +204,17 @@ def test_perf_evidence_evidence_steps_always_run() -> None:
         assert "if: always()" in section
 
 
+def test_perf_evidence_rolling_baseline_resolver_is_guarded() -> None:
+    """Rolling-baseline resolver keeps its filter, selector, guard, and capture."""
+    text = _perf_text()
+
+    assert "gh run list --workflow perf-evidence.yml --status success" in text
+    assert ".[0].databaseId // empty" in text
+    assert "steps.baseline.outputs.run-id != ''" in text
+    download = _step_section(text, "Download prior report")
+    assert "continue-on-error: true" in download
+
+
 def test_perf_evidence_run_blocks_avoid_untrusted_context() -> None:
     """Run blocks must not interpolate untrusted event context."""
     text = _perf_text()
