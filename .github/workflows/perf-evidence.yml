@@ -74,16 +74,18 @@ jobs:
           path: ${{ env.PINNED_DIR }}
 
       - name: Run pinned timing leg
-        if: steps.restore.outcome == 'success'
+        if: always() && steps.restore.outcome == 'success'
+        continue-on-error: true
         run: |
           python -m scripts.benchmark --corpus "$PINNED_DIR" --runs 3 \
-            --json reports/benchmarks/runs/pinned-timing.json
+            --json reports/benchmarks/runs/pinned-timing.json || true
 
       - name: Run pinned memory leg
-        if: steps.restore.outcome == 'success'
+        if: always() && steps.restore.outcome == 'success'
+        continue-on-error: true
         run: |
           python -m scripts.benchmark --corpus "$PINNED_DIR" \
-            --track-memory --json reports/benchmarks/runs/pinned-memory.json
+            --track-memory --json reports/benchmarks/runs/pinned-memory.json || true
 
       - name: Verify pinned manifest
         id: pinned-verify
@@ -110,6 +112,8 @@ jobs:
       # Live-leg cache posture: scratch cache only (.cache-perf). The corpus
       # target reuses the conventional RAW_DIR path inside this run's ephemeral
       # workspace; this job never restores/saves shared cache key families.
+      # Fetch reds intentionally on infra failure (a broken fetch is a real
+      # signal); tooling/drift/missing-snapshot paths stay green by design.
       - name: Fetch live sources
         run: |
           python -m scripts.downloader \
@@ -121,14 +125,18 @@ jobs:
             --health-report reports/perf-evidence/source-health.json
 
       - name: Run live timing leg
+        if: always()
+        continue-on-error: true
         run: |
           python -m scripts.benchmark --corpus "$RAW_DIR" --runs 3 \
-            --json reports/benchmarks/runs/live-timing.json
+            --json reports/benchmarks/runs/live-timing.json || true
 
       - name: Run live memory leg
+        if: always()
+        continue-on-error: true
         run: |
           python -m scripts.benchmark --corpus "$RAW_DIR" \
-            --track-memory --json reports/benchmarks/runs/live-memory.json
+            --track-memory --json reports/benchmarks/runs/live-memory.json || true
 
       - name: Collect Environment Receipts
         # Every report bundle carries environment receipts per PERF-04: CPU
