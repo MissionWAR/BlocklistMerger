@@ -1301,6 +1301,13 @@ def _find_covering_exception_indexed(
     only capped ledger samples could differ (accepted per assumption A5 and
     re-verified by the slow corpus audit at the ship gate).
     """
+    # IN-02 (HYG-01): two-exception divergence is expected and benign --
+    # with @@||example.com^ listed before @@||deep.sub.example.com^ both
+    # covering ||x.deep.sub.example.com^, the legacy global-first scan
+    # returns the apex witness while the indexed most-specific-first probe
+    # returns the deep-sub witness; outputs stay existence-based so bytes,
+    # counters, and ledger reason buckets are unaffected and only capped
+    # samples or fingerprints can differ (accepted per assumption A5).
     for key in _exception_probe_keys(record):
         bucket = index.get(key)
         if not bucket:
@@ -1649,6 +1656,10 @@ def _prune_redundant_rules(
                 # set inside the TLD branch above where tld is non-empty, the
                 # key exists, and later walks cannot overwrite it because they
                 # only fire while uncertain_covering is still None.
+                # IN-03 (HYG-01): Narrow-scope children ($client/$ctag/$dnstype)
+                # pass the eligibility gate on purpose: unconditional wildcard
+                # coverage subsumes scoped-child coverage, unlike $important,
+                # NO_COVERAGE, and parse-uncertain children which stay kept.
                 if (
                     denyallow_pruning
                     and uncertain_reason == "tld_wildcard_modifier_scope_unproven"

@@ -689,6 +689,9 @@ def process_files_with_profile(
     print(f"   Kept {stats['lines_clean']:,} clean rules")
     print(f"   Output: {compile_stats.total_output:,} rules ({pipeline_time:.1f}s)")
 
+    # IN-02 (HYG-01) consumer note: CLI counts and JSON buckets below are
+    # existence-based, so indexed-versus-legacy witness selection cannot
+    # change them -- only capped ledger samples or fingerprints can differ.
     # Transfer compilation stats
     stats["lines_output"] = compile_stats.total_output
     stats["abp_subdomain_pruned"] = compile_stats.abp_subdomain_pruned
