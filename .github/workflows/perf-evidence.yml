@@ -74,6 +74,8 @@ jobs:
           path: ${{ env.PINNED_DIR }}
 
       - name: Run pinned timing leg
+        # outcome (not conclusion): continue-on-error above forces conclusion
+        # to success even on 404, so only outcome reflects real restore state.
         if: always() && steps.restore.outcome == 'success'
         continue-on-error: true
         run: |
@@ -81,6 +83,8 @@ jobs:
             --json reports/benchmarks/runs/pinned-timing.json || true
 
       - name: Run pinned memory leg
+        # outcome (not conclusion): see the timing leg above; only outcome
+        # reflects real restore state under continue-on-error.
         if: always() && steps.restore.outcome == 'success'
         continue-on-error: true
         run: |
