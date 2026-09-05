@@ -27,4 +27,11 @@ __all__ = [
     "cleaner",
     "compiler",
     "pipeline",
+    # 19-REVIEW IN-05 (HYG-01): evidence-spine modules join the surface
+    # index as names only -- no implementation function is re-exported, so
+    # callers keep importing from submodules directly per Module Design.
+    "pruning_proof",
+    "stage_diagnostics",
+    "rule_semantics",
+    "rule_syntax",
 ]

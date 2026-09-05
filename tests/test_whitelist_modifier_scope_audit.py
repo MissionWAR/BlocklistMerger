@@ -369,6 +369,51 @@ class TestWhitelistModifierScopeAudit:
         assert rules == []
         assert stats.whitelist_conflict_pruned == 1
 
+    def test_in03_exception_witness_keep_reports_exception_detail_through_tld_branch(self):
+        """19-REVIEW IN-03 (HYG-01): uncertain-keep detail follows the witness source.
+
+        ||*.autos^ opens the TLD-wildcard branch for ||sub.autos^$important,
+        whose $important scope the bare wildcard cannot prove over, while the
+        $client exception is the covering witness from the domain-scope scan.
+        Pre-fix the TLD leg kept the exception covering but overwrote the
+        detail to tld_wildcard_modifier_scope_unproven; post-fix the detail
+        names the exception source (captured from the live ledger, never
+        hand-predicted). Keeps stay keeps either way: both lines survive with
+        zero prune counters, so the blast radius is diagnostic-string only.
+        """
+        ledger = CappedProofLedger()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(
+                [
+                    "||*.autos^",
+                    "||sub.autos^$important",
+                    "@@||sub.autos^$client=10.0.0.1",
+                ],
+                output,
+                proof_ledger=ledger,
+            )
+            with open(output, encoding="utf-8") as f:
+                rules = [line.strip() for line in f if line.strip()]
+
+        assert rules == ["||*.autos^", "||sub.autos^$important"]
+        assert stats.whitelist_conflict_pruned == 0
+        assert stats.tld_wildcard_pruned == 0
+
+        matches = [
+            record
+            for record in ledger.records
+            if record.reason == REASON_KEPT_BECAUSE_UNCERTAIN
+        ]
+        assert len(matches) == 1
+        assert matches[0].outcome == OUTCOME_KEPT
+        assert matches[0].sample["candidate_rule"] == "||sub.autos^$important"
+        assert matches[0].sample["covering_rule"] == "@@||sub.autos^$client=10.0.0.1"
+        assert (
+            matches[0].sample["reason_detail"]
+            == "exception_domain_scope_matched_modifier_scope_unproven"
+        )
+
 
 # ----------------------------------------------------------------------
 # modifier_scope_covers() truth table (Phase 13 RESEARCH.md, Layer 3).

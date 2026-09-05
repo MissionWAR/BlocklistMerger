@@ -588,12 +588,22 @@ def render_capped_report(
 
     Buckets are keyed by strict AGH delta, project-policy delta, reason, and
     outcome. Each bucket exposes stable fingerprints plus compact sample data.
+
+    19-REVIEW IN-04 (HYG-01) sample_cap contract: the cap argument governs
+    plain ledger and record-iterable inputs only. A pre-capped
+    CappedProofLedger input reports its own sample_cap -- an explicit cap
+    passed alongside one is validated but not applied, because the ledger's
+    buckets were already capped at construction. The pipeline's only call
+    site passes no override, so behavior is consistent today.
     """
     if sample_cap < 1:
         msg = "sample_cap must be at least 1"
         raise ValueError(msg)
 
     ledger = _as_ledger(ledger_or_records)
+    # 19-REVIEW IN-04 (HYG-01): a pre-capped input wins -- the ledger's own
+    # sample_cap reports here, while the explicit cap applies only to the
+    # plain-ledger path below. Validated above; zero behavior change.
     if isinstance(ledger, CappedProofLedger):
         return {
             "schema_version": PROOF_REPORT_SCHEMA_VERSION,

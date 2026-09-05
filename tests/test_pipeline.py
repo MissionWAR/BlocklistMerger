@@ -78,7 +78,7 @@ class TestProcessFiles:
         """Helper: run pipeline and return (rules, stats)."""
         input_dir, output_file = make_input_dir(file_contents)
         stats = process_files(input_dir, output_file)
-        with open(output_file) as f:
+        with open(output_file, encoding="utf-8") as f:
             rules = [line.strip() for line in f if line.strip()]
         return rules, stats
 
@@ -208,10 +208,10 @@ class TestProcessFiles:
             os.makedirs(input_dir)
             output_file = os.path.join(tmpdir, "output.txt")
             for name, content in {"aaa.txt": "||a.com^\n", "zzz.txt": "||z.com^\n"}.items():
-                with open(os.path.join(input_dir, name), "w") as f:
+                with open(os.path.join(input_dir, name), "w", encoding="utf-8") as f:
                     f.write(content)
             process_files(input_dir, output_file)
-            with open(output_file) as f:
+            with open(output_file, encoding="utf-8") as f:
                 rules2 = [line.strip() for line in f if line.strip()]
         assert rules1 == rules2
 
@@ -774,7 +774,7 @@ class TestSaveStatsJson:
         }
         save_stats_json(stats, json_path, total_time=5.5, runtime_profile=runtime_profile)
 
-        with open(json_path) as f:
+        with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
 
         assert data["schema_version"] == PIPELINE_STATS_SCHEMA_VERSION
@@ -878,7 +878,7 @@ class TestSaveStatsJson:
         json_path = os.path.join(tmp_dir, "stats-bump.json")
         save_stats_json(dict(_new_pipeline_stats()), json_path, total_time=1.0)
 
-        with open(json_path) as f:
+        with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
 
         assert data["schema_version"] == pipeline_module.PIPELINE_STATS_SCHEMA_VERSION

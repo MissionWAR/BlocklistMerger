@@ -165,7 +165,7 @@ class TestCompilation:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 rules = [line.strip() for line in f if line.strip()]
             return rules, stats
 
@@ -175,7 +175,7 @@ class TestCompilation:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output, proof_ledger=ledger)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 rules = [line.strip() for line in f if line.strip()]
             return rules, stats, ledger
 
@@ -487,7 +487,7 @@ class TestCompilerSemanticDiagnostics:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_stats_expose_semantic_counter_fields(self):
@@ -577,7 +577,7 @@ class TestCompilerProofLedgerPlumbing:
                 stats = compile_rules(lines, output)
             else:
                 stats = compile_rules(lines, output, proof_ledger=proof_ledger)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_compile_rules_two_positional_arguments_remain_default_contract(self):
@@ -768,7 +768,7 @@ class TestCompilerPruningProofLedger:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output, proof_ledger=ledger)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 rules = [line.strip() for line in f if line.strip()]
             return rules, stats, ledger
 
@@ -931,7 +931,7 @@ class TestEdgeCases:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_order_independence(self):
@@ -988,7 +988,7 @@ class TestModifierHandling:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     # -------------------------------------------------------------------------
@@ -1253,7 +1253,7 @@ class TestRealWorldScenarios:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_google_analytics_subdomain_pruning(self):
@@ -1350,7 +1350,7 @@ class TestCoveragePreservationBoundaries:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_hosts_project_aggressive_subdomain_pruning_is_expected(self):
@@ -1398,7 +1398,7 @@ class TestStressAndComplexScenarios:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_many_subdomains_single_parent(self):
@@ -1474,7 +1474,7 @@ class TestIPRules:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_ip_abp_rules_kept(self):
@@ -1506,7 +1506,7 @@ class TestSpecialDomains:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_punycode_domains(self):
@@ -1553,7 +1553,7 @@ class TestDuplicateHandling:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_exact_duplicates(self):
@@ -1658,7 +1658,7 @@ class TestCompression:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_hosts_converted_to_abp(self):
@@ -1727,7 +1727,7 @@ class TestWhitelistParentSubdomain:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_whitelist_parent_covers_subdomain(self):
@@ -1787,7 +1787,7 @@ class TestSemanticWhitelistHandling:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_exact_exception_removes_equal_scoped_block(self):
@@ -1887,7 +1887,7 @@ class TestEmptyAndEdgeCases:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_empty_input(self):
@@ -1937,7 +1937,7 @@ class TestTLDWildcardModifiers:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_tld_wildcard_with_important(self):
@@ -2018,7 +2018,7 @@ class TestWildcardParentSemanticPruning:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     @pytest.mark.parametrize(
@@ -2067,7 +2067,7 @@ class TestWildcardWhitelistHandling:
         with tempfile.TemporaryDirectory() as tmpdir:
             output = os.path.join(tmpdir, "output.txt")
             stats = compile_rules(lines, output)
-            with open(output) as f:
+            with open(output, encoding="utf-8") as f:
                 return [line.strip() for line in f if line.strip()], stats
 
     def test_wildcard_whitelist_covers_subdomain(self):

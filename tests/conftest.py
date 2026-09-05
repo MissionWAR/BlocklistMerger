@@ -77,7 +77,7 @@ def make_input_dir(tmp_dir):
         output_file = os.path.join(tmp_dir, "output.txt")
 
         for name, content in file_contents.items():
-            with open(os.path.join(input_dir, name), "w") as f:
+            with open(os.path.join(input_dir, name), "w", encoding="utf-8") as f:
                 f.write(content)
 
         return input_dir, output_file

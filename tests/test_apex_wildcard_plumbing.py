@@ -22,6 +22,7 @@ Pattern source: tests/test_denyallow_wildcard_pruning.py (v1.2 denyallow suite).
 
 import os
 import tempfile
+from typing import Final
 
 # Importing the underscore-private helpers directly from scripts.compiler
 # and scripts.pipeline (_parse_abp_rule, _record_proven_pruning,
@@ -68,6 +69,42 @@ EXPECTED_OUTPUT_LINES = [
     "||trackers.example.net^",
     "||example.org^",
 ]
+
+# 19-REVIEW IN-01 (HYG-01): the 28-entry real-public-suffix list below was
+# copy-pasted inline into both D-04 composite tests; a single Final tuple
+# is the one source so future suffix changes cannot drift between legs.
+# (Shape precedent: APEX_SHADOW_PAIR_TLDS in
+# tests/test_whitelist_modifier_scope_audit.py.)
+PAIR_TLDS: Final[tuple[str, ...]] = (
+    "xyz",
+    "online",
+    "site",
+    "top",
+    "icu",
+    "club",
+    "shop",
+    "store",
+    "tech",
+    "cloud",
+    "space",
+    "website",
+    "fun",
+    "pro",
+    "cyou",
+    "live",
+    "life",
+    "world",
+    "today",
+    "email",
+    "link",
+    "zone",
+    "agency",
+    "digital",
+    "global",
+    "network",
+    "media",
+    "systems",
+)
 
 
 class TestApexCompilePlane:
@@ -470,36 +507,7 @@ class TestApexWildcardPruning:
         """Signature locks on a composite producing 29 real prunes past the cap."""
         ledger_off = CappedProofLedger()
         ledger_on = CappedProofLedger()
-        pair_tlds = [
-            "xyz",
-            "online",
-            "site",
-            "top",
-            "icu",
-            "club",
-            "shop",
-            "store",
-            "tech",
-            "cloud",
-            "space",
-            "website",
-            "fun",
-            "pro",
-            "cyou",
-            "live",
-            "life",
-            "world",
-            "today",
-            "email",
-            "link",
-            "zone",
-            "agency",
-            "digital",
-            "global",
-            "network",
-            "media",
-            "systems",
-        ]
+        pair_tlds = list(PAIR_TLDS)
         composite = []
         for tld in pair_tlds:
             composite.append(f"||{tld}^")
@@ -570,36 +578,7 @@ class TestApexWildcardPruning:
         """Two same-process flagged compiles are byte-equal with identical evidence."""
         ledger_run1 = CappedProofLedger()
         ledger_run2 = CappedProofLedger()
-        pair_tlds = [
-            "xyz",
-            "online",
-            "site",
-            "top",
-            "icu",
-            "club",
-            "shop",
-            "store",
-            "tech",
-            "cloud",
-            "space",
-            "website",
-            "fun",
-            "pro",
-            "cyou",
-            "live",
-            "life",
-            "world",
-            "today",
-            "email",
-            "link",
-            "zone",
-            "agency",
-            "digital",
-            "global",
-            "network",
-            "media",
-            "systems",
-        ]
+        pair_tlds = list(PAIR_TLDS)
         composite = []
         for tld in pair_tlds:
             composite.append(f"||{tld}^")

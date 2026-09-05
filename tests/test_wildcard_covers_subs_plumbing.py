@@ -48,6 +48,7 @@ from scripts.pruning_proof import (
     REASON_WILDCARD_COVERED,
     REASON_WILDCARD_COVERS_SUB,
     CappedProofLedger,
+    render_capped_report,
 )
 from scripts.stage_diagnostics import COMPILER_STAGE_PRUNE, compiler_stage_summaries_from_stats
 
@@ -100,6 +101,52 @@ class TestWcsVocabulary:
     def test_reason_identifier_is_exported_via_module_all(self):
         """The vocabulary constant joins the module's public export surface."""
         assert "REASON_WILDCARD_COVERS_SUB" in scripts.pruning_proof.__all__
+
+
+class TestSampleCapContractPin:
+    """19-REVIEW IN-04 (HYG-01): render_capped_report ledger-wins contract pin."""
+
+    def test_pre_capped_ledger_reports_own_cap_despite_smaller_explicit_cap(self):
+        """A pre-capped ledger input reports its own cap, not the explicit one.
+
+        Drives one record into a CappedProofLedger built with sample_cap=5,
+        then renders with an explicit smaller sample_cap=2: the report keeps
+        the ledger's own 5 (ledger-wins), and the contract is locked by the
+        documented wording on render_capped_report (RED before the doc lands,
+        GREEN after; zero behavior change either way).
+        """
+        ledger = CappedProofLedger(sample_cap=5)
+        candidate = _parse_abp_rule("||sub.autos^")
+        covering = _parse_abp_rule("||*.autos^")
+        assert candidate is not None
+        assert covering is not None
+        _record_proven_pruning(
+            ledger,
+            reason=REASON_WILDCARD_COVERS_SUB,
+            candidate=candidate,
+            covering=covering,
+        )
+
+        report = render_capped_report(ledger, sample_cap=2)
+
+        assert report["sample_cap"] == 5
+        assert "pre-capped" in (render_capped_report.__doc__ or "")
+
+
+class TestEvidenceModuleExportSurface:
+    """19-REVIEW IN-05 (HYG-01): package __all__ absorbs the evidence modules."""
+
+    def test_package_all_lists_the_four_evidence_module_names(self):
+        """The evidence-spine modules join the package surface index (names only).
+
+        Mirrors the TestWcsVocabulary module-all pin: names are absorbed into
+        __all__ without re-exporting any implementation function (CONVENTIONS.md
+        Module Design -- callers keep importing from submodules directly).
+        """
+        assert "pruning_proof" in scripts.__all__
+        assert "stage_diagnostics" in scripts.__all__
+        assert "rule_semantics" in scripts.__all__
+        assert "rule_syntax" in scripts.__all__
 
 
 class TestWcsCompilePlane:
