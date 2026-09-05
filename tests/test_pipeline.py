@@ -799,6 +799,13 @@ class TestSaveStatsJson:
         assert data["statistics"]["rule_effect_uncertain"] == 17
         assert data["statistics"]["compression_policy_broadened"] == 18
         assert data["statistics"]["regex_preserved_no_pruning"] == 19
+        # HYG-04b regen: exported statistics mirror the locked 23-04 counter
+        # surface (denyallow bucket plus apex/wcs companions); literals
+        # captured from save_stats_json producer output, not hand-predicted.
+        assert data["statistics"]["abp_subdomain_pruned"] == 200
+        assert data["statistics"]["tld_wildcard_pruned"] == 50
+        assert data["statistics"]["denyallow_wildcard_pruned"] == 25
+        assert data["statistics"]["apex_covered_wildcard_pruned"] == 0
         # HYG-03/IN-02 provenance pin: exported statistics must carry exactly
         # the producer zero-init key set so a future producer key addition
         # without a fixture update fails loudly instead of drifting silently.
@@ -840,6 +847,18 @@ class TestSaveStatsJson:
         assert data["stage_summaries"]["compiler"]["compress"]["reasons"] == {
             "hosts_plain_promoted_to_abp": 18,
         }
+        # HYG-04b regen: prune-stage projection mirrors the locked 23-04
+        # counter surface (COMPILER_STAGE_PRUNE driven-bucket shape with the
+        # coherence trio); literals captured from producer output via
+        # save_stats_json, not hand-predicted.
+        assert data["stage_summaries"]["compiler"]["prune"]["reasons"] == {
+            "abp_subdomain": 200,
+            "tld_wildcard": 50,
+            "denyallow": 25,
+        }
+        assert data["stage_summaries"]["compiler"]["prune"]["discarded"] == 275
+        assert data["stage_summaries"]["compiler"]["prune"]["emitted"] == 500
+        assert data["stage_summaries"]["compiler"]["prune"]["processed"] == 775
         serialized_stages = json.dumps(data["stage_summaries"], sort_keys=True)
         for forbidden in ("sample", "samples", "sample_buckets", "fingerprint", "records"):
             assert forbidden not in serialized_stages
