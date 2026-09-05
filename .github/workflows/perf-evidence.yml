@@ -8,20 +8,22 @@ on:
   schedule:
     - cron: "17 3 * * 2"  # Tue 03:17 UTC per D-22-01
 
-# Snapshot lifecycle (seed-once story, D-22-04):
-# - A one-off manual dispatch seeds the pinned corpus by uploading the fetch
-#   output as a versioned snapshot artifact carrying the name below.
-# - Refresh is deliberate: a human PR touches only PERF_SNAPSHOT_DIGEST and
+# Snapshot lifecycle (self-seed story, D-22-04):
+# - Self-seed on restore miss: when the pinned restore 404s (pre-seed,
+#   expiry), the workflow freezes the current live fetch, uploads it as
+#   perf-snapshot-<newdigest12>, and records the full digest plus an
+#   "open a PR to pin it" note in the step summary.
+# - Pinning is deliberate: a human PR touches only PERF_SNAPSHOT_DIGEST and
 #   PERF_SNAPSHOT_RUN_ID below, nothing else in this file.
-# - Snapshot bytes are never committed to git and never travel through a
-#   shared runner-cache key family; the pinned leg restores artifact bytes
-#   only, and the live leg fetches into its own scratch directories.
+# - Re-seed ~quarterly before the 90-day artifact expiry; snapshot bytes are
+#   never committed to git and never travel through a shared runner-cache
+#   key family.
 env:
   SOURCES: config/sources.txt
   RAW_DIR: lists/_raw
   PERF_SNAPSHOT_DIGEST: ecd3b62468c78c0c49a850f569f16fd9dcb82743b9764a04b4f9c9c72926f27b
   PERF_SNAPSHOT_ARTIFACT: perf-snapshot-ecd3b62468c7
-  # Placeholder until the seed-once manual dispatch lands; replace with that
+  # Placeholder until a self-seeded upload lands; replace with that
   # run's numeric id by human PR (see the lifecycle note above).
   PERF_SNAPSHOT_RUN_ID: "0"
   PINNED_DIR: reports/perf-evidence/pinned-corpus
@@ -141,6 +143,44 @@ jobs:
         run: |
           python -m scripts.benchmark --corpus "$RAW_DIR" \
             --track-memory --json reports/benchmarks/runs/live-memory.json || true
+
+      - name: Prepare self-seed snapshot on restore miss
+        id: self-seed
+        # Self-seed procedure (see the lifecycle note above): on a restore
+        # miss, freeze the current live fetch for a human PR to pin.
+        if: always() && steps.restore.outcome != 'success'
+        continue-on-error: true
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          DIGEST=$(python -c "import json,sys; data=json.load(open(sys.argv[1],encoding='utf-8')); print(data.get('manifest_sha256') or data.get('corpus',{}).get('manifest_sha256',''))" reports/benchmarks/runs/live-timing.json 2>/dev/null || true)
+          if [ -z "$DIGEST" ]; then
+            echo "Self-seed skipped: live corpus report unavailable."
+            echo "Self-seed skipped: live corpus report unavailable." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          SHORT12=$(printf '%s' "$DIGEST" | cut -c1-12)
+          mkdir -p reports/perf-evidence/self-seed-stage
+          cp "$RAW_DIR"/*.txt reports/perf-evidence/self-seed-stage/ 2>/dev/null || true
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "digest12=${SHORT12}" >> "$GITHUB_OUTPUT"
+          {
+            echo "Self-seed snapshot ready: perf-snapshot-${SHORT12}"
+            echo "Full digest: ${DIGEST}"
+            echo "Open a PR to pin it: set PERF_SNAPSHOT_DIGEST to the full digest and PERF_SNAPSHOT_RUN_ID to ${RUN_ID}."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload self-seeded snapshot
+        # Dynamic name carries the staged digest12; guarded on a prepared
+        # digest so seeded weeks stay green with or without a miss.
+        if: always() && steps.self-seed.outputs.digest12 != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: perf-snapshot-${{ steps.self-seed.outputs.digest12 }}
+          path: reports/perf-evidence/self-seed-stage/*.txt
+          if-no-files-found: warn
+          retention-days: 90
 
       - name: Collect Environment Receipts
         # Every report bundle carries environment receipts per PERF-04: CPU
