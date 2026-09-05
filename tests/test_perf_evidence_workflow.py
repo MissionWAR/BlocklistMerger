@@ -127,7 +127,7 @@ def test_perf_evidence_permissions_are_read_only() -> None:
 
 
 def test_perf_evidence_concurrency_is_isolated() -> None:
-    """Own concurrency group with no shared lineage and a 60-minute timeout."""
+    """Own concurrency group with no shared lineage and a 120-minute timeout."""
     text = _perf_text()
     job = _job_section(text, "perf_evidence")
 
@@ -136,7 +136,7 @@ def test_perf_evidence_concurrency_is_isolated() -> None:
     assert "heavy-release-evidence" not in text
     assert "cancel-in-progress: false" in text
     assert "cancel-in-progress: true" not in text
-    assert "\n    timeout-minutes: 60\n" in job
+    assert "\n    timeout-minutes: 120\n" in job
 
 
 def test_perf_evidence_actions_are_sha_pinned() -> None:
