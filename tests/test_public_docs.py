@@ -27,10 +27,8 @@ def _position(text: str, needle: str) -> int:
     return position
 
 
-def _git_check_ignore(path: str, *, no_index: bool = False) -> int:
+def _git_check_ignore(path: str) -> int:
     args = ["git", "check-ignore", "-q"]
-    if no_index:
-        args.insert(2, "--no-index")
     args.append(path)
     return subprocess.run(args, cwd=ROOT, check=False).returncode
 
