@@ -17,8 +17,15 @@ from pathlib import Path
 import pytest
 
 import scripts.pipeline as pipeline_module
+from scripts import __version__
 from scripts.compiler import CompileStats
-from scripts.pipeline import print_summary, process_files, save_stats_json
+from scripts.pipeline import (
+    PIPELINE_STATS_SCHEMA_VERSION,
+    _new_pipeline_stats,
+    print_summary,
+    process_files,
+    save_stats_json,
+)
 from scripts.pruning_proof import (
     DELTA_PRESERVED,
     OUTCOME_PRUNED,
@@ -675,40 +682,46 @@ class TestSaveStatsJson:
     def test_save_stats(self, tmp_dir):
         """Should save stats as valid JSON with dynamic version."""
         json_path = os.path.join(tmp_dir, "stats.json")
-        stats = {
-            "files_processed": 10,
-            "lines_raw": 1000,
-            "lines_clean": 800,
-            "lines_output": 500,
-            "comments_removed": 100,
-            "cosmetic_removed": 50,
-            "unsupported_removed": 50,
-            "url_path_removed": 0,
-            "invalid_removed": 0,
-            "empty_removed": 0,
-            "trimmed": 10,
-            "abp_subdomain_pruned": 200,
-            "tld_wildcard_pruned": 50,
-            "denyallow_wildcard_pruned": 25,
-            "apex_covered_wildcard_pruned": 0,
-            "wildcard_covered_sub_pruned": 0,
-            "duplicate_pruned": 50,
-            "whitelist_conflict_pruned": 0,
-            "local_hostname_pruned": 0,
-            "formats_compressed": 100,
-            "abp_kept": 400,
-            "other_kept": 100,
-            "malformed_discarded": 7,
-            "rule_effect_block": 11,
-            "rule_effect_exception": 12,
-            "rule_effect_rewrite": 13,
-            "rule_effect_disable": 14,
-            "rule_effect_ignored": 15,
-            "rule_effect_unsupported": 16,
-            "rule_effect_uncertain": 17,
-            "compression_policy_broadened": 18,
-            "regex_preserved_no_pruning": 19,
-        }
+        # HYG-03/IN-02 provenance: build from the producer zero-init helper so
+        # the fixture carries exactly the producer key set; per-key overrides
+        # preserve every era-5 expectation value below.
+        stats = _new_pipeline_stats()
+        stats.update(
+            {
+                "files_processed": 10,
+                "lines_raw": 1000,
+                "lines_clean": 800,
+                "lines_output": 500,
+                "comments_removed": 100,
+                "cosmetic_removed": 50,
+                "unsupported_removed": 50,
+                "url_path_removed": 0,
+                "invalid_removed": 0,
+                "empty_removed": 0,
+                "trimmed": 10,
+                "abp_subdomain_pruned": 200,
+                "tld_wildcard_pruned": 50,
+                "denyallow_wildcard_pruned": 25,
+                "apex_covered_wildcard_pruned": 0,
+                "wildcard_covered_sub_pruned": 0,
+                "duplicate_pruned": 50,
+                "whitelist_conflict_pruned": 0,
+                "local_hostname_pruned": 0,
+                "formats_compressed": 100,
+                "abp_kept": 400,
+                "other_kept": 100,
+                "malformed_discarded": 7,
+                "rule_effect_block": 11,
+                "rule_effect_exception": 12,
+                "rule_effect_rewrite": 13,
+                "rule_effect_disable": 14,
+                "rule_effect_ignored": 15,
+                "rule_effect_unsupported": 16,
+                "rule_effect_uncertain": 17,
+                "compression_policy_broadened": 18,
+                "regex_preserved_no_pruning": 19,
+            }
+        )
         runtime_profile = {
             "worker_count": 4,
             "stage_durations_seconds": {
@@ -764,8 +777,8 @@ class TestSaveStatsJson:
         with open(json_path) as f:
             data = json.load(f)
 
-        assert data["schema_version"] == 5
-        assert data["version"] == "1.5.0"
+        assert data["schema_version"] == PIPELINE_STATS_SCHEMA_VERSION
+        assert data["version"] == __version__
         assert data["timestamp"].endswith("Z")
         assert data["execution_time_seconds"] == 5.5
         assert data["statistics"]["files_processed"] == 10
@@ -786,6 +799,10 @@ class TestSaveStatsJson:
         assert data["statistics"]["rule_effect_uncertain"] == 17
         assert data["statistics"]["compression_policy_broadened"] == 18
         assert data["statistics"]["regex_preserved_no_pruning"] == 19
+        # HYG-03/IN-02 provenance pin: exported statistics must carry exactly
+        # the producer zero-init key set so a future producer key addition
+        # without a fixture update fails loudly instead of drifting silently.
+        assert set(data["statistics"].keys()) == set(_new_pipeline_stats().keys())
         assert data["semantics"] == {
             "rule_effect_counts": {
                 "block": 11,
@@ -828,6 +845,36 @@ class TestSaveStatsJson:
             assert forbidden not in serialized_stages
         assert data["runtime_profile"] == runtime_profile
         assert not os.path.exists(os.path.join(tmp_dir, "stats.tmp"))
+
+    def test_provenance_tracks_simulated_era_bump(self, tmp_dir, monkeypatch):
+        """Tripwire (HYG-03/IN-02): constant-tied expectations track a bump.
+
+        Under a simulated schema-era and version bump the pins below still
+        pass, proving they resolve through the producer constants instead of
+        stale literals. Module-qualified reads are deliberate: the patch lands
+        on the producer namespace, which is exactly what must be tracked.
+        """
+        monkeypatch.setattr(pipeline_module, "PIPELINE_STATS_SCHEMA_VERSION", 6)
+        monkeypatch.setattr(pipeline_module, "__version__", "9.9.9-era-bump")
+        json_path = os.path.join(tmp_dir, "stats-bump.json")
+        save_stats_json(dict(_new_pipeline_stats()), json_path, total_time=1.0)
+
+        with open(json_path) as f:
+            data = json.load(f)
+
+        assert data["schema_version"] == pipeline_module.PIPELINE_STATS_SCHEMA_VERSION
+        assert data["version"] == pipeline_module.__version__
+
+    def test_statistics_key_set_gate_rejects_unknown_keys(self):
+        """Drift-gate teeth (HYG-03/IN-02): the key-set gate is not vacuous.
+
+        A producer-stats copy carrying one injected unknown key must NOT equal
+        the producer key set, proving the key-set equality gate can fail.
+        """
+        producer_keys = set(_new_pipeline_stats().keys())
+        drifted = dict(_new_pipeline_stats())
+        drifted["future_counter_not_yet_known"] = 0
+        assert set(drifted.keys()) != producer_keys
 
 
 class TestPipelineCli:
