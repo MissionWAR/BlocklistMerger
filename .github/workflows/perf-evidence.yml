@@ -151,6 +151,7 @@ jobs:
         # degrade to labeled unknown values, never to forged numbers.
         # Always-run so a failed leg still leaves partial receipts behind.
         if: always()
+        continue-on-error: true
         env:
           GIT_SHA: ${{ github.sha }}
           RUN_ID: ${{ github.run_id }}
@@ -301,6 +302,7 @@ jobs:
         # manifest); drifted or baseline-less weeks render raw-only notes and
         # the job stays green by construction.
         if: always()
+        continue-on-error: true
         env:
           PINNED_DRIFTED: ${{ steps.pinned-verify.outputs.drifted }}
         run: |
