@@ -130,6 +130,83 @@ jobs:
           python -m scripts.benchmark --corpus "$RAW_DIR" \
             --track-memory --json reports/benchmarks/runs/live-memory.json
 
+      - name: Collect Environment Receipts
+        # Every report bundle carries environment receipts per PERF-04: CPU
+        # model via lscpu, runner image via ImageOS/ImageVersion with an
+        # os-release fallback plus a runner-log reference when empty, Python
+        # patch version, both corpus manifest digests read from the fresh leg
+        # reports, and the workflow-owned revision identifiers. Missing inputs
+        # degrade to labeled unknown values, never to forged numbers.
+        # Always-run so a failed leg still leaves partial receipts behind.
+        if: always()
+        env:
+          GIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          mkdir -p reports/perf-evidence
+          if command -v lscpu >/dev/null 2>&1; then
+            lscpu > reports/perf-evidence/cpu.txt 2>/dev/null || echo "cpu: unknown (lscpu failed)" > reports/perf-evidence/cpu.txt
+          else
+            echo "cpu: unknown (lscpu unavailable)" > reports/perf-evidence/cpu.txt
+          fi
+          CPU_MODEL=$(grep -m1 -i "model name" reports/perf-evidence/cpu.txt 2>/dev/null | cut -d: -f2- | sed 's/^ *//' || true)
+          if [ -z "$CPU_MODEL" ]; then
+            CPU_MODEL="unknown"
+          fi
+          RUNNER_IMAGE="${ImageOS:-}"
+          RUNNER_IMAGE_VERSION="${ImageVersion:-}"
+          if [ -z "$RUNNER_IMAGE" ]; then
+            RUNNER_IMAGE=$(grep -m1 '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+          fi
+          if [ -z "$RUNNER_IMAGE" ]; then
+            RUNNER_IMAGE="unknown (see the runner log)"
+          fi
+          if [ -z "$RUNNER_IMAGE_VERSION" ]; then
+            RUNNER_IMAGE_VERSION="unknown (see the runner log)"
+          fi
+          PYTHON_VERSION=$(python --version 2>&1 || echo "Python unknown")
+          export CPU_MODEL RUNNER_IMAGE RUNNER_IMAGE_VERSION PYTHON_VERSION
+          RECEIPTS_SHA="$GIT_SHA" RECEIPTS_RUN="$RUN_ID" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+
+          def _manifest(path):
+              try:
+                  data = json.loads(Path(path).read_text(encoding="utf-8"))
+              except (OSError, ValueError):
+                  return ""
+              if not isinstance(data, dict):
+                  return ""
+              manifest = data.get("manifest_sha256")
+              if not manifest:
+                  corpus = data.get("corpus")
+                  if isinstance(corpus, dict):
+                      manifest = corpus.get("manifest_sha256", "")
+              return manifest or ""
+
+
+          receipts = {
+              "cpu_model": os.environ.get("CPU_MODEL", "unknown"),
+              "runner_image": os.environ.get("RUNNER_IMAGE", "unknown"),
+              "runner_image_version": os.environ.get("RUNNER_IMAGE_VERSION", "unknown"),
+              "python_version": os.environ.get("PYTHON_VERSION", "unknown"),
+              "pinned_manifest_sha256": _manifest("reports/benchmarks/runs/pinned-timing.json"),
+              "live_manifest_sha256": _manifest("reports/benchmarks/runs/live-timing.json"),
+              "git_revision": os.environ.get("RECEIPTS_SHA", "unknown"),
+              "run_id": os.environ.get("RECEIPTS_RUN", "unknown"),
+          }
+          if not receipts["pinned_manifest_sha256"]:
+              receipts["pinned_manifest_sha256"] = "unknown (pinned leg missing or drifted)"
+          if not receipts["live_manifest_sha256"]:
+              receipts["live_manifest_sha256"] = "unknown (live leg missing)"
+          Path("reports/perf-evidence/receipts.json").write_text(
+              json.dumps(receipts, indent=2) + "\n", encoding="utf-8"
+          )
+          print("receipts written to reports/perf-evidence/receipts.json")
+          PY
+
       - name: Resolve baseline run id
         id: baseline
         env:
@@ -202,6 +279,143 @@ jobs:
           fi
           python -m scripts.benchmark --compare previous/live-timing.json reports/benchmarks/runs/live-timing.json --min-improve-percent 15.0 || true
           true
+
+      - name: Render Advisory Summary
+        # Advisory-labeled delta table per PERF-02, rendered through the
+        # SUMMARY_PATH environment intermediary idiom. Always-run so the
+        # summary lands even when legs or compares fail. Deltas render only
+        # on manifest-digest equality (pinned drift flag clear with matching
+        # prior pinned manifest; live hashes matching the prior live
+        # manifest); drifted or baseline-less weeks render raw-only notes and
+        # the job stays green by construction.
+        if: always()
+        env:
+          PINNED_DRIFTED: ${{ steps.pinned-verify.outputs.drifted }}
+        run: |
+          SUMMARY_PATH="$GITHUB_STEP_SUMMARY" PINNED_DRIFTED="$PINNED_DRIFTED" python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+
+          def _load(path):
+              try:
+                  data = json.loads(Path(path).read_text(encoding="utf-8"))
+              except (OSError, ValueError):
+                  return None
+              return data if isinstance(data, dict) else None
+
+
+          def _manifest(data):
+              if not isinstance(data, dict):
+                  return ""
+              manifest = data.get("manifest_sha256")
+              if not manifest:
+                  corpus = data.get("corpus")
+                  if isinstance(corpus, dict):
+                      manifest = corpus.get("manifest_sha256", "")
+              return manifest or ""
+
+
+          def _median(data):
+              if not isinstance(data, dict):
+                  return ""
+              median = data.get("median_seconds")
+              if median is None:
+                  summary = data.get("summary")
+                  if isinstance(summary, dict):
+                      median = summary.get("median_seconds")
+              return "" if median is None else str(median)
+
+
+          def _cell_median(data):
+              median = _median(data)
+              return f"{median} s" if median else "raw only"
+
+
+          def _delta(fresh, baseline):
+              try:
+                  fresh_f = float(fresh)
+                  base_f = float(baseline)
+              except (TypeError, ValueError):
+                  return "raw only"
+              if base_f == 0:
+                  return "raw only"
+              pct = (fresh_f - base_f) / base_f * 100.0
+              return f"{pct:+.1f}%"
+
+
+          def _short(digest):
+              if not digest:
+                  return "unknown"
+              return digest[:12] + "..." if len(digest) > 12 else digest
+
+
+          pinned = _load("reports/benchmarks/runs/pinned-timing.json")
+          live = _load("reports/benchmarks/runs/live-timing.json")
+          prior_pinned = _load("previous/pinned-timing.json")
+          prior_live = _load("previous/live-timing.json")
+          drifted = os.environ.get("PINNED_DRIFTED", "true")
+
+          lines = [
+              "## Perf Evidence (advisory - cross-environment, non-gating)",
+              "",
+              "Evidence only: these numbers never gate publishing and this workflow is never a required check.",
+              "",
+              "| Leg | Median | Baseline | Delta | Corpus manifest |",
+              "| --- | ------ | -------- | ----- | --------------- |",
+          ]
+
+          pinned_manifest = _manifest(pinned)
+          prior_pinned_manifest = _manifest(prior_pinned)
+          if drifted == "true" or pinned is None:
+              lines.append(
+                  f"| pinned timing | {_cell_median(pinned)} | - | raw only | "
+                  f"{_short(pinned_manifest)} (pinned, drifted) |"
+              )
+          elif prior_pinned is None:
+              lines.append(
+                  f"| pinned timing | {_cell_median(pinned)} | - (first run) | raw only | "
+                  f"{_short(pinned_manifest)} (pinned) |"
+              )
+          elif not pinned_manifest or pinned_manifest != prior_pinned_manifest:
+              lines.append(
+                  f"| pinned timing | {_cell_median(pinned)} | - | raw only | "
+                  f"{_short(pinned_manifest)} (pinned, drifted) |"
+              )
+          else:
+              lines.append(
+                  f"| pinned timing | {_cell_median(pinned)} | {_cell_median(prior_pinned)} | "
+                  f"{_delta(_median(pinned), _median(prior_pinned))} | "
+                  f"{_short(pinned_manifest)} (pinned, match) |"
+              )
+
+          live_manifest = _manifest(live)
+          prior_live_manifest = _manifest(prior_live)
+          if live is None:
+              lines.append("| live timing | raw only (missing) | - | raw only | unknown (live) |")
+          elif prior_live is None:
+              lines.append(
+                  f"| live timing | {_cell_median(live)} | - (first run) | raw only | "
+                  f"{_short(live_manifest)} (live) |"
+              )
+          elif not live_manifest or live_manifest != prior_live_manifest:
+              lines.append(
+                  f"| live timing | {_cell_median(live)} | - | raw only | "
+                  f"{_short(live_manifest)} (live, drifted) |"
+              )
+          else:
+              lines.append(
+                  f"| live timing | {_cell_median(live)} | {_cell_median(prior_live)} | "
+                  f"{_delta(_median(live), _median(prior_live))} | "
+                  f"{_short(live_manifest)} (live, match) |"
+              )
+
+          with open(os.environ["SUMMARY_PATH"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines))
+              summary.write("\n")
+          print("advisory summary appended to step summary")
+          PY
 
       - name: Upload Perf Evidence (skeleton)
         if: always()
