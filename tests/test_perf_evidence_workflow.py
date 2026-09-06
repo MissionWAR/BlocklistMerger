@@ -20,9 +20,7 @@ HEAVY_EVIDENCE_WORKFLOW = ROOT / ".github" / "workflows" / "heavy-evidence.yml"
 PERF_CRON = "17 3 * * 2"
 RELEASE_INSTALL = 'python -m pip install -q -c constraints/release-py314.txt ".[dev]"'
 CHECKOUT_PIN = "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1"
-SETUP_PYTHON_PIN = (
-    "uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0"
-)
+SETUP_PYTHON_PIN = "uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0"
 UPLOAD_ARTIFACT_PIN = (
     "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1"
 )

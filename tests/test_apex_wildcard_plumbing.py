@@ -662,9 +662,6 @@ def test_wildcard_covered_sub_counter_key_producer_consumer_equality():
     assert "wildcard_covered_sub_pruned" in CompileStats.__dataclass_fields__
     assert "wildcard_covered_sub_pruned" in PipelineStats.__annotations__
     assert _new_pipeline_stats()["wildcard_covered_sub_pruned"] == 0
-    assert (
-        compiler_stage_summaries_from_stats({"wildcard_covered_sub_pruned": 7})[
-            COMPILER_STAGE_PRUNE
-        ]["reasons"]
-        == {"wcs_covered": 7}
-    )
+    assert compiler_stage_summaries_from_stats({"wildcard_covered_sub_pruned": 7})[
+        COMPILER_STAGE_PRUNE
+    ]["reasons"] == {"wcs_covered": 7}

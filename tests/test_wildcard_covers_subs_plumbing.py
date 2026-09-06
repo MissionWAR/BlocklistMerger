@@ -1212,8 +1212,7 @@ class TestWcsMisKeyedWitnessSilentSkip:
         assert stats.wildcard_covered_sub_pruned == 1
         assert ledger.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 1}
         matches = [
-            record for record in ledger.records
-            if record.reason == REASON_WILDCARD_COVERS_SUB
+            record for record in ledger.records if record.reason == REASON_WILDCARD_COVERS_SUB
         ]
         assert len(matches) == 1
         sample = matches[0].sample
@@ -1379,8 +1378,7 @@ class TestWcsSurvivorshipAcrossFlags:
         assert stats.wildcard_covered_sub_pruned == 0
         assert ledger.summary()["by_reason"] == {REASON_APEX_COVERS_TLD_WILDCARD: 1}
         matches = [
-            record for record in ledger.records
-            if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
+            record for record in ledger.records if record.reason == REASON_APEX_COVERS_TLD_WILDCARD
         ]
         assert len(matches) == 1
         sample = matches[0].sample
@@ -1701,15 +1699,9 @@ class TestWcsDeterminismAcrossRuns:
         )
 
         assert rules_run1 == rules_run2
-        assert (
-            stats_run1.wildcard_covered_sub_pruned
-            == stats_run2.wildcard_covered_sub_pruned
-        )
+        assert stats_run1.wildcard_covered_sub_pruned == stats_run2.wildcard_covered_sub_pruned
         assert stats_run1.wildcard_covered_sub_pruned == 0
-        assert (
-            stats_run1.apex_covered_wildcard_pruned
-            == stats_run2.apex_covered_wildcard_pruned
-        )
+        assert stats_run1.apex_covered_wildcard_pruned == stats_run2.apex_covered_wildcard_pruned
         assert stats_run1.tld_wildcard_pruned == stats_run2.tld_wildcard_pruned
         by_reason_run1 = ledger_run1.summary()["by_reason"]
         by_reason_run2 = ledger_run2.summary()["by_reason"]
