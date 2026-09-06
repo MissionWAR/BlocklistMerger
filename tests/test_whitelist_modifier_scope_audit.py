@@ -846,6 +846,8 @@ def _shadow_line_factory(
 
 
 # 21-IN-01: PEP 695 bound preserves Wcs/ApexTallyingLedger subclasses for checkers.
+# Parse floor: PEP 695 needs Python 3.12+ to parse; the project floor is 3.14
+# (pyproject.toml), and CI plus all documented local workflows run 3.14+.
 def _compile_shadow_leg[LedgerT: CappedProofLedger](
     line_source: Callable[[], Iterable[str]],
     output_path: Path,

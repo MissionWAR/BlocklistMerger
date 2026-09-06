@@ -20,8 +20,9 @@ This phase integrates no external API.
 This sweep integrates no external API.
 
 - All edits are local text, config, and test changes: one `.gitignore`
-  Agents-section addition, three added ignore-policy pins in
-  `tests/test_public_docs.py`, and this declaration itself.
+  Agents-section addition, four added ignore-policy pins in
+  `tests/test_public_docs.py` (v2 stem, dirb stem, two tooling-state paths),
+  and this declaration itself.
 - The only subprocess contact is the pre-existing `git check-ignore` /
   `git ls-files` probe helpers in `tests/test_public_docs.py`, called with
   fixed path literals; no new subprocess call is introduced.
