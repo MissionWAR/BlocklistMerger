@@ -27,10 +27,8 @@ def _position(text: str, needle: str) -> int:
     return position
 
 
-def _git_check_ignore(path: str, *, no_index: bool = False) -> int:
+def _git_check_ignore(path: str) -> int:
     args = ["git", "check-ignore", "-q"]
-    if no_index:
-        args.insert(2, "--no-index")
     args.append(path)
     return subprocess.run(args, cwd=ROOT, check=False).returncode
 
@@ -136,6 +134,14 @@ def test_ignore_policy_source_runtime_boundary() -> None:
     # The shadow-gate evidence home itself stays trackable (manifests are
     # versioned stems, so pin a future-shaped path, not just current files).
     assert _git_check_ignore("reports/shadow-gate/apex-shadow-v1.json") == 1
+    # IN-03: the absent v2 stem is deliberate — git check-ignore evaluates
+    # nonexistent paths, so this guards the documented flip-day stem pre-creation.
+    assert _git_check_ignore("reports/shadow-gate/apex-shadow-v2.json") == 1
+    # 21-IN-03: dirb evidence is trackable explicitly, not just by bulk exclusion.
+    assert _git_check_ignore("reports/shadow-gate/dirb-shadow-v1.json") == 1
+    # IN-05: local agent-tooling state must stay ignored, never staged publicly.
+    assert _git_check_ignore(".claude/settings.local.json") == 0
+    assert _git_check_ignore(".gsd/state.json") == 0
 
     tracked = _git_ls_files("lists", ".cache", "reports")
     bulk_tracked = [path for path in tracked if not path.startswith("reports/shadow-gate/")]
@@ -211,6 +217,42 @@ def test_readme_direction_a_closure_paragraph_is_contained_with_evidence_link() 
     )
 
     assert "APEX_SHADOW_DATASET_ID" not in text
+
+
+def test_readme_direction_b_closure_paragraph_is_contained_with_evidence_link() -> None:
+    """README should keep the dirb-shadow verdict inside Scope and Non-Goals."""
+    text = _read_text(README)
+    scope_heading = _position(text, "## Scope and Non-Goals")
+    apex_start = _position(
+        text,
+        "**Apex-covered wildcard pruning (v1.3): measured, not enabled.**",
+    )
+    paragraph_start = _position(
+        text,
+        "**Wildcard-covers-sub pruning: measured, not enabled.**",
+    )
+    paragraph_end = text.find("\n\n", paragraph_start)
+    sources_heading = _position(text, "## 📋 Sources")
+
+    assert scope_heading < apex_start < paragraph_start < paragraph_end < sources_heading
+
+    paragraph = text[paragraph_start:paragraph_end]
+    required_fragments = [
+        "A full-corpus shadow run over 10,257,217 input rules",
+        "nothing remained that only the new pass can remove",
+        "-3.69% median wall-clock overhead (ON median 389.45 s vs OFF median 375.58 s",
+        "slightly slower, well within run variance",
+        "stays deliberately default-OFF and the direction is closed",
+    ]
+    for fragment in required_fragments:
+        assert fragment in paragraph
+
+    assert (
+        "[`reports/shadow-gate/dirb-shadow-v1.md`](reports/shadow-gate/dirb-shadow-v1.md)"
+        in paragraph
+    )
+
+    assert "DIRB_SHADOW_DATASET_ID" not in text
 
 
 def test_agh_semantics_matrix_is_publicly_discoverable() -> None:

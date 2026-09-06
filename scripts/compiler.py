@@ -80,6 +80,7 @@ from scripts.pruning_proof import (
     REASON_TLD_WILDCARD_COVERED,
     REASON_UNSUPPORTED_MODIFIER_REMOVED,
     REASON_WILDCARD_COVERED,
+    REASON_WILDCARD_COVERS_SUB,
     ProofLedger,
     RuleFacet,
 )
@@ -266,6 +267,7 @@ class CompileStats:
         tld_wildcard_pruned: Rules pruned by TLD wildcards (e.g., ||*.autos^)
         denyallow_wildcard_pruned: Rules pruned by admissible $denyallow wildcard coverage
         apex_covered_wildcard_pruned: TLD wildcard variants pruned by surviving apex coverage
+        wildcard_covered_sub_pruned: Sub rules pruned by surviving wildcard coverage
         duplicate_pruned: Exact duplicate rules removed
         whitelist_conflict_pruned: Rules removed due to whitelist conflicts
         local_hostname_pruned: Local hostnames (localhost, etc.) skipped
@@ -306,6 +308,7 @@ class CompileStats:
     tld_wildcard_pruned: int = 0
     denyallow_wildcard_pruned: int = 0
     apex_covered_wildcard_pruned: int = 0
+    wildcard_covered_sub_pruned: int = 0
     duplicate_pruned: int = 0
     whitelist_conflict_pruned: int = 0
     local_hostname_pruned: int = 0
@@ -1298,6 +1301,13 @@ def _find_covering_exception_indexed(
     only capped ledger samples could differ (accepted per assumption A5 and
     re-verified by the slow corpus audit at the ship gate).
     """
+    # IN-02 (HYG-01): two-exception divergence is expected and benign --
+    # with @@||example.com^ listed before @@||deep.sub.example.com^ both
+    # covering ||x.deep.sub.example.com^, the legacy global-first scan
+    # returns the apex witness while the indexed most-specific-first probe
+    # returns the deep-sub witness; outputs stay existence-based so bytes,
+    # counters, and ledger reason buckets are unaffected and only capped
+    # samples or fingerprints can differ (accepted per assumption A5).
     for key in _exception_probe_keys(record):
         bucket = index.get(key)
         if not bucket:
@@ -1372,6 +1382,80 @@ def _find_denyallow_covering_variant(
         allow_set = _denyallow_allow_set(variant.modifiers, tld)
         if allow_set is not None and _domain_disjoint_from_all(child.domain, allow_set):
             return variant
+    return None
+
+
+def _wildcard_covers_sub(
+    candidate: RuleEntry,
+    witnesses: list[RuleEntry],
+    tld: str | None,
+) -> RuleEntry | None:
+    """Return the FIRST surviving wildcard variant provably covering a candidate.
+
+    Iterates witnesses in storage (append) order so multi-variant keys
+    resolve deterministically: exactly one witness or None, never a
+    collection. A witness proves coverage only after four legs, composed
+    per witness with the first full pass winning:
+
+    1. Domain eligibility (evaluated once, before iteration): the candidate
+       must sit strictly under the ``tld`` key. A domain equal to the key is
+       the wildcard's own apex and is refused -- AdGuard Home matches
+       ``||*.x^`` via the ``".x"`` suffix so an apex never covers itself --
+       and any domain not ending in ``"." + tld`` is cross-key and refused
+       outright. Strict same-key eligibility ONLY: no suffix relaxation, no
+       registered-domain walking, no cross-key witnessing, ever (the D-16-02
+       adjudication).
+    2. Witness key eligibility (per witness): every witness must itself be a
+       TLD-form wildcard for this key -- ``witness.is_wildcard`` AND
+       ``witness.domain == tld``. Callers are NOT trusted to pre-filter:
+       a mis-keyed record (say ``||*.other.com^`` handed over with
+       ``tld="autos"``) is skipped instead of being allowed to prove
+       coverage, keeping strict same-key eligibility symmetric across the
+       candidate and witness sides (WR-01).
+    3. Scope proof: ``modifier_scope_covers(witness.modifiers,
+       candidate.modifiers)`` is the SOLE authority on modifier coverage --
+       no comparison logic is invented here. Carriers of NO_COVERAGE
+       modifiers ($badfilter, $denyallow, $dnsrewrite) are rejected by the
+       oracle wholesale.
+    4. Denyallow divergence: reuses ``_denyallow_allow_set`` +
+       ``_domain_disjoint_from_all`` unchanged. When the witness carries an
+       admissible $denyallow set sharing a subtree with the candidate,
+       coverage is refused (the exemption carves out a region the wildcard
+       cannot prove across). An inadmissible set imposes nothing here.
+
+    Args:
+        candidate: Plain blocking rule record under evaluation.
+        witnesses: Surviving wildcard variants in storage order, expected
+            same-key; each witness's own TLD-form eligibility is verified
+            here (leg 2) rather than assumed from the caller.
+        tld: The wildcard storage key shared by the witnesses (from the
+            parse-time ``get_tld`` bucketing); None refuses coverage outright.
+
+    Returns:
+        The first witness passing all legs, or None when no witness provably
+        covers the candidate.
+
+    Note:
+        Sole production caller is the write-time emission site in
+        `_write_output()` (Direction-B, flagged by
+        `wildcard_covers_subs_pruning`). Do not add other callers:
+        compile-level yield is structurally zero (Phase 3 superset),
+        so a second emission site would double-count one removal in
+        two reason families (D-19-04).
+    """
+    if tld is None:
+        return None
+    if candidate.domain == tld or not candidate.domain.endswith("." + tld):
+        return None
+    for witness in witnesses:
+        if not (witness.is_wildcard and witness.domain == tld):
+            continue  # mis-keyed: not a TLD-form wildcard for this key (WR-01)
+        if not modifier_scope_covers(witness.modifiers, candidate.modifiers):
+            continue
+        allow_set = _denyallow_allow_set(witness.modifiers, tld)
+        if allow_set is not None and not _domain_disjoint_from_all(candidate.domain, allow_set):
+            continue
+        return witness
     return None
 
 
@@ -1572,6 +1656,10 @@ def _prune_redundant_rules(
                 # set inside the TLD branch above where tld is non-empty, the
                 # key exists, and later walks cannot overwrite it because they
                 # only fire while uncertain_covering is still None.
+                # IN-03 (HYG-01): Narrow-scope children ($client/$ctag/$dnstype)
+                # pass the eligibility gate on purpose: unconditional wildcard
+                # coverage subsumes scoped-child coverage, unlike $important,
+                # NO_COVERAGE, and parse-uncertain children which stay kept.
                 if (
                     denyallow_pruning
                     and uncertain_reason == "tld_wildcard_modifier_scope_unproven"
@@ -1614,6 +1702,7 @@ def _write_output(
     *,
     exception_index: ExceptionIndex | None = None,
     apex_survivor_index: dict[str, list[RuleEntry]] | None = None,
+    wildcard_covers_subs_pruning: bool = False,
 ) -> None:
     """Phase 4: Write deduplicated rules to output atomically.
 
@@ -1632,10 +1721,21 @@ def _write_output(
             when provided each wildcard record is additionally proven against
             a surviving same-key apex and skipped when covered; None keeps
             the legacy emission path instruction-for-instruction.
+        wildcard_covers_subs_pruning: When True every plain subdomain record
+            is additionally proven against surviving same-key TLD wildcards --
+            witnesses collected only at their actual-write points -- and is
+            skipped when provably covered; False keeps the legacy emission
+            path instruction-for-instruction.
     """
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = output_path.with_suffix(".tmp")
+
+    # Direction-B witness index (PRUNE-02): built only when flagged ON; None
+    # keeps the legacy emission path free of any work beyond this binding.
+    wcs_survivor_index: dict[str, list[RuleEntry]] | None = (
+        {} if wildcard_covers_subs_pruning else None
+    )
 
     with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
         for records in abp_wildcards.values():
@@ -1679,9 +1779,41 @@ def _write_output(
                             continue
                 f.write(record.rule + "\n")
                 stats.abp_kept += 1
+                if wcs_survivor_index is not None:
+                    # Direction-B witnessing (PRUNE-02): strictly after both
+                    # early-continue screens above -- only wildcards that
+                    # actually wrote may witness (survivorship ordering).
+                    wcs_survivor_index.setdefault(record.domain, []).append(record)
 
         for records in pruned_abp.values():
             for record in records:
+                if record.is_wildcard:
+                    # Direction-B scope (PRUNE-02): the probe covers plain
+                    # subdomain records only, per the flag contract; wildcard
+                    # candidates keep via write+bump with no probe.
+                    f.write(record.rule + "\n")
+                    stats.abp_kept += 1
+                    continue
+                if wcs_survivor_index is not None:
+                    tld = get_tld(record.domain)
+                    if tld is None:
+                        f.write(record.rule + "\n")
+                        stats.abp_kept += 1
+                        continue
+                    witnesses = wcs_survivor_index.get(tld)
+                    if witnesses:
+                        covering_wildcard = _wildcard_covers_sub(record, witnesses, tld)
+                        if covering_wildcard is not None:
+                            stats.wildcard_covered_sub_pruned += 1
+                            _record_proven_pruning(
+                                proof_ledger,
+                                reason=REASON_WILDCARD_COVERS_SUB,
+                                candidate=record,
+                                covering=covering_wildcard,
+                            )
+                            # Skips BOTH the write and the abp_kept bump, or
+                            # total_output corrupts while bytes stay correct.
+                            continue
                 f.write(record.rule + "\n")
                 stats.abp_kept += 1
 
@@ -1705,6 +1837,7 @@ def compile_rules(
     proof_ledger: ProofLedger | None = None,
     denyallow_pruning: bool = True,
     wildcard_apex_pruning: bool = False,
+    wildcard_covers_subs_pruning: bool = False,
 ) -> CompileStats:
     """
     Compile and deduplicate rules with format compression.
@@ -1731,6 +1864,16 @@ def compile_rules(
             production default): compiled output is byte-identical to legacy
             behavior and the apex-covered counter stays 0 everywhere. ON: each
             removed TLD wildcard is individually proven against its surviving apex.
+        wildcard_covers_subs_pruning: Remove a subdomain rule only when a surviving
+            same-key TLD wildcard provably covers it with equal-or-broader modifier
+            scope; every removal is individually proven against a wildcard that
+            itself shipped in the final output and individually recorded in the
+            proof ledger, with witnesses collected only at actual-write points so
+            skipped wildcards never witness. Ineligible (mis-keyed) witnesses are
+            skipped silently and candidates whose proof fails are kept silently
+            without ledger entries. OFF (the production default) leaves compiled
+            output byte-identical to legacy behavior with the
+            wildcard-covered-sub counter at 0 everywhere.
 
     Returns:
         CompileStats with metrics about the compilation process
@@ -1803,6 +1946,7 @@ def compile_rules(
         proof_ledger=proof_ledger,
         exception_index=exception_index,
         apex_survivor_index=apex_survivor_index,
+        wildcard_covers_subs_pruning=wildcard_covers_subs_pruning,
     )
 
     return stats
@@ -1845,6 +1989,7 @@ if __name__ == "__main__":
     print(f"  TLD wildcards:          {stats.tld_wildcard_pruned:,}")
     print(f"  Denyallow wildcards:    {stats.denyallow_wildcard_pruned:,}")
     print(f"  Apex-covered wildcards: {stats.apex_covered_wildcard_pruned:,}")
+    print(f"  Wildcard-covered subs:  {stats.wildcard_covered_sub_pruned:,}")
     print(f"  Duplicates:             {stats.duplicate_pruned:,}")
     print(f"  Whitelist conflicts:    {stats.whitelist_conflict_pruned:,}")
     print(f"  Local hostnames:        {stats.local_hostname_pruned:,}")

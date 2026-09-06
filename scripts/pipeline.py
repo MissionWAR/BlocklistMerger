@@ -90,6 +90,7 @@ class PipelineStats(TypedDict):
     tld_wildcard_pruned: int
     denyallow_wildcard_pruned: int
     apex_covered_wildcard_pruned: int
+    wildcard_covered_sub_pruned: int
     duplicate_pruned: int
     whitelist_conflict_pruned: int
     local_hostname_pruned: int
@@ -347,6 +348,7 @@ def _new_pipeline_stats() -> PipelineStats:
         "tld_wildcard_pruned": 0,
         "denyallow_wildcard_pruned": 0,
         "apex_covered_wildcard_pruned": 0,
+        "wildcard_covered_sub_pruned": 0,
         "duplicate_pruned": 0,
         "whitelist_conflict_pruned": 0,
         "local_hostname_pruned": 0,
@@ -687,12 +689,16 @@ def process_files_with_profile(
     print(f"   Kept {stats['lines_clean']:,} clean rules")
     print(f"   Output: {compile_stats.total_output:,} rules ({pipeline_time:.1f}s)")
 
+    # IN-02 (HYG-01) consumer note: CLI counts and JSON buckets below are
+    # existence-based, so indexed-versus-legacy witness selection cannot
+    # change them -- only capped ledger samples or fingerprints can differ.
     # Transfer compilation stats
     stats["lines_output"] = compile_stats.total_output
     stats["abp_subdomain_pruned"] = compile_stats.abp_subdomain_pruned
     stats["tld_wildcard_pruned"] = compile_stats.tld_wildcard_pruned
     stats["denyallow_wildcard_pruned"] = compile_stats.denyallow_wildcard_pruned
     stats["apex_covered_wildcard_pruned"] = compile_stats.apex_covered_wildcard_pruned
+    stats["wildcard_covered_sub_pruned"] = compile_stats.wildcard_covered_sub_pruned
     stats["duplicate_pruned"] = compile_stats.duplicate_pruned
     stats["whitelist_conflict_pruned"] = compile_stats.whitelist_conflict_pruned
     stats["local_hostname_pruned"] = compile_stats.local_hostname_pruned
@@ -783,6 +789,7 @@ def print_summary(stats: PipelineStats) -> None:
     print(f"   TLD wildcards:          {stats['tld_wildcard_pruned']:>10,}")
     print(f"   Denyallow wildcards:    {stats['denyallow_wildcard_pruned']:>10,}")
     print(f"   Apex-covered wildcards: {stats['apex_covered_wildcard_pruned']:>10,}")
+    print(f"   Wildcard-covered subs:  {stats['wildcard_covered_sub_pruned']:>10,}")
     print(f"   Duplicates:             {stats['duplicate_pruned']:>10,}")
     print(f"   Whitelist conflict:     {stats['whitelist_conflict_pruned']:>10,}")
     print(f"   Local hostnames:        {stats['local_hostname_pruned']:>10,}")

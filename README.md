@@ -47,6 +47,8 @@ Release evidence, inspect-only diagnostics, and guard promotion criteria are doc
 
 **Apex-covered wildcard pruning (v1.3): measured, not enabled.** A full-corpus shadow run over 10,348,336 input rules found **zero** removable `||*.tld^` wildcard pairs — after deduplication, no surviving TLD wildcard has a same-key apex coverer — while the flagged pass would have cost +23.4% median wall-clock. Consistent with this project's evidence-first policy, the feature ships permanently disabled and the direction is closed; the complete verdict manifest and re-run procedure live in [`reports/shadow-gate/apex-shadow-v1.md`](reports/shadow-gate/apex-shadow-v1.md).
 
+**Wildcard-covers-sub pruning: measured, not enabled.** A full-corpus shadow run over 10,257,217 input rules found **zero** removable wildcard-plus-sub pairs — after deduplication, nothing remained that only the new pass can remove — while the flagged pass showed -3.69% median wall-clock overhead (ON median 389.45 s vs OFF median 375.58 s — i.e. slightly slower, well within run variance and an informational figure that never gates the verdict). Consistent with this project's evidence-first policy, the instrument stays deliberately default-OFF and the direction is closed; the complete verdict manifest and re-run procedure live in [`reports/shadow-gate/dirb-shadow-v1.md`](reports/shadow-gate/dirb-shadow-v1.md).
+
 ---
 
 ## 📋 Sources
@@ -109,6 +111,22 @@ The scheduled release install is pinned by
 | Downloader retries | `--retries` | Existing local CLI knob. |
 | Source health report | `--health-report reports/source-health.json` | Workflow diagnostic artifact. |
 | Pipeline stats | `--json-stats reports/pipeline-stats.json` | Workflow diagnostic artifact. |
+
+### Weekly perf evidence (advisory, never blocking)
+
+A separate `perf-evidence.yml` workflow measures timing plus peak-memory legs
+weekly on Tuesdays at 03:17 UTC, and every run can also start manually with
+`workflow_dispatch`. Evidence appears as dated `perf-evidence-<date>-<run id>`
+artifacts (kept 90 days) plus an advisory-labeled delta table in the run step
+summary.
+
+What never blocks: benchmark compare exit codes never gate publishing, and the
+workflow is never a required check — a red or missing perf run never stops a
+release.
+
+Fork notes: schedules stay OFF in forks until the fork owner enables Actions
+schedules. GitHub also auto-disables scheduled workflows after 60 days without
+repository activity — any manual dispatch re-enables the schedule.
 
 ---
 

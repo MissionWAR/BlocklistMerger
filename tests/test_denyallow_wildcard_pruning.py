@@ -40,12 +40,18 @@ import tempfile
 import pytest
 
 from scripts.compiler import compile_rules
+
+# Importing the underscore-private helper from scripts.pipeline
+# (_new_pipeline_stats) is an intentional cross-module private import for
+# unit pinning; no Ruff-selected rule flags it (cf. TestApexPipelineSpine).
+from scripts.pipeline import PipelineStats, _new_pipeline_stats, process_files
 from scripts.pruning_proof import REASON_DENYALLOW_COVERED, CappedProofLedger
 from scripts.rule_semantics import (
     _denyallow_allow_set,
     _domain_disjoint_from_all,
     parse_modifier_text,
 )
+from scripts.stage_diagnostics import COMPILER_STAGE_PRUNE, compiler_stage_summaries_from_stats
 
 # ----------------------------------------------------------------------
 # DA-01..DA-10 denyallow boundary matrix.
@@ -421,3 +427,93 @@ class TestDomainDisjointTruthTable:
     def test_domain_disjoint_truth_table(self, domain, entries, expected):
         """Prove each three-way disjointness boundary at the unit layer."""
         assert _domain_disjoint_from_all(domain, frozenset(entries)) is expected
+
+
+class TestDenyallowPipelineSpine:
+    """Pipeline wiring legs: typed key, zero-init seed, flatten transfer."""
+
+    def test_pipeline_zero_init_declares_new_key(self):
+        """The TypedDict declares the key and fresh stats zero-init it."""
+        assert "denyallow_wildcard_pruned" in PipelineStats.__annotations__
+        assert _new_pipeline_stats()["denyallow_wildcard_pruned"] == 0
+
+    def test_pipeline_flatten_surfaces_new_key_at_fixture_scale(self, tmp_path):
+        """End-to-end run surfaces the key through cleaning->compile->flatten."""
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        (input_dir / "list.txt").write_text(
+            "# denyallow flatten fixture\n"
+            "||example.com^\n0.0.0.0 ads.example.net\n||example.com^\n",
+            encoding="utf-8",
+        )
+        output_file = tmp_path / "merged.txt"
+
+        stats = process_files(str(input_dir), str(output_file))
+
+        assert stats["denyallow_wildcard_pruned"] == 0
+
+
+class TestDenyallowStageReconciliation:
+    """HYG-04a: pin the denyallow counter through the prune-stage projection.
+
+    scripts/stage_diagnostics.py is READ-ONLY here BY DESIGN -- these legs
+    prove the denyallow bucket surfaces under a driven flagged counter, stays
+    absent under flag OFF, plus zero-safety on a missing-key Mapping source,
+    all through the missing-key-safe ``_stat`` getter feeding the prune-stage
+    reasons dict. One byte of change to that module would defeat the point.
+    """
+
+    def _compile(self, lines, **compile_kwargs):
+        """Compile lines through the full pipeline, returning output and stats."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(lines, output, **compile_kwargs)
+            with open(output, encoding="utf-8") as f:
+                rules = [line.strip() for line in f if line.strip()]
+            return rules, stats
+
+    def test_driven_on_run_surfaces_denyallow_bucket_in_prune_stage_exact(self):
+        """Flag ON: DA-01 disjoint child projects {"denyallow": 1} EXACT + coherence.
+
+        Captured from the same drive under py -3.14: emitted == total_output
+        == 1, discarded == 1, processed == 2 (processed = total_output +
+        sum(pruned.values())), mirroring the wcs driven-bucket shape.
+        """
+        rules, stats = self._compile(
+            ["||*.world^$denyallow=bevisioneers.world|boo.world", "||adjust.world^"],
+            denyallow_pruning=True,
+        )
+        summaries = compiler_stage_summaries_from_stats(stats)
+        prune_stage = summaries[COMPILER_STAGE_PRUNE]
+
+        assert stats.denyallow_wildcard_pruned == 1
+        assert rules == ["||*.world^$denyallow=bevisioneers.world|boo.world"]
+        assert prune_stage["reasons"] == {"denyallow": 1}
+        assert prune_stage["emitted"] == stats.total_output
+        assert prune_stage["emitted"] == 1
+        assert prune_stage["discarded"] == 1
+        assert prune_stage["processed"] == 2
+        assert prune_stage["processed"] == prune_stage["discarded"] + prune_stage["emitted"]
+
+    def test_flag_off_prune_stage_omits_denyallow_bucket(self):
+        """Flag OFF: prune-stage reasons stay empty; explicit absence companion."""
+        rules, stats = self._compile(
+            ["||*.world^$denyallow=bevisioneers.world|boo.world", "||adjust.world^"],
+            denyallow_pruning=False,
+        )
+
+        summaries = compiler_stage_summaries_from_stats(stats)
+
+        assert stats.denyallow_wildcard_pruned == 0
+        assert rules == [
+            "||*.world^$denyallow=bevisioneers.world|boo.world",
+            "||adjust.world^",
+        ]
+        assert summaries[COMPILER_STAGE_PRUNE]["reasons"] == {}
+        assert "denyallow" not in summaries[COMPILER_STAGE_PRUNE]["reasons"]
+
+    def test_missing_key_mapping_projection_stays_zero_safe(self):
+        """An empty Mapping source projects cleanly with empty prune reasons."""
+        summaries = compiler_stage_summaries_from_stats({})
+
+        assert summaries[COMPILER_STAGE_PRUNE]["reasons"] == {}

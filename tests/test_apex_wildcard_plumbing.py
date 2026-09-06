@@ -22,6 +22,7 @@ Pattern source: tests/test_denyallow_wildcard_pruning.py (v1.2 denyallow suite).
 
 import os
 import tempfile
+from typing import Final
 
 # Importing the underscore-private helpers directly from scripts.compiler
 # and scripts.pipeline (_parse_abp_rule, _record_proven_pruning,
@@ -68,6 +69,42 @@ EXPECTED_OUTPUT_LINES = [
     "||trackers.example.net^",
     "||example.org^",
 ]
+
+# 19-REVIEW IN-01 (HYG-01): the 28-entry real-public-suffix list below was
+# copy-pasted inline into both D-04 composite tests; a single Final tuple
+# is the one source so future suffix changes cannot drift between legs.
+# (Shape precedent: APEX_SHADOW_PAIR_TLDS in
+# tests/test_whitelist_modifier_scope_audit.py.)
+PAIR_TLDS: Final[tuple[str, ...]] = (
+    "xyz",
+    "online",
+    "site",
+    "top",
+    "icu",
+    "club",
+    "shop",
+    "store",
+    "tech",
+    "cloud",
+    "space",
+    "website",
+    "fun",
+    "pro",
+    "cyou",
+    "live",
+    "life",
+    "world",
+    "today",
+    "email",
+    "link",
+    "zone",
+    "agency",
+    "digital",
+    "global",
+    "network",
+    "media",
+    "systems",
+)
 
 
 class TestApexCompilePlane:
@@ -470,36 +507,7 @@ class TestApexWildcardPruning:
         """Signature locks on a composite producing 29 real prunes past the cap."""
         ledger_off = CappedProofLedger()
         ledger_on = CappedProofLedger()
-        pair_tlds = [
-            "xyz",
-            "online",
-            "site",
-            "top",
-            "icu",
-            "club",
-            "shop",
-            "store",
-            "tech",
-            "cloud",
-            "space",
-            "website",
-            "fun",
-            "pro",
-            "cyou",
-            "live",
-            "life",
-            "world",
-            "today",
-            "email",
-            "link",
-            "zone",
-            "agency",
-            "digital",
-            "global",
-            "network",
-            "media",
-            "systems",
-        ]
+        pair_tlds = list(PAIR_TLDS)
         composite = []
         for tld in pair_tlds:
             composite.append(f"||{tld}^")
@@ -570,36 +578,7 @@ class TestApexWildcardPruning:
         """Two same-process flagged compiles are byte-equal with identical evidence."""
         ledger_run1 = CappedProofLedger()
         ledger_run2 = CappedProofLedger()
-        pair_tlds = [
-            "xyz",
-            "online",
-            "site",
-            "top",
-            "icu",
-            "club",
-            "shop",
-            "store",
-            "tech",
-            "cloud",
-            "space",
-            "website",
-            "fun",
-            "pro",
-            "cyou",
-            "live",
-            "life",
-            "world",
-            "today",
-            "email",
-            "link",
-            "zone",
-            "agency",
-            "digital",
-            "global",
-            "network",
-            "media",
-            "systems",
-        ]
+        pair_tlds = list(PAIR_TLDS)
         composite = []
         for tld in pair_tlds:
             composite.append(f"||{tld}^")
@@ -660,3 +639,29 @@ def test_proof_report_schema_version_stays_at_one():
     from scripts.pruning_proof import PROOF_REPORT_SCHEMA_VERSION
 
     assert PROOF_REPORT_SCHEMA_VERSION == 1
+
+
+# This leg complements the 19-01 OFF-side omission legs: injecting a synthetic
+# stats Mapping is a PROJECTION check proving the stage-diagnostics entry
+# consumes exactly the D-19-01 counter spelling and publishes under the bucket
+# key locked in 19-01 — it is NOT the flagged-run fence-inclusion assertion
+# (flagged-run ledger reason sets containing the new reason), which lands with
+# Phase 20's actual emission per D-19-07.
+
+
+def test_wildcard_covered_sub_counter_key_producer_consumer_equality():
+    """Phase 19 D-19-07: the wcs counter key must be spelled identically on every
+    producer/consumer surface or the seven-layer chain silently decouples."""
+    from scripts.compiler import CompileStats
+    from scripts.pipeline import PipelineStats, _new_pipeline_stats
+    from scripts.stage_diagnostics import (
+        COMPILER_STAGE_PRUNE,
+        compiler_stage_summaries_from_stats,
+    )
+
+    assert "wildcard_covered_sub_pruned" in CompileStats.__dataclass_fields__
+    assert "wildcard_covered_sub_pruned" in PipelineStats.__annotations__
+    assert _new_pipeline_stats()["wildcard_covered_sub_pruned"] == 0
+    assert compiler_stage_summaries_from_stats({"wildcard_covered_sub_pruned": 7})[
+        COMPILER_STAGE_PRUNE
+    ]["reasons"] == {"wcs_covered": 7}

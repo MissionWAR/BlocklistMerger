@@ -93,9 +93,13 @@ creation, no artifact download handoff, and no cache deletion behavior. Its
 artifacts can inform later decisions, but they do not create release findings in
 this phase.
 
-The weekly heavy-evidence schedule is not active. Adding any recurring
-non-publishing heavy-evidence workflow requires an intentional source change and
-the promotion evidence listed below.
+The weekly heavy-evidence schedule is not active. The weekly perf-evidence
+schedule in `.github/workflows/perf-evidence.yml` (Tuesday 03:17 UTC plus
+manual dispatch) is the intentional source change that introduces a recurring
+non-publishing benchmark-evidence workflow; it satisfies the promotion evidence
+listed below as advisory-only evidence that never gates publishing. Adding any
+further recurring non-publishing heavy-evidence workflow requires an intentional
+source change and the promotion evidence listed below.
 
 ## Promotion Criteria
 

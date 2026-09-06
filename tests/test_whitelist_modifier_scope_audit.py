@@ -28,9 +28,13 @@ Pattern source: tests/test_cross_format_audit.py (Phase 12 audit suites).
 """
 
 import copy
+import gc
 import hashlib
 import json
 import os
+import re
+import statistics
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -41,7 +45,15 @@ from typing import Final, NamedTuple
 import pytest
 
 from scripts.benchmark import _python_identity, build_corpus_manifest, manifest_digest
-from scripts.compiler import CompileStats, clear_caches, compile_rules
+from scripts.compiler import (
+    CompileStats,
+    _parse_abp_rule,
+    _wildcard_covers_sub,
+    _write_output,
+    clear_caches,
+    compile_rules,
+    get_tld,
+)
 from scripts.pruning_proof import (
     DEFAULT_SAMPLE_CAP,
     OUTCOME_KEPT,
@@ -49,6 +61,7 @@ from scripts.pruning_proof import (
     REASON_DENYALLOW_COVERED,
     REASON_EXCEPTION_COVERED,
     REASON_KEPT_BECAUSE_UNCERTAIN,
+    REASON_WILDCARD_COVERS_SUB,
     CappedProofLedger,
     RuleFacet,
     _capped_sample_record,
@@ -356,6 +369,39 @@ class TestWhitelistModifierScopeAudit:
         assert rules == []
         assert stats.whitelist_conflict_pruned == 1
 
+    def test_bare_child_exception_plus_admissible_denyallow_prunes_via_denyallow(self):
+        """Regression lock: exception-matched subs stay denyallow-eligible (HYG-01 IN-03 revert).
+
+        The TLD branch unconditionally reports the wildcard detail, so the
+        denyallow gate below still opens for bare children with admissible
+        allow-sets — even when an exception domain-scope match was recorded
+        first. Locks the 23-09 IN-03 guard revert: the 23-09 guard closed this
+        gate (denyallow_pruned 0, keep-as-uncertain), changing output bytes,
+        counters, and ledger buckets inside a zero-behavior-change phase.
+        A bare child plus an admissible denyallow wildcard must prune.
+        """
+        ledger = CappedProofLedger()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = os.path.join(tmpdir, "output.txt")
+            stats = compile_rules(
+                [
+                    "||*.autos^$denyallow=other.autos",
+                    "||sub.autos^",
+                    "@@||sub.autos^$client=10.0.0.1",
+                ],
+                output,
+                proof_ledger=ledger,
+                denyallow_pruning=True,
+            )
+            with open(output, encoding="utf-8") as f:
+                rules = [line.strip() for line in f if line.strip()]
+
+        assert rules == ["||*.autos^$denyallow=other.autos"]
+        assert stats.denyallow_wildcard_pruned == 1
+
+        matches = [record for record in ledger.records if record.reason == REASON_DENYALLOW_COVERED]
+        assert len(matches) == 1
+
 
 # ----------------------------------------------------------------------
 # modifier_scope_covers() truth table (Phase 13 RESEARCH.md, Layer 3).
@@ -461,6 +507,9 @@ class TestCorpusWhitelistAudit:
         - Uncertain keeps are counted but never asserted: their magnitude is
           an upstream-composition fact (research assumption A3), not a
           compiler-correctness contract.
+        - Zero-pairing pin: wildcard-covers-sub ledger tally ==
+          stats.wildcard_covered_sub_pruned == 0 under production-default
+          flags (Phase 19 plumbing inertness, D-19-10).
         """
         ledger = CappedProofLedger(sample_cap=10_000)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -482,6 +531,13 @@ class TestCorpusWhitelistAudit:
         # Cross-check: each whitelist prune produced exactly one proof record.
         exception_covered_records = summary["by_reason"].get(REASON_EXCEPTION_COVERED, 0)
         assert exception_covered_records == stats.whitelist_conflict_pruned
+
+        # Phase 19 zero-pairing pin at production-default flags (D-19-10):
+        # a different kwarg combination than either shadow leg, so
+        # premature wcs firing on the plain default path fails here too.
+        wcs_default = summary["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert wcs_default == stats.wildcard_covered_sub_pruned
+        assert wcs_default == 0
 
         # Dual-lock invariant scan across materialized proof samples.
         dual_lock_violations = [
@@ -566,8 +622,15 @@ class DenyallowTallyingLedger(CappedProofLedger):
         project_policy_delta: str,
         sample_factory: Callable[[], dict[str, object] | None] | None = None,
     ) -> None:
-        """Tally denyallow candidates uncapped, then delegate unchanged."""
+        """Tally denyallow candidates uncapped, then delegate unchanged.
+
+        21-IN-02 purity contract: the tally below invokes
+        candidate_factory once, and the delegated super() call invokes
+        the same factories again, so every factory passed here must be
+        pure and repeatable (never one-shot or side-effecting).
+        """
         if reason == REASON_DENYALLOW_COVERED:
+            # 21-IN-02: super() re-invokes candidate_factory; keep it pure.
             # normalized_rule is the exact text _write_output() emits, so
             # tally identities compare equal against output-file lines.
             self.denyallow_candidates.add(candidate_factory().normalized_rule)
@@ -622,13 +685,85 @@ class ApexTallyingLedger(CappedProofLedger):
         project_policy_delta: str,
         sample_factory: Callable[[], dict[str, object] | None] | None = None,
     ) -> None:
-        """Tally apex candidates and pairs uncapped, then delegate unchanged."""
+        """Tally apex candidates and pairs uncapped, then delegate unchanged.
+
+        21-IN-02 purity contract: the tally below invokes the factories
+        once, and the delegated super() call invokes the same factories
+        again, so every factory passed here must be pure and repeatable
+        (never one-shot or side-effecting).
+        """
         if reason == REASON_APEX_COVERS_TLD_WILDCARD:
+            # 21-IN-02: super() re-invokes both factories; keep them pure.
             candidate_rule = candidate_factory().normalized_rule
             self.apex_candidates.add(candidate_rule)
             covering_facet = covering_factory()
             if covering_facet is not None:
                 self.apex_pairs.add((candidate_rule, covering_facet.normalized_rule))
+        super().append_decision(
+            decision_id=decision_id,
+            decision_type=decision_type,
+            outcome=outcome,
+            proof_status=proof_status,
+            reason=reason,
+            candidate_factory=candidate_factory,
+            covering_factory=covering_factory,
+            strict_agh_delta=strict_agh_delta,
+            project_policy_delta=project_policy_delta,
+            sample_factory=sample_factory,
+        )
+
+
+class WcsTallyingLedger(CappedProofLedger):
+    """CappedProofLedger that tallies every wildcard-covers-sub candidate.
+
+    Phase 21 dirb-shadow twin of ApexTallyingLedger (same
+    tally-before-delegating pattern): when an incoming decision carries
+    REASON_WILDCARD_COVERS_SUB, the candidate facet is resolved
+    eagerly and its emitted rule text joins ``wcs_candidates`` BEFORE
+    delegating to super() unchanged. Additionally records
+    ``(candidate, covering)`` normalized-rule pairs in ``wcs_pairs`` so
+    signature element B8 (survivor-coverer membership) can be asserted
+    past any sample cap -- capped samples hold at most sample_cap records
+    per bucket and are display evidence only. Both sets are uncapped but
+    bounded by the wildcard-removal population itself (tiny vs millions
+    of input rows). ``normalized_rule`` equals the exact text
+    _write_output() emits, so set identity against output-file lines is
+    sound.
+    """
+
+    def __init__(self, sample_cap: int = DEFAULT_SAMPLE_CAP) -> None:
+        super().__init__(sample_cap=sample_cap)
+        self.wcs_candidates: set[str] = set()
+        self.wcs_pairs: set[tuple[str, str]] = set()
+
+    def append_decision(
+        self,
+        *,
+        decision_id: str,
+        decision_type: str,
+        outcome: str,
+        proof_status: str,
+        reason: str,
+        candidate_factory: Callable[[], RuleFacet],
+        covering_factory: Callable[[], RuleFacet | None],
+        strict_agh_delta: str,
+        project_policy_delta: str,
+        sample_factory: Callable[[], dict[str, object] | None] | None = None,
+    ) -> None:
+        """Tally wcs candidates and pairs uncapped, then delegate unchanged.
+
+        21-IN-02 purity contract: the tally below invokes the factories
+        once, and the delegated super() call invokes the same factories
+        again, so every factory passed here must be pure and repeatable
+        (never one-shot or side-effecting).
+        """
+        if reason == REASON_WILDCARD_COVERS_SUB:
+            # 21-IN-02: super() re-invokes both factories; keep them pure.
+            candidate_rule = candidate_factory().normalized_rule
+            self.wcs_candidates.add(candidate_rule)
+            covering_facet = covering_factory()
+            if covering_facet is not None:
+                self.wcs_pairs.add((candidate_rule, covering_facet.normalized_rule))
         super().append_decision(
             decision_id=decision_id,
             decision_type=decision_type,
@@ -710,13 +845,16 @@ def _shadow_line_factory(
     return lambda: iter(lines)
 
 
-def _compile_shadow_leg(
+# 21-IN-01: PEP 695 bound preserves Wcs/ApexTallyingLedger subclasses for checkers.
+# Parse floor: PEP 695 needs Python 3.12+ to parse; the project floor is 3.14
+# (pyproject.toml), and CI plus all documented local workflows run 3.14+.
+def _compile_shadow_leg[LedgerT: CappedProofLedger](
     line_source: Callable[[], Iterable[str]],
     output_path: Path,
     *,
-    ledger_factory: Callable[..., CappedProofLedger] | None = None,
+    ledger_factory: Callable[..., LedgerT] | None = None,
     **compile_kwargs: object,
-) -> tuple[CompileStats, CappedProofLedger, float]:
+) -> tuple[CompileStats, LedgerT, float]:
     """Run one shadow leg with a fresh ledger and fresh lines iterator.
 
     Generalized per the 16-02 handoff (Phase 17 designated first task):
@@ -982,6 +1120,26 @@ class TestShadowComparisonMachinery:
         assert apex_on == result.on_stats.apex_covered_wildcard_pruned
         assert apex_on == 0
 
+    def test_wildcard_covers_sub_zero_pairing_in_both_shadow_legs(self):
+        """Fast fixture twin of the corpus gate's wildcard-covers-sub pins.
+
+        Locks D-19-10 count-identity for the family — the ledger
+        by_reason tally equals the paired CompileStats counter — in BOTH
+        flag legs through the genuine _run_shadow_comparison() machinery
+        via self._result(), both reading 0 until Phase 20 introduces the
+        flag-gated emission site. Four separate asserts, one claim each
+        (never chained).
+        """
+        result = self._result()
+        off_by_reason = result.off_ledger.summary()["by_reason"]
+        on_by_reason = result.on_ledger.summary()["by_reason"]
+        wcs_off = off_by_reason.get(REASON_WILDCARD_COVERS_SUB, 0)
+        wcs_on = on_by_reason.get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert wcs_off == result.off_stats.wildcard_covered_sub_pruned
+        assert wcs_off == 0
+        assert wcs_on == result.on_stats.wildcard_covered_sub_pruned
+        assert wcs_on == 0
+
 
 # ----------------------------------------------------------------------
 # Full-corpus denyallow shadow equivalence (D-04 Plan B gate).
@@ -1027,6 +1185,9 @@ class TestDenyallowShadowEquivalence:
         - apex ledger tally == stats.apex_covered_wildcard_pruned == 0 in
           BOTH legs — Phase 15 plumbing must stay inert until Phase 16's
           flag-gated emission site exists (D-05 zero-pairing).
+        - wildcard-covers-sub ledger tally == stats.wildcard_covered_sub_pruned
+          == 0 in BOTH legs — Phase 19 plumbing must stay inert until
+          Phase 20's flag-gated emission site exists (D-19-10 zero-pairing).
         - kept_because_uncertain drops by EXACTLY the denyallow count;
           every other by_reason bucket byte-stable; total_records identical.
 
@@ -1075,6 +1236,18 @@ class TestDenyallowShadowEquivalence:
         assert apex_on == result.on_stats.apex_covered_wildcard_pruned
         assert apex_on == 0
 
+        # Phase 19 plumbing-inertness (D-19-10/D-19-01): the
+        # wildcard-covers-sub reason/counter pair is wired end-to-end by
+        # the evidence spine but has no emission site until Phase 20 —
+        # pin tally == counter == 0 in BOTH legs so same-leg firing
+        # (invisible to the byte-stability skip-loops below) fails loudly.
+        wcs_off = off_by_reason.get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert wcs_off == result.off_stats.wildcard_covered_sub_pruned
+        assert wcs_off == 0
+        wcs_on = on_by_reason.get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert wcs_on == result.on_stats.wildcard_covered_sub_pruned
+        assert wcs_on == 0
+
         # Every removed line carries an uncapped proof witness by identity.
         assert denyallow_on == len(removed)
         assert result.on_ledger.denyallow_candidates == removed
@@ -1103,6 +1276,7 @@ class TestDenyallowShadowEquivalence:
         print(f"[D-04 SHADOW] removed={len(removed):,} (FINDINGS §4 upper bound: 518,754)")
         print(f"[D-04 SHADOW] denyallow_covered={denyallow_on:,}")
         print(f"[D-04 SHADOW] apex_covered_wildcard_pruned={apex_on:,}")
+        print(f"[D-04 SHADOW] wildcard_covered_sub_pruned={wcs_on:,}")
         print(f"[D-04 SHADOW] kept_because_uncertain {kept_before:,} -> {kept_after:,}")
         print(f"[D-04 SHADOW] off_leg_seconds={result.off_seconds:.1f}")
         print(f"[D-04 SHADOW] on_leg_seconds={result.on_seconds:.1f}")
@@ -1359,6 +1533,9 @@ BUCKET_SINGLE_LABEL_SUFFIX_APEX: Final[str] = "single_label_suffix_apex"
 BUCKET_MULTIPART_SUFFIX_APEX: Final[str] = "multipart_suffix_apex"
 """Manifest population bucket names (RESEARCH E2 inventory verbatim)."""
 
+_FILENAME_STEM_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+"""Whitelist for evidence filename stems (WR-08): operator env must not escape."""
+
 
 def _classify_apex_bucket(key: str) -> str:
     """Classify one witness key into its D-01 apex-form bucket.
@@ -1536,11 +1713,15 @@ def _render_shadow_markdown(manifest: Mapping[str, object]) -> str:
     """
     verdict = str(manifest.get("verdict", "unknown"))
     banner = "PASS" if verdict == "pass" else "FAIL"
+    # Gate title derives from the report type so the dirb emission carries
+    # honest provenance while apex output stays byte-identical (21-02 gate
+    # emission; the default report_type keeps the apex title).
+    gate_name = "Dirb" if str(manifest.get("report_type")) == "dirb_shadow_gate" else "Apex"
     population = manifest.get("population") or {}
     buckets = population.get("buckets") or {}
 
     lines: list[str] = [
-        f"# Apex Shadow Gate: {banner}",
+        f"# {gate_name} Shadow Gate: {banner}",
         "",
         f"- Verdict: {verdict}",
         f"- Schema version: {manifest.get('schema_version')}",
@@ -1555,19 +1736,30 @@ def _render_shadow_markdown(manifest: Mapping[str, object]) -> str:
 
     lines.append("")
     lines.append("## Population")
-    lines.append(f"- Total removals: {population.get('total', 0)}")
-    lines.append(f"- Pure-TLD share percent: {population.get('pure_tld_share_percent')}")
-    lines.append(
-        f"- Split bar percent: {population.get('split_bar_percent')} "
-        f"(triggered: {population.get('reason_split_triggered')})"
-    )
-    for bucket_name in (BUCKET_SINGLE_LABEL_SUFFIX_APEX, BUCKET_MULTIPART_SUFFIX_APEX):
-        bucket = buckets.get(bucket_name) or {}
+    if str(manifest.get("report_type")) == "dirb_shadow_gate":
+        lines.append(f"- Total removals: {population.get('total', 0)}")
+        lines.append(f"- Audit expected: {population.get('audit_expected')}")
+        divergences = population.get("audit_divergences", [])
+        lines.append(f"- Audit divergences: {len(divergences)}")
+        for sample_record in population.get("samples", []):
+            if isinstance(sample_record, dict):
+                lines.append(f"  - sample: {sample_record.get('candidate_rule')}")
+            else:
+                lines.append(f"  - sample: {sample_record}")
+    else:
+        lines.append(f"- Total removals: {population.get('total', 0)}")
+        lines.append(f"- Pure-TLD share percent: {population.get('pure_tld_share_percent')}")
         lines.append(
-            f"- {bucket_name}: {bucket.get('count', 0)} ({bucket.get('share_percent', 0.0)}%)"
+            f"- Split bar percent: {population.get('split_bar_percent')} "
+            f"(triggered: {population.get('reason_split_triggered')})"
         )
-        for sample_record in bucket.get("samples", []):
-            lines.append(f"  - sample: {sample_record.get('candidate_rule')}")
+        for bucket_name in (BUCKET_SINGLE_LABEL_SUFFIX_APEX, BUCKET_MULTIPART_SUFFIX_APEX):
+            bucket = buckets.get(bucket_name) or {}
+            lines.append(
+                f"- {bucket_name}: {bucket.get('count', 0)} ({bucket.get('share_percent', 0.0)}%)"
+            )
+            for sample_record in bucket.get("samples", []):
+                lines.append(f"  - sample: {sample_record.get('candidate_rule')}")
 
     lines.append("")
     lines.append("## Timing")
@@ -1604,6 +1796,8 @@ def _evaluate_and_write_manifest(
     population: Mapping[str, object],
     output_dir: Path,
     filename_stem: str = "apex-shadow-v1",
+    report_type: str = "apex_shadow_gate",
+    flags: Mapping[str, object] | None = None,
     identity: Mapping[str, object] | None = None,
     corpus: Mapping[str, object] | None = None,
     timing: Mapping[str, object] | None = None,
@@ -1629,6 +1823,12 @@ def _evaluate_and_write_manifest(
             ONLY from this parameter plus the fixed stem (T-17-01-A).
         filename_stem: Versioned stem without extension (D-17-07;
             default ``apex-shadow-v1``, flip-day re-run writes v2).
+        report_type: Manifest report discriminator (default
+            ``apex_shadow_gate``; the 21-02 dirb gate passes
+            ``dirb_shadow_gate`` -- 21-01 staged this parameterization).
+        flags: Manifest flag-provenance block (default None keeps the
+            legacy apex flag block so apex output stays byte-identical;
+            the 21-02 dirb gate passes DIRB_SHADOW_FLAGS).
         identity: Optional provenance block (python/platform/git revision).
         corpus: Optional frozen-corpus provenance incl. manifest SHA-256.
         timing: Optional timing block; serializes as null until measured
@@ -1641,6 +1841,16 @@ def _evaluate_and_write_manifest(
         ``(verdict, manifest)`` where manifest is the assembled dict both
         siblings were rendered from.
     """
+    if not _FILENAME_STEM_RE.fullmatch(filename_stem):
+        raise ValueError(f"refusing unsafe filename_stem: {filename_stem!r}")
+    if filename_stem.startswith("dirb-shadow-"):
+        _probe_path = output_dir / f"{filename_stem}.json"
+        if _probe_path.exists() and os.environ.get("DIRB_SHADOW_OVERWRITE") != "1":
+            raise RuntimeError(
+                f"refusing to overwrite {_probe_path.name}; "
+                "set DIRB_SHADOW_DATASET_ID=dirb-shadow-v2 for a new stem "
+                "(see Closure Note item 4)"
+            )
     evaluated_checks = {
         name: {"observed": observed, "expected": expected, "ok": observed == expected}
         for name, (observed, expected) in checks.items()
@@ -1650,16 +1860,20 @@ def _evaluate_and_write_manifest(
 
     manifest: dict[str, object] = {
         "schema_version": SHADOW_REPORT_SCHEMA_VERSION,
-        "report_type": "apex_shadow_gate",
+        "report_type": report_type,
         "verdict": verdict,
         "created_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "identity": dict(identity) if identity is not None else None,
         "corpus": dict(corpus) if corpus is not None else None,
-        "flags": {
-            "denyallow_pruning": True,
-            "wildcard_apex_pruning_off": False,
-            "wildcard_apex_pruning_on": True,
-        },
+        "flags": (
+            dict(flags)
+            if flags is not None
+            else {
+                "denyallow_pruning": True,
+                "wildcard_apex_pruning_off": False,
+                "wildcard_apex_pruning_on": True,
+            }
+        ),
         "signature": dict(evidence),
         "population": dict(population),
         "checks": evaluated_checks,
@@ -1669,6 +1883,22 @@ def _evaluate_and_write_manifest(
             dict(proposed_guards) if proposed_guards is not None else _default_non_binding_guards()
         ),
     }
+
+    if str(report_type) == "dirb_shadow_gate":
+        _sig_block = manifest.get("signature")
+        if isinstance(_sig_block, dict) and "leg_seconds_note" not in _sig_block:
+            _sig_block["leg_seconds_note"] = (
+                "single-run walls WITH WcsTallyingLedger proof recording; "
+                "do not compare against timing medians"
+            )
+        _tim_block = manifest.get("timing")
+        if isinstance(_tim_block, dict):
+            _methodology = _tim_block.get("methodology")
+            if isinstance(_methodology, str) and "WITHOUT proof ledger" not in _methodology:
+                _tim_block["methodology"] = (
+                    f"{_methodology}; timing legs run WITHOUT proof ledger "
+                    "(direct compile_rules, no WcsTallyingLedger)"
+                )
 
     json_path = output_dir / f"{filename_stem}.json"
     md_path = output_dir / f"{filename_stem}.md"
@@ -1906,6 +2136,34 @@ class TestShadowManifestWriter:
         markdown_fail = _render_shadow_markdown(failing_manifest)
         assert "FAIL" in markdown_fail
 
+    def test_dirb_population_renders_audit_vocabulary_without_apex_buckets(self):
+        """WR-02: dirb Population shows audit counts, never apex None lines."""
+        dirb_manifest = {
+            "schema_version": 1,
+            "report_type": "dirb_shadow_gate",
+            "verdict": "fail",
+            "created_at": "2026-09-03T15:56:17Z",
+            "signature": {"removed_count": 0},
+            "population": {
+                "total": 0,
+                "audit_expected": 0,
+                "audit_divergences": ["UNPARSABLE_SKIPPED total=2 samples=[x]"],
+                "samples": [],
+            },
+            "timing": None,
+            "source_health": None,
+            "proposed_guards": {"binding": False},
+        }
+        markdown = _render_shadow_markdown(dirb_manifest)
+        assert "- Total removals: 0" in markdown
+        assert "- Audit expected: 0" in markdown
+        assert "- Audit divergences: 1" in markdown
+        assert "Pure-TLD share percent" not in markdown
+        assert "Split bar percent" not in markdown
+        assert "single_label_suffix_apex" not in markdown
+        assert "multipart_suffix_apex" not in markdown
+        assert "None" not in markdown.split("## Population")[1].split("## Timing")[0]
+
     def test_default_proposed_guards_carry_explicit_non_binding_marker(self, tmp_path):
         """D-17-09: the reserved slot is explicitly data-only/non-binding."""
         _, manifest = _evaluate_and_write_manifest(
@@ -1917,6 +2175,51 @@ class TestShadowManifestWriter:
 
         guards = manifest["proposed_guards"]
         assert guards["binding"] is False
+
+    def test_writer_rejects_hostile_filename_stem(self, tmp_path):
+        """WR-08: env-controlled stem cannot escape the output dir."""
+        for hostile in ("../escape", "a/b"):
+            with pytest.raises(ValueError, match="refusing unsafe filename_stem"):
+                _evaluate_and_write_manifest(
+                    checks={"check": (True, True)},
+                    evidence={"removed_count": 0},
+                    population=_summarize_population(set(), set()),
+                    output_dir=tmp_path,
+                    filename_stem=hostile,
+                )
+
+    def test_dirb_manifest_carries_leg_and_timing_annotations(self, tmp_path):
+        """WR-04: future dirb manifests annotate leg vs timing methodology."""
+        _, manifest = _evaluate_and_write_manifest(
+            checks={"check": (True, True)},
+            evidence={"removed_count": 0, "leg_seconds": {"off": 1.0, "on": 2.0}},
+            population={"total": 0, "audit_expected": 0, "audit_divergences": []},
+            output_dir=tmp_path,
+            filename_stem="dirb-shadow-wr04",
+            report_type="dirb_shadow_gate",
+            timing={"methodology": "in-gate median-of-N; informational only"},
+        )
+        signature = manifest["signature"]
+        assert isinstance(signature, dict)
+        assert "leg_seconds_note" in signature
+        assert "WcsTallyingLedger" in str(signature["leg_seconds_note"])
+        assert "do not compare" in str(signature["leg_seconds_note"])
+        timing = manifest["timing"]
+        assert isinstance(timing, dict)
+        assert "WITHOUT proof ledger" in str(timing.get("methodology"))
+
+    def test_apex_manifest_carries_no_dirb_annotations(self, tmp_path):
+        """WR-04: apex output stays byte-identical without dirb notes."""
+        _, manifest = _evaluate_and_write_manifest(
+            checks={"check": (True, True)},
+            evidence={"removed_count": 0, "leg_seconds": {"off": 1.0, "on": 2.0}},
+            population=_summarize_population(set(), set()),
+            output_dir=tmp_path,
+            filename_stem="apex-shadow-wr04",
+            timing={"methodology": "in-gate median-of-N; informational only"},
+        )
+        assert "leg_seconds_note" not in manifest["signature"]
+        assert "WITHOUT proof ledger" not in str(manifest["timing"]["methodology"])
 
 
 # ----------------------------------------------------------------------
@@ -3039,6 +3342,52 @@ _FROZEN_SKIP_REASON: Final[str] = (
     f"--dataset-id {APEX_SHADOW_DATASET_ID}"
 )
 
+DIRB_SHADOW_DATASET_ID: Final[str] = os.environ.get("DIRB_SHADOW_DATASET_ID", "dirb-shadow-v1")
+"""Versioned frozen-dataset id (D-17-07 pattern): env-overridable so a
+flip-day re-run writes -v2 manifests without editing this gate. The set
+stays natural-only per D-21-09 (no seeded pairs); dirb code paths never
+import apex path symbols and never write under the apex frozen dir
+(T-21-06)."""
+
+DIRB_FROZEN_CORPUS_DIR: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "frozen" / DIRB_SHADOW_DATASET_ID / "raw"
+)
+DIRB_FROZEN_MANIFEST_PATH: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "frozen" / DIRB_SHADOW_DATASET_ID / "manifest.json"
+)
+DIRB_TIMING_OFF_REPORT_PATH: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "runs" / "dirb-off.json"
+)
+DIRB_TIMING_ON_REPORT_PATH: Final[Path] = (
+    REPO_ROOT / "reports" / "benchmarks" / "runs" / "dirb-on.json"
+)
+
+DIRB_FROZEN_CORPUS_PRESENT: Final[bool] = DIRB_FROZEN_CORPUS_DIR.is_dir() and any(
+    DIRB_FROZEN_CORPUS_DIR.glob("*.txt")
+)
+
+DIRB_FROZEN_SKIP_REASON: Final[str] = (
+    f"frozen dataset reports/benchmarks/frozen/{DIRB_SHADOW_DATASET_ID}/raw is absent; "
+    "Stage-A it first: py -3.14 -m scripts.downloader --sources config/sources.txt "
+    "--outdir lists/_raw --cache .cache --health-report reports/source-health.json && "
+    "py -3.14 -m scripts.benchmark_pipeline freeze --input-dir lists/_raw "
+    "--source-health-report reports/source-health.json "
+    f"--dataset-id {DIRB_SHADOW_DATASET_ID}"
+)
+
+DIRB_SHADOW_FLAGS: Final[dict[str, object]] = {
+    "denyallow_pruning": True,
+    "wildcard_apex_pruning": False,
+    "wildcard_covers_subs_pruning_off": False,
+    "wildcard_covers_subs_pruning_on": True,
+}
+"""Manifest flag-provenance block for the dirb gate (21-02 emission).
+
+Mirrors the RESEARCH dirb manifest skeleton: both legs run production
+defaults except the ON leg adding only wildcard_covers_subs_pruning, so
+the dirb flag is the sole mover. Passed as the writer's ``flags`` arg;
+apex callers omit it and keep the legacy apex block byte-identical."""
+
 DEGRADED_SOURCE_STATUSES: Final[frozenset[str]] = frozenset(
     {"failed", "stale_cache", "fallback_cache"}
 )
@@ -3113,6 +3462,28 @@ class ApexCorpusLegs(NamedTuple):
     on_output_sha256: str
 
 
+class DirbCorpusLegs(NamedTuple):
+    """Paired dirb-flag legs over fixture or frozen lines plus digests.
+
+    Same 10-field shape as ApexCorpusLegs, typed to WcsTallyingLedger so
+    the uncapped ``wcs_candidates``/``wcs_pairs`` witnesses travel with
+    each leg. The shas hash each leg's real output FILE before teardown
+    for the determinism cross-tie. Fresh-iterator discipline rides
+    _compile_shadow_leg via _shadow_line_factory.
+    """
+
+    off_lines: list[str]
+    on_lines: list[str]
+    off_stats: CompileStats
+    on_stats: CompileStats
+    off_ledger: WcsTallyingLedger
+    on_ledger: WcsTallyingLedger
+    off_seconds: float
+    on_seconds: float
+    off_output_sha256: str
+    on_output_sha256: str
+
+
 def _run_apex_corpus_legs(
     line_source: Callable[[], Iterable[str]],
     workdir: Path,
@@ -3164,6 +3535,116 @@ def _run_apex_corpus_legs(
         off_output_sha256=off_output_sha256,
         on_output_sha256=on_output_sha256,
     )
+
+
+def _run_dirb_corpus_legs(
+    line_source: Callable[[], Iterable[str]],
+    workdir: Path,
+) -> DirbCorpusLegs:
+    """Run the dirb OFF/ON shadow legs over caller-supplied lines in-process.
+
+    The OFF leg passes NO extra compile kwargs (production defaults:
+    denyallow_pruning=True, wildcard_apex_pruning=False,
+    wildcard_covers_subs_pruning=False); the ON leg adds ONLY
+    ``wildcard_covers_subs_pruning=True`` so the dirb flag is the sole
+    moving part (D-21-02 substrate staging). compiler.clear_caches() runs
+    BETWEEN legs because the module LRU caches are process-global and
+    conftest only clears between tests (research Pitfall 6). Each leg's
+    output FILE is hashed BEFORE ``workdir`` teardown so both digests
+    survive for the determinism cross-tie. Fresh-iterator discipline rides
+    _compile_shadow_leg via _shadow_line_factory; both legs tally through
+    WcsTallyingLedger with the shared 10,000-entry sample cap.
+    """
+    off_output = workdir / "dirb_off.txt"
+    off_stats, off_ledger, off_seconds = _compile_shadow_leg(
+        line_source,
+        off_output,
+        ledger_factory=WcsTallyingLedger,
+    )
+    off_lines = _read_output_lines(off_output)
+    off_output_sha256 = _streaming_sha256(off_output)
+
+    # Cache hygiene between legs: the ON leg must not inherit warmed
+    # domain/TLD caches from the OFF leg.
+    clear_caches()
+
+    on_output = workdir / "dirb_on.txt"
+    on_stats, on_ledger, on_seconds = _compile_shadow_leg(
+        line_source,
+        on_output,
+        ledger_factory=WcsTallyingLedger,
+        wildcard_covers_subs_pruning=True,
+    )
+    on_lines = _read_output_lines(on_output)
+    on_output_sha256 = _streaming_sha256(on_output)
+
+    return DirbCorpusLegs(
+        off_lines=off_lines,
+        on_lines=on_lines,
+        off_stats=off_stats,
+        on_stats=on_stats,
+        off_ledger=off_ledger,
+        on_ledger=on_ledger,
+        off_seconds=off_seconds,
+        on_seconds=on_seconds,
+        off_output_sha256=off_output_sha256,
+        on_output_sha256=on_output_sha256,
+    )
+
+
+def _audit_dirb_expectation(off_lines: list[str]) -> tuple[int, list[str]]:
+    """Derive the live wcs removal expectation from OFF-leg output (D-21-02).
+
+    Dedicated scan over the OFF-leg output universe, replicating
+    production ordering exactly: the OFF output IS the post-legacy
+    post-survivorship universe (phase 3 ate first, only shipped
+    wildcards witness, plain-only scope holds), so partitioning its
+    surviving TLD-form wildcards versus surviving plains and probing
+    every surviving plain with the real _wildcard_covers_sub
+    candidate-witness-tld triple counts exactly what the ON leg could
+    remove -- no second logic path (D-19-05). A wildcard is admitted as
+    a witness only when its domain equals its own get_tld result;
+    wildcard-form plains are skipped per plain-only scope. Output lines
+    that fail production parsing are handled by shape: ABP-shaped rows
+    (``||``/``@@||`` prefix) must always re-parse -- production only
+    writes those from parsed records, so a failure raises loudly;
+    non-ABP rows are skipped WITH record -- production preserves them
+    verbatim via other_rules (regex, decorative comments carrying ``|``
+    or ``*``), the write-time probe iterates parsed plain records only
+    and can never see them, so skipping replicates production ordering
+    exactly while the skip summary in divergences keeps the drop
+    auditable in committed forensics. audit-says-X is the live bar for
+    the later R1 reconciliation owned by 21-02 (never a constant, never
+    the inherited context magnitude).
+    """
+    survivors: dict[str, list] = {}
+    plains: list = []
+    skipped_unparsable: list[str] = []
+    for line in off_lines:
+        record = _parse_abp_rule(line)
+        if record is None:
+            if line.startswith(("||", "@@||")):
+                raise ValueError(f"audit input failed production parse: {line!r}")
+            skipped_unparsable.append(line)
+            continue
+        if record.is_wildcard and record.domain == get_tld(record.domain):
+            survivors.setdefault(record.domain, []).append(record)
+        elif not record.is_wildcard:
+            plains.append(record)
+    expected = 0
+    divergences: list[str] = []
+    for candidate in plains:
+        tld = get_tld(candidate.domain)
+        witnesses = survivors.get(tld) if tld is not None else None
+        if witnesses and _wildcard_covers_sub(candidate, witnesses, tld) is not None:
+            expected += 1
+            divergences.append(candidate.rule)
+    if skipped_unparsable:
+        samples = "; ".join(skipped_unparsable[:10])
+        divergences.append(
+            f"UNPARSABLE_SKIPPED total={len(skipped_unparsable)} samples=[{samples}]"
+        )
+    return expected, divergences
 
 
 @pytest.mark.slow
@@ -3482,3 +3963,1173 @@ class TestApexShadowEquivalence:
         else:
             failed_timing = checks["timing_evidence_present"]
             print(f"[APEX SHADOW] timing_evidence_present FAILED: {failed_timing[0]}")
+
+
+# ----------------------------------------------------------------------
+# Direction-B shadow machinery unit layer (Phase 21, EVID-03 tracer).
+#
+# Fixture-scale twin layer for the dirb OFF/ON legs that 21-02 feeds the
+# frozen corpus. Proves the leg-runner shape, the uncapped-witnessing
+# WcsTallyingLedger, the HONEST-ZERO B-signature spelling, and the
+# flag-threading plus cache-hygiene structural contracts BEFORE any
+# corpus-scale execution exists.
+#
+# Honest-zero note (superset theorem, Phase-20 header): phase 3's TLD
+# branch runs the same scope oracle over a strict superset of any
+# write-time survivor pool, so full-compile yield is structurally zero --
+# every wcs-provable pair is already owned by phase 3 under
+# tld_wildcard_covered. These twins pin EXACTLY that shape at fixture
+# scale (tally == counter == removed == 0, OFF-identical-to-ON bytes,
+# OFF-side witnessing empty) rather than a nonzero yield no input could
+# produce through compile_rules(). See D1 in 21-01-SUMMARY.
+# ----------------------------------------------------------------------
+
+
+class TestDirbShadowMachinery:
+    """Unit-proven dirb two-leg shadow comparison over synthetic lines.
+
+    Fixture vocabulary mirrors the Phase-20 direct-drive golden
+    (``autos`` TLD-form wildcard plus covered sub, D-19-06) with one
+    unrelated same-file plain so the OFF universe carries both a
+    phase-3-owned pair and an uncoverable control.
+    """
+
+    DIRB_FIXTURE_LINES = [
+        "||*.autos^",
+        "||sub.autos^",
+        "||unrelated.xyz^",
+    ]
+
+    DIRB_WILDCARD_ONLY_LINES = ["||*.autos^"]
+
+    def _result(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            return _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.DIRB_FIXTURE_LINES)),
+                Path(tmpdir),
+            )
+
+    def test_shadow_leg_typing_preserves_ledger_subclass(self):
+        """The shadow-leg helper signature preserves ledger subclasses (21-IN-01).
+
+        DirbCorpusLegs/ApexCorpusLegs access subclass-only tally
+        attributes, so the helper return annotation must name the ledger
+        type variable instead of the erased CappedProofLedger base.
+        """
+        assert "LedgerT" in str(_compile_shadow_leg.__annotations__["return"])
+
+    def test_dirb_legs_keep_honest_zero_signature_on_fixture_lines(self):
+        """OFF/ON legs agree exactly with zero wcs accounting either side.
+
+        Pins the honest-zero B-signature spelling (tally == counter ==
+        removed == 0) with one claim per assert and exact equality only.
+        The covered sub never reaches the write-time probe: phase 3 owns
+        it first under tld_wildcard_covered, so both legs emit the same
+        bytes and both ledgers stay empty of the wcs family.
+        """
+        legs = self._result()
+
+        removed = set(legs.off_lines) - set(legs.on_lines)
+        added = set(legs.on_lines) - set(legs.off_lines)
+
+        # OFF output pins the phase-3-owned population
+        # (capture-not-predict under py -3.14 at authoring time).
+        assert legs.off_lines == ["||*.autos^", "||unrelated.xyz^"]
+        # OFF-identical-to-ON bytes: the flag moves nothing here.
+        assert legs.on_lines == legs.off_lines
+        # Empty diff sets, exact equality.
+        assert removed == set()
+        assert added == set()
+        # Counter pins 0 in BOTH legs.
+        assert legs.off_stats.wildcard_covered_sub_pruned == 0
+        assert legs.on_stats.wildcard_covered_sub_pruned == 0
+        # Tally == counter == removed (B3a/B3b honest-zero form).
+        assert legs.on_ledger.wcs_candidates == removed
+        assert legs.off_ledger.wcs_candidates == set()
+        assert legs.on_ledger.wcs_pairs == set()
+        assert legs.off_ledger.wcs_pairs == set()
+        on_tally = legs.on_ledger.summary()["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert on_tally == legs.on_stats.wildcard_covered_sub_pruned
+        off_tally = legs.off_ledger.summary()["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert off_tally == legs.off_stats.wildcard_covered_sub_pruned
+
+    def test_dirb_off_side_witnessing_empty_on_wildcard_only_fixture(self):
+        """A wildcard-only universe witnesses nothing on the OFF side."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.DIRB_WILDCARD_ONLY_LINES)),
+                Path(tmpdir),
+            )
+
+        assert legs.off_ledger.wcs_candidates == set()
+        assert legs.off_ledger.wcs_pairs == set()
+
+    def test_dirb_legs_clear_caches_between_legs_and_thread_the_flag(self, monkeypatch):
+        """Pin the two structural contracts no yield assert can carry.
+
+        With honest-zero fixture yield the OFF/ON outputs are identical
+        whether the flag threads or is dropped (the D-21-09 fear), so
+        this twin spies the mechanism directly: ``clear_caches`` must
+        fire exactly once per run (between the legs, never inside one),
+        and the ON leg must forward ``wildcard_covers_subs_pruning=True``
+        into compile_rules while the OFF leg passes production defaults
+        with no extra kwargs. Both spies call through so behavior is
+        unperturbed.
+        """
+        module = sys.modules[__name__]
+        real_clear_caches = module.clear_caches
+        real_compile_rules = module.compile_rules
+        clear_calls: list[None] = []
+        forwarded_kwargs: list[dict[str, object]] = []
+
+        def recording_clear_caches() -> None:
+            clear_calls.append(None)
+            real_clear_caches()
+
+        def recording_compile_rules(lines, output_file, *args, **kwargs):
+            forwarded_kwargs.append(dict(kwargs))
+            return real_compile_rules(lines, output_file, *args, **kwargs)
+
+        monkeypatch.setattr(module, "clear_caches", recording_clear_caches)
+        monkeypatch.setattr(module, "compile_rules", recording_compile_rules)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.DIRB_FIXTURE_LINES)),
+                Path(tmpdir),
+            )
+
+        assert len(clear_calls) == 1
+        assert len(forwarded_kwargs) == 2
+        assert "wildcard_covers_subs_pruning" not in forwarded_kwargs[0]
+        assert forwarded_kwargs[1].get("wildcard_covers_subs_pruning") is True
+        assert legs.on_lines == legs.off_lines
+
+    def test_dirb_dataset_paths_never_reference_apex_frozen_dir(self):
+        """Dirb evidence paths stay out of the apex frozen dir (T-21-06)."""
+        assert os.environ.get("DIRB_SHADOW_DATASET_ID", "dirb-shadow-v1") == DIRB_SHADOW_DATASET_ID
+        assert "apex" not in str(DIRB_FROZEN_CORPUS_DIR)
+        assert "apex" not in str(DIRB_FROZEN_MANIFEST_PATH)
+        assert "apex" not in str(DIRB_TIMING_OFF_REPORT_PATH)
+        assert "apex" not in str(DIRB_TIMING_ON_REPORT_PATH)
+
+
+class TestDirbAuditExpectation:
+    """Fast unit twins for the audit-first expectation helper (D-21-02).
+
+    The helper derives its count from the OFF-leg output universe with
+    the production oracle, so these twins feed it hand-built universes
+    (capture-not-predict literals under py -3.14 at authoring time) and
+    pin exact counts plus divergence texts -- never ranges, never a
+    hardcoded yield constant.
+    """
+
+    AUDIT_SINGLE_PROOF_LINES = [
+        "||*.autos^",
+        "||sub.autos^",
+        "||unrelated.xyz^",
+    ]
+
+    AUDIT_KNOWN_ZERO_LINES = [
+        "||*.autos^",
+        "||*.sub.autos^",
+        "||lonely.buzz^",
+    ]
+
+    def test_audit_counts_single_covered_plain_with_divergence_text(self):
+        """One surviving witness plus one covered plain yields 1."""
+        expected, divergences = _audit_dirb_expectation(list(self.AUDIT_SINGLE_PROOF_LINES))
+        assert expected == 1
+        assert divergences == ["||sub.autos^"]
+
+    def test_audit_zero_universe_yields_zero_with_empty_divergences(self):
+        """Wildcards without same-key plains plus skipped forms yield 0."""
+        expected, divergences = _audit_dirb_expectation(list(self.AUDIT_KNOWN_ZERO_LINES))
+        assert expected == 0
+        assert divergences == []
+
+    def test_audit_raises_loudly_on_unparsable_abp_shaped_line(self):
+        """ABP-shaped output that fails production parsing never skips."""
+        with pytest.raises(ValueError):
+            _audit_dirb_expectation(["||*.autos^", "||"])
+
+    def test_audit_skips_other_rules_lines_with_recorded_forensics(self):
+        """Non-ABP rows production preserves verbatim skip WITH record."""
+        expected, divergences = _audit_dirb_expectation(
+            ["||*.autos^", "||sub.autos^", "!  |", "/^regex$/"]
+        )
+        assert expected == 1
+        assert divergences[0] == "||sub.autos^"
+        assert divergences[1] == ("UNPARSABLE_SKIPPED total=2 samples=[!  |; /^regex$/]")
+
+
+class TestDirbStasisAndWriterReuse:
+    """Uncertain STASIS twin plus staged writer-reuse proof (21-01 Task 3).
+
+    RED rationale (no implementation surface exists in this task -- both
+    twins pin behavior over Task-1 machinery, so the RED state is the
+    twins' absence): the STASIS spelling below is asserted as strict
+    equality because the stale minus-N delta cannot be produced by the
+    code -- _record_uncertain_keep is reachable only from the
+    flag-independent phase-3 site -- and a minus-N twin would fail for
+    that mechanism reason (21-RESEARCH OQ2, D-21-10).
+    """
+
+    DIRB_UNCERTAIN_LINES = [
+        "||*.com^",
+        "||foo.com^$important",
+    ]
+
+    def _legs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            return _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.DIRB_UNCERTAIN_LINES)),
+                Path(tmpdir),
+            )
+
+    # 21-02 S7 shape note: the slow gate's other-buckets stability scan
+    # skips EXACTLY {REASON_WILDCARD_COVERS_SUB,
+    # REASON_KEPT_BECAUSE_UNCERTAIN}; whitelist and denyallow ride their
+    # own dedicated equality claims below (no slow gate is built here).
+    def test_dirb_uncertain_keeps_hold_stasis_across_legs(self):
+        """Uncertain keeps are identical across OFF/ON legs (D-21-10).
+
+        Asserts strict equality, never a minus-N delta (the stale v1.4
+        spec spelling refused per 21-RESEARCH OQ2). The fixture
+        exercises the uncertain path with exactly one uncertain keep per
+        leg (capture-not-predict under py -3.14 at authoring time).
+        """
+        legs = self._legs()
+        off_uncertain = legs.off_ledger.summary()["by_reason"].get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+        on_uncertain = legs.on_ledger.summary()["by_reason"].get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+        assert off_uncertain == 1
+        assert on_uncertain == off_uncertain
+
+    def test_dirb_manifest_writer_round_trip_under_dirb_stem(self):
+        """Reused writer emits dirb-stem JSON plus MD with a verdict FIELD.
+
+        Calls the existing _evaluate_and_write_manifest verbatim (no new
+        writer logic, staged D-17-08): all-ok checks round-trip
+        identically through JSON and MD with observed-expected-ok
+        entries. Staging note: the shared writer stamps its own
+        report_type/title values, so this twin pins FIELD presence (not
+        the dirb-specific strings) -- the dirb report_type
+        parameterization belongs to 21-02's gate emission, which may
+        extend the writer then.
+        """
+        checks: dict[str, tuple[object, object]] = {
+            "input_identity": (3 == 3, True),
+            "added_empty": (set() == set(), True),
+        }
+        evidence: dict[str, object] = {"input_rows": 3, "removed_count": 0}
+        population: dict[str, object] = {
+            "total": 0,
+            "audit_expected": 0,
+            "audit_divergences": [],
+        }
+        corpus: dict[str, object] = {
+            "dir": "reports/benchmarks/frozen/dirb-shadow-v1/raw",
+            "manifest_sha256": "0" * 64,
+            "frozen": True,
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            verdict, manifest = _evaluate_and_write_manifest(
+                checks=checks,
+                evidence=evidence,
+                population=population,
+                output_dir=output_dir,
+                filename_stem="dirb-shadow-v1",
+                corpus=corpus,
+            )
+            json_path = output_dir / "dirb-shadow-v1.json"
+            md_path = output_dir / "dirb-shadow-v1.md"
+            assert json_path.is_file()
+            assert md_path.is_file()
+            assert verdict == "pass"
+            assert manifest["verdict"] == "pass"
+            assert manifest["schema_version"] == SHADOW_REPORT_SCHEMA_VERSION
+            assert "report_type" in manifest
+            assert manifest["corpus"] == corpus
+            assert manifest["checks"]["input_identity"] == {
+                "observed": True,
+                "expected": True,
+                "ok": True,
+            }
+            with open(json_path, encoding="utf-8") as handle:
+                assert json.load(handle) == manifest
+            assert "- Verdict: pass" in md_path.read_text(encoding="utf-8")
+
+    def test_dirb_manifest_writer_leaves_forensics_on_failing_check(self):
+        """A forced failing check yields verdict fail with files on disk."""
+        checks: dict[str, tuple[object, object]] = {
+            "input_identity": (3, 3),
+            "population_nonzero": (0, 1),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            verdict, manifest = _evaluate_and_write_manifest(
+                checks=checks,
+                evidence={},
+                population={},
+                output_dir=output_dir,
+                filename_stem="dirb-shadow-v1",
+            )
+            assert verdict == "fail"
+            assert manifest["verdict"] == "fail"
+            assert manifest["checks"]["population_nonzero"] == {
+                "observed": 0,
+                "expected": 1,
+                "ok": False,
+            }
+            assert (output_dir / "dirb-shadow-v1.json").is_file()
+            assert (output_dir / "dirb-shadow-v1.md").is_file()
+
+
+# ----------------------------------------------------------------------
+# Direction-B positive controls (Phase 21 plan 21-02, D-21-09).
+#
+# Seeds-as-legs form (NOT the superseded D-21-07 corpus-embedded form):
+# corpus-embedded seeds are unimplementable through compile_rules() --
+# phase 3 proves coverage with the bare oracle over a strict superset of
+# any write-time survivor pool, so any seed the probe would accept is
+# eaten by phase 3 first under tld_wildcard_covered and never reaches the
+# probe (21-01 D1, superset theorem). The 2-3 seeds below therefore live
+# as direct-drive _write_output() legs built through production
+# _parse_abp_rule plus production get_tld key derivation over real public
+# suffixes (autos vocabulary, D-19-06), with clearly marked synthetic ids:
+# s1 bare wildcard-plus-plain, s2 scoped-modifier pair exercising the
+# modifier_scope_covers oracle path, s3 deep-sub depth proof. OFF keeps
+# both lines with counter 0 and empty wcs sets; ON removes exactly the
+# seed plain with counter 1, uncapped tally equality, single-family ledger
+# EXACT, and paired totals. The frozen set stays natural-only (guard
+# below); the corpus-leg kwargs spy proves flag threading at compile
+# level where outputs are identical.
+# ----------------------------------------------------------------------
+
+
+class DirbSeedDrive(NamedTuple):
+    """One direct-drive seed pair outcome under both flag states."""
+
+    off_lines: list[str]
+    on_lines: list[str]
+    off_stats: CompileStats
+    on_stats: CompileStats
+    off_ledger: WcsTallyingLedger
+    on_ledger: WcsTallyingLedger
+
+
+def _dirb_seed_storages(
+    wildcard_text: str,
+    plain_text: str,
+) -> tuple[dict[str, list], dict[str, list]]:
+    """Build builder-contract storages for one seed pair.
+
+    Records come strictly from production _parse_abp_rule; the wildcard
+    storage key derives from production get_tld with TLD-form admission
+    (mirroring the audit helper), and the plain key is the record's own
+    domain (the write-time probe re-derives the witness key itself, so
+    the plain key never influences coverage).
+    """
+    witness = _parse_abp_rule(wildcard_text)
+    candidate = _parse_abp_rule(plain_text)
+    if witness is None or candidate is None:
+        raise ValueError(f"seed inputs must parse: {wildcard_text!r} {plain_text!r}")
+    witness_key = get_tld(witness.domain)
+    if witness_key is None or witness.domain != witness_key:
+        raise ValueError(f"seed witness must be TLD-form: {wildcard_text!r}")
+    if not witness.is_wildcard or candidate.is_wildcard:
+        raise ValueError(f"seed pair must be wildcard-plus-plain: {wildcard_text!r} {plain_text!r}")
+    return ({witness_key: [witness]}, {candidate.domain: [candidate]})
+
+
+def _drive_dirb_seed(wildcard_text: str, plain_text: str) -> DirbSeedDrive:
+    """Drive one seed pair through _write_output() under both flag states.
+
+    Direct-drive form per D-21-09 (NOT the superseded corpus-embedded
+    form): compile_rules() cannot yield nonzero wcs removals (phase-3
+    superset), so the mechanism proof drives the wired site directly with
+    WcsTallyingLedger witnesses. clear_caches() runs between drives
+    because the module LRU caches are process-global (Pitfall 6).
+    """
+    abp_wildcards, pruned_abp = _dirb_seed_storages(wildcard_text, plain_text)
+
+    clear_caches()
+    off_stats = CompileStats()
+    off_ledger = WcsTallyingLedger()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        off_output = Path(tmpdir) / "seed_off.txt"
+        _write_output(
+            str(off_output),
+            off_stats,
+            abp_wildcards,
+            pruned_abp,
+            [],
+            set(),
+            off_ledger,
+        )
+        off_lines = _read_output_lines(off_output)
+
+    clear_caches()
+    on_stats = CompileStats()
+    on_ledger = WcsTallyingLedger()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        on_output = Path(tmpdir) / "seed_on.txt"
+        _write_output(
+            str(on_output),
+            on_stats,
+            abp_wildcards,
+            pruned_abp,
+            [],
+            set(),
+            on_ledger,
+            wildcard_covers_subs_pruning=True,
+        )
+        on_lines = _read_output_lines(on_output)
+
+    return DirbSeedDrive(
+        off_lines=off_lines,
+        on_lines=on_lines,
+        off_stats=off_stats,
+        on_stats=on_stats,
+        off_ledger=off_ledger,
+        on_ledger=on_ledger,
+    )
+
+
+class TestDirbPositiveControls:
+    """Direct-drive seed legs proving the probe fires, plus threading spy.
+
+    Corpus-scale threading distinguisher for the 21-03 close: seed legs
+    green plus audit zero plus R1 match resolves to honest zero for the
+    21-03 close, seed legs green plus audit nonzero plus R1 mismatch
+    resolves to mechanism divergence for investigation, seed legs red
+    resolves to harness break requiring fix and re-run.
+    """
+
+    # Seed ids are synthetic by construction (clearly marked); the frozen
+    # set stays natural-only (see the natural-only guard below).
+    S1_WILDCARD = "||*.autos^"  # synthetic seed s1 witness (bare)
+    S1_PLAIN = "||sub.autos^"  # synthetic seed s1 candidate (bare)
+    S2_WILDCARD = "||*.autos^$client=10.0.0.1"  # synthetic s2 witness (scoped)
+    S2_PLAIN = "||sub.autos^$client=10.0.0.1"  # synthetic s2 candidate (scoped)
+    S3_WILDCARD = "||*.autos^"  # synthetic seed s3 witness (bare)
+    S3_PLAIN = "||b.a.autos^"  # synthetic seed s3 candidate (deep sub)
+
+    def test_s1_bare_pair_off_keeps_both_with_zero_accounting(self):
+        """OFF leg writes both seed lines with zero wcs accounting."""
+        drive = _drive_dirb_seed(self.S1_WILDCARD, self.S1_PLAIN)
+        assert drive.off_lines == [self.S1_WILDCARD, self.S1_PLAIN]
+        assert drive.off_stats.wildcard_covered_sub_pruned == 0
+        assert drive.off_ledger.wcs_candidates == set()
+        assert drive.off_ledger.wcs_pairs == set()
+        assert drive.off_ledger.summary()["by_reason"] == {}
+
+    def test_s1_bare_pair_on_removes_plain_with_exact_single_family(self):
+        """ON leg removes exactly the seed plain with 1:1 ledger exactness."""
+        drive = _drive_dirb_seed(self.S1_WILDCARD, self.S1_PLAIN)
+        assert drive.on_lines == [self.S1_WILDCARD]
+        assert drive.on_stats.wildcard_covered_sub_pruned == 1
+        assert drive.on_ledger.wcs_candidates == {self.S1_PLAIN}
+        assert drive.on_ledger.wcs_pairs == {(self.S1_PLAIN, self.S1_WILDCARD)}
+        on_tally = drive.on_ledger.summary()["by_reason"].get(REASON_WILDCARD_COVERS_SUB, 0)
+        assert on_tally == drive.on_stats.wildcard_covered_sub_pruned
+        assert drive.on_ledger.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 1}
+        assert drive.on_stats.total_output == drive.on_stats.abp_kept + drive.on_stats.other_kept
+        assert drive.on_stats.total_output == 1
+
+    def test_s2_scoped_modifier_pair_proves_oracle_path_at_direct_drive_scale(self):
+        """Scoped witness plus matching scoped plain exercises the oracle path."""
+        drive = _drive_dirb_seed(self.S2_WILDCARD, self.S2_PLAIN)
+        assert drive.off_lines == [self.S2_WILDCARD, self.S2_PLAIN]
+        assert drive.off_stats.wildcard_covered_sub_pruned == 0
+        assert drive.on_lines == [self.S2_WILDCARD]
+        assert drive.on_stats.wildcard_covered_sub_pruned == 1
+        assert drive.on_ledger.wcs_candidates == {self.S2_PLAIN}
+        assert drive.on_ledger.wcs_pairs == {(self.S2_PLAIN, self.S2_WILDCARD)}
+        assert drive.on_ledger.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 1}
+        assert drive.on_stats.total_output == 1
+
+    def test_s3_deep_sub_pair_removes_on_with_exact_pairing(self):
+        """Depth does not shield a plain from a same-key TLD witness."""
+        drive = _drive_dirb_seed(self.S3_WILDCARD, self.S3_PLAIN)
+        assert drive.off_lines == [self.S3_WILDCARD, self.S3_PLAIN]
+        assert drive.off_stats.wildcard_covered_sub_pruned == 0
+        assert drive.on_lines == [self.S3_WILDCARD]
+        assert drive.on_stats.wildcard_covered_sub_pruned == 1
+        assert drive.on_ledger.wcs_candidates == {self.S3_PLAIN}
+        assert drive.on_ledger.wcs_pairs == {(self.S3_PLAIN, self.S3_WILDCARD)}
+        assert drive.on_ledger.summary()["by_reason"] == {REASON_WILDCARD_COVERS_SUB: 1}
+        assert drive.on_stats.total_output == 1
+
+    def test_corpus_leg_forwards_flag_kwarg_into_compile_rules(self, monkeypatch):
+        """Spy proving the ON corpus leg threads the flag (D-21-09 fear).
+
+        With honest-zero fixture yield the OFF/ON outputs are identical
+        whether the flag threads or is dropped, so only a kwargs spy can
+        distinguish threaded from dropped: the OFF leg must pass
+        production defaults with no extra kwarg (negative control) while
+        the ON leg must forward wildcard_covers_subs_pruning=True. A
+        dropped kwarg turns the second claim red.
+        """
+        module = sys.modules[__name__]
+        real_compile_rules = module.compile_rules
+        forwarded_kwargs: list[dict[str, object]] = []
+
+        def recording_compile_rules(lines, output_file, *args, **kwargs):
+            forwarded_kwargs.append(dict(kwargs))
+            return real_compile_rules(lines, output_file, *args, **kwargs)
+
+        monkeypatch.setattr(module, "compile_rules", recording_compile_rules)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _run_dirb_corpus_legs(
+                _shadow_line_factory([self.S1_WILDCARD, self.S1_PLAIN]),
+                Path(tmpdir),
+            )
+
+        assert len(forwarded_kwargs) == 2
+        assert "wildcard_covers_subs_pruning" not in forwarded_kwargs[0]
+        assert forwarded_kwargs[1].get("wildcard_covers_subs_pruning") is True
+
+    def test_frozen_set_stays_natural_only_with_no_seed_files(self):
+        """No seed text file exists under any dirb frozen path (T-21-07).
+
+        Pre-freeze this pins the empty dir; post-freeze (the 21-03
+        canonical run) the dir legitimately holds the 86 fetched natural
+        files, so the claim becomes manifest parity -- every frozen file
+        is provenance-pinned by the freezer, and any hand-planted seed
+        file would break parity (or fail validate_manifest's
+        unexpected-file check).
+        """
+        frozen_names = sorted(path.name for path in DIRB_FROZEN_CORPUS_DIR.glob("*.txt"))
+        if not DIRB_FROZEN_MANIFEST_PATH.is_file():
+            assert frozen_names == []
+        else:
+            manifest = json.loads(DIRB_FROZEN_MANIFEST_PATH.read_text(encoding="utf-8"))
+            manifest_names = sorted(source["filename"] for source in manifest["sources"])
+            assert frozen_names == manifest_names
+        assert DIRB_FROZEN_CORPUS_DIR != FROZEN_CORPUS_DIR
+        assert "apex" not in DIRB_SHADOW_DATASET_ID
+
+
+# ----------------------------------------------------------------------
+# Direction-B slow gate plus fixture-scale spelling twins (Phase 21 plan
+# 21-02, D-21-01 plus D-21-10 plus carried-forward D-17-08).
+#
+# TestDirbShadowEquivalence clones the apex slow-gate skeleton as a
+# sibling class with dirb deltas and executes zero corpus legs in this
+# plan: without a freeze the corpus method skips with the dirb skip
+# reason. The B1-B10 plus R1 plus literal R2 spellings live in
+# _dirb_gate_checks (exact RESEARCH spellings, no ranges or thresholds,
+# uncertain STASIS per D-21-10 refusing the stale minus-N), exercised at
+# fixture scale by the spelling twins below and at corpus scale by the
+# slow gate in the 21-03 canonical run. Manifest emission reuses the
+# shared writer under the dirb-shadow-v1 stem with report type
+# dirb_shadow_gate, verdict as FIELD, and omitted proposed_guards,
+# writing before any assert so red runs leave forensics.
+# ----------------------------------------------------------------------
+
+
+def _dirb_gate_checks(
+    legs: DirbCorpusLegs,
+    *,
+    audit_expected: int,
+) -> tuple[dict[str, tuple[object, object]], dict[str, object]]:
+    """Evaluate the B1-B10 plus R1 plus literal R2 signature spellings.
+
+    Exact RESEARCH spellings with one claim per key and no ranges or
+    thresholds anywhere: input identity plus input rows sanity over one
+    million, added empty, removed equals uncapped tally, removed equals
+    wildcard_covered_sub_pruned counter, total_records delta equals
+    removed, whitelist identical across legs and equal to each leg's
+    by_reason tally, denyallow identical, uncertain STASIS, other-buckets
+    stable both directions skipping exactly the wcs plus uncertain
+    reasons, coverer membership complete over uncapped wcs_pairs,
+    OFF-side witnessing empty, R1 reconciliation of removed count against
+    the live audit expectation (D-21-02, never a constant), R2
+    population_nonzero literal (D-21-01 -- a zero corpus reading fails
+    reconciliation by design). B10 determinism rides the timing block's
+    sha-stability plus the evidence shas, deliberately NOT a checks key:
+    timing never gates per D-21-04. Shared by the fixture-scale spelling
+    twins and the corpus-scale slow gate so both pin one signature.
+
+    Returns:
+        ``(checks, details)`` where checks drives the verdict FIELD and
+        details carries the SAME computed objects (removed/added/ledger
+        tallies/mismatches/pairs) so evidence and asserts reuse them
+        without recomputation (WR-06 single-computation).
+    """
+    removed = set(legs.off_lines) - set(legs.on_lines)
+    added = set(legs.on_lines) - set(legs.off_lines)
+    on_line_set = set(legs.on_lines)
+
+    off_total_records = legs.off_ledger.summary()["total_records"]
+    on_total_records = legs.on_ledger.summary()["total_records"]
+    off_by_reason = legs.off_ledger.summary()["by_reason"]
+    on_by_reason = legs.on_ledger.summary()["by_reason"]
+
+    whitelist_off = off_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+    whitelist_on = on_by_reason.get(REASON_EXCEPTION_COVERED, 0)
+    denyallow_off = off_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+    denyallow_on = on_by_reason.get(REASON_DENYALLOW_COVERED, 0)
+    kept_before = off_by_reason.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+    kept_after = on_by_reason.get(REASON_KEPT_BECAUSE_UNCERTAIN, 0)
+
+    skipped_reasons = {REASON_WILDCARD_COVERS_SUB, REASON_KEPT_BECAUSE_UNCERTAIN}
+    mismatches_other_buckets: list[tuple[str, str]] = []
+    for reason, off_count in off_by_reason.items():
+        if reason in skipped_reasons:
+            continue
+        if on_by_reason.get(reason, 0) != off_count:
+            mismatches_other_buckets.append(("off-to-on", reason))
+    for reason, on_count in on_by_reason.items():
+        if reason in skipped_reasons:
+            continue
+        if off_by_reason.get(reason, 0) != on_count:
+            mismatches_other_buckets.append(("on-to-off", reason))
+
+    pairs = legs.on_ledger.wcs_pairs
+    uncovered_pairs = [
+        (candidate_rule, covering_rule)
+        for candidate_rule, covering_rule in pairs
+        if candidate_rule not in removed or covering_rule not in on_line_set
+    ]
+
+    checks: dict[str, tuple[object, object]] = {
+        "input_identity": (
+            legs.off_stats.total_input == legs.on_stats.total_input,
+            True,
+        ),
+        "input_rows_sanity": (legs.off_stats.total_input > 1_000_000, True),
+        "added_empty": (added == set(), True),
+        "removed_equals_uncapped_tally": (
+            legs.on_ledger.wcs_candidates == removed,
+            True,
+        ),
+        "removed_equals_counter": (
+            legs.on_stats.wildcard_covered_sub_pruned == len(removed),
+            True,
+        ),
+        "total_records_delta_equals_removed": (
+            on_total_records - off_total_records == len(removed),
+            True,
+        ),
+        "whitelist_bucket_identical": (
+            (
+                whitelist_off == whitelist_on
+                and whitelist_off == legs.off_stats.whitelist_conflict_pruned
+                and whitelist_on == legs.on_stats.whitelist_conflict_pruned
+            ),
+            True,
+        ),
+        "denyallow_bucket_identical": (denyallow_off == denyallow_on, True),
+        # B6 STASIS per D-21-10: the uncertain recorder is reachable only
+        # from the flag-independent phase-3 site, so tallies are identical
+        # across legs. The stale v1.4 "uncertain delta == -N" spelling is
+        # explicitly refused (21-RESEARCH OQ2): it asserts a delta the code
+        # cannot produce.
+        "uncertain_keeps_stasis": (kept_before == kept_after, True),
+        "other_buckets_stable_both_directions": (
+            mismatches_other_buckets == [],
+            True,
+        ),
+        "coverer_membership_complete": (
+            len(pairs) == len(removed) and not uncovered_pairs,
+            True,
+        ),
+        "off_side_witnessing_empty": (
+            legs.off_ledger.wcs_candidates == set() and legs.off_ledger.wcs_pairs == set(),
+            True,
+        ),
+        "reconciliation_matches_audit": (len(removed) == audit_expected, True),
+        "population_nonzero": (len(removed) > 0, True),
+    }
+    details: dict[str, object] = {
+        "removed": removed,
+        "added": added,
+        "on_line_set": on_line_set,
+        "off_total_records": off_total_records,
+        "on_total_records": on_total_records,
+        "off_by_reason": off_by_reason,
+        "on_by_reason": on_by_reason,
+        "whitelist_off": whitelist_off,
+        "whitelist_on": whitelist_on,
+        "denyallow_off": denyallow_off,
+        "denyallow_on": denyallow_on,
+        "kept_before": kept_before,
+        "kept_after": kept_after,
+        "mismatches_other_buckets": mismatches_other_buckets,
+        "pairs": pairs,
+        "uncovered_pairs": uncovered_pairs,
+    }
+    return checks, details
+
+
+@pytest.mark.slow
+class TestDirbShadowEquivalence:
+    """Corpus-scale dirb shadow-equivalence gate over the FROZEN dataset.
+
+    Sibling to TestApexShadowEquivalence with dirb deltas: frozen-corpus
+    line streamer over DIRB_FROZEN_CORPUS_DIR in sorted order,
+    manifest-digest pin before legs, _run_dirb_corpus_legs inside a
+    temporary workdir, removed versus added set-diff opening, exact
+    B1-B10 plus R1 plus literal R2 evaluation, live-audit R1
+    reconciliation (D-21-02), always-write manifest emission under the
+    dirb-shadow-v1 stem BEFORE any assert (D-17-08), one claim per
+    assert, and informational DIRB SHADOW prints. Timing merges here via
+    _dirb_timing_medians as informational-only evidence (D-21-04, never a
+    checks input). Zero corpus legs execute outside the canonical 21-03
+    run: without a freeze this method skips.
+    """
+
+    def _frozen_corpus_lines(self):
+        """Stream frozen dataset rows lazily (denyallow-gate glob idiom)."""
+        for corpus_file in sorted(DIRB_FROZEN_CORPUS_DIR.glob("*.txt")):
+            with open(corpus_file, encoding="utf-8-sig", errors="replace") as handle:
+                yield from handle
+
+    @pytest.mark.skipif(not DIRB_FROZEN_CORPUS_PRESENT, reason=DIRB_FROZEN_SKIP_REASON)
+    def test_dirb_full_corpus_shadow_equivalence(self):
+        """Prove flag ON removes ONLY the audit-expected population at scale.
+
+        Signature elements B1-B10 assert from computed values; R1
+        reconciles the removal count against the live audit expectation
+        (D-21-02, never a constant); R2 population_nonzero is literal per
+        D-21-01 (a zero corpus reading fails reconciliation by design and
+        routes to the D-21-05 stop-and-present). The manifest is written
+        before any claim is checked so a red run leaves forensics.
+        """
+        corpus_summary = _load_frozen_corpus_summary(DIRB_FROZEN_MANIFEST_PATH)
+        corpus_entries = build_corpus_manifest(DIRB_FROZEN_CORPUS_DIR)
+        frozen_digest = manifest_digest(corpus_entries)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(self._frozen_corpus_lines, Path(tmpdir))
+
+        audit_expected, audit_divergences = _audit_dirb_expectation(list(legs.off_lines))
+        # WR-06 single-computation: checks and evidence share the helper's
+        # objects -- no inline recomputation that could drift from the gate.
+        checks, details = _dirb_gate_checks(legs, audit_expected=audit_expected)
+
+        removed = details["removed"]
+        added = details["added"]
+        off_total_records = details["off_total_records"]
+        on_total_records = details["on_total_records"]
+        whitelist_off = details["whitelist_off"]
+        whitelist_on = details["whitelist_on"]
+        denyallow_off = details["denyallow_off"]
+        denyallow_on = details["denyallow_on"]
+        kept_before = details["kept_before"]
+        kept_after = details["kept_after"]
+        mismatches_other_buckets = details["mismatches_other_buckets"]
+        pairs = details["pairs"]
+        uncovered_pairs = details["uncovered_pairs"]
+
+        evidence: dict[str, object] = {
+            "input_rows": legs.off_stats.total_input,
+            "added_count": len(added),
+            "removed_count": len(removed),
+            "ledger": {
+                "off_total_records": off_total_records,
+                "on_total_records": on_total_records,
+                "delta_equals_removed": on_total_records - off_total_records == len(removed),
+            },
+            "whitelist_conflict_pruned": {"off": whitelist_off, "on": whitelist_on},
+            "kept_because_uncertain": {"off": kept_before, "on": kept_after},
+            "other_buckets_stable": not mismatches_other_buckets,
+            "off_output_sha256": legs.off_output_sha256,
+            "on_output_sha256": legs.on_output_sha256,
+            "leg_seconds": {"off": legs.off_seconds, "on": legs.on_seconds},
+        }
+
+        population: dict[str, object] = {
+            "total": len(removed),
+            "audit_expected": audit_expected,
+            "audit_divergences": list(audit_divergences),
+            "samples": [
+                _capped_sample_record(record)
+                for record in legs.on_ledger.records
+                if record.reason == REASON_WILDCARD_COVERS_SUB
+            ],
+        }
+
+        corpus_block = {
+            "dir": DIRB_FROZEN_CORPUS_DIR.relative_to(REPO_ROOT).as_posix(),
+            "file_count": len(corpus_entries),
+            "total_bytes": sum(entry.byte_size for entry in corpus_entries),
+            "manifest_sha256": frozen_digest,
+            "frozen": True,
+        }
+
+        # D-17-08 WRITE-BEFORE-ASSERT: forensics land on disk first; every
+        # claim below runs only after the versioned manifest exists.
+        # proposed_guards omitted (no flip pends for B; FLIP-01 is v1.5+)
+        # so the writer emits the reserved non-binding stub. Timing merges
+        # here via _dirb_timing_medians over the same frozen dir with
+        # digest-pinned same_corpus plus determinism cross-ties plus leg
+        # seconds -- informational only, never a checks input (D-21-04).
+        timing_block = _dirb_timing_medians(
+            self._frozen_corpus_lines,
+            frozen_digest=frozen_digest,
+            corpus_dir=DIRB_FROZEN_CORPUS_DIR,
+        )
+        timing_block["cross_tie_off"] = (
+            timing_block["off"]["output_sha256"] == legs.off_output_sha256
+        )
+        timing_block["cross_tie_on"] = timing_block["on"]["output_sha256"] == legs.on_output_sha256
+        timing_block["leg_seconds"] = {"off": legs.off_seconds, "on": legs.on_seconds}
+        verdict, manifest = _evaluate_and_write_manifest(
+            checks=checks,
+            evidence=evidence,
+            population=population,
+            output_dir=SHADOW_GATE_OUTPUT_DIR,
+            filename_stem=DIRB_SHADOW_DATASET_ID,
+            report_type="dirb_shadow_gate",
+            flags=DIRB_SHADOW_FLAGS,
+            identity=_python_identity(),
+            corpus=corpus_block,
+            timing=timing_block,
+            source_health=corpus_summary,
+        )
+
+        assert verdict == "pass"
+
+        # B1: input identity across legs (standalone claim).
+        assert legs.off_stats.total_input == legs.on_stats.total_input
+        # B1: input sanity at corpus scale (a silently-empty frozen
+        # dataset can never masquerade as a clean gate).
+        assert legs.off_stats.total_input > 1_000_000
+        # B2: added-lines empty -- write-time prunes can only vanish.
+        assert not added
+        # B3a: removed set equals the UNCAPPED ledger witness by identity.
+        assert legs.on_ledger.wcs_candidates == removed
+        # B3b: removed count equals the paired stats counter.
+        assert legs.on_stats.wildcard_covered_sub_pruned == len(removed)
+        # B4: ON total exceeds OFF by EXACTLY the removal count -- an
+        # ON-side proven removal adds exactly one record while OFF-side
+        # write-time keeps emit nothing. Never claim totals equality.
+        assert on_total_records - off_total_records == len(removed)
+        # B5a: whitelist bucket identical across legs AND equal to each
+        # leg's own counter (three standalone claims).
+        assert whitelist_off == whitelist_on
+        assert whitelist_off == legs.off_stats.whitelist_conflict_pruned
+        assert whitelist_on == legs.on_stats.whitelist_conflict_pruned
+        # B5b: denyallow bucket identical -- both legs run production
+        # default denyallow pruning; the dirb flag is the only mover.
+        assert denyallow_off == denyallow_on
+        # B6: uncertain-keeps EQUALITY stasis (D-21-10 -- deliberately
+        # unlike a drop-by-prune-count; the stale minus-N spelling is
+        # refused per 21-RESEARCH OQ2).
+        assert kept_before == kept_after
+        # B7: every other attribution bucket byte-stable, both directions.
+        assert not mismatches_other_buckets
+        # B8a: pairing completeness -- one uncapped pair per removal.
+        assert len(pairs) == len(removed)
+        # B8b: survivor-coverer membership -- every covering member lives
+        # in the ON output set (PRUNE-02 survivor-only witnessing).
+        assert not uncovered_pairs
+        # B9: OFF-side witnessing stays empty: flag-OFF emits nothing.
+        assert legs.off_ledger.wcs_candidates == set()
+        assert legs.off_ledger.wcs_pairs == set()
+        # R1: reconciliation matches the live audit (D-21-02).
+        assert len(removed) == audit_expected
+        # R2: population nonzero (D-21-01 literal -- a zero corpus reading
+        # fails here by design and routes to stop-and-present).
+        assert len(removed) > 0
+
+        # Informational evidence block (magnitudes are calibration facts,
+        # never verdict inputs -- Pitfall 11).
+        print(f"\n[DIRB SHADOW] total_input={legs.off_stats.total_input:,}")
+        print(f"[DIRB SHADOW] removed={len(removed):,}")
+        print(f"[DIRB SHADOW] audit_expected={audit_expected} divergences={len(audit_divergences)}")
+        for divergence in audit_divergences[:10]:
+            print(f"[DIRB SHADOW] divergence: {divergence}")
+        print(f"[DIRB SHADOW] off_output_sha256={legs.off_output_sha256[:16]}")
+        print(f"[DIRB SHADOW] on_output_sha256={legs.on_output_sha256[:16]}")
+        print(
+            f"[DIRB SHADOW] off_leg_seconds={legs.off_seconds:.1f} "
+            f"on_leg_seconds={legs.on_seconds:.1f}"
+        )
+        manifest_path = SHADOW_GATE_OUTPUT_DIR / f"{DIRB_SHADOW_DATASET_ID}.json"
+        print(f"[DIRB SHADOW] verdict={verdict} manifest={manifest_path}")
+        print(
+            f"[DIRB SHADOW] timing medians off={timing_block['off']['median_seconds']}s "
+            f"on={timing_block['on']['median_seconds']}s "
+            f"same_corpus={timing_block['same_corpus']}"
+        )
+
+
+class TestDirbShadowGateChecksSpelling:
+    """Fixture-scale twins pinning the B1-B10 plus R1 plus literal R2 spellings.
+
+    RED-first: FAILS before _dirb_gate_checks exists, PASSES after. Runs
+    the 21-01 _run_dirb_corpus_legs over the honest-zero fixture plus the
+    live _audit_dirb_expectation, then pins every checks-dict spelling
+    with exact equality. Scale-dependent keys read False here by
+    construction (3-row fixture, zero removals); the slow gate asserts
+    them True at corpus scale.
+    """
+
+    def _fixture_checks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(
+                _shadow_line_factory(list(TestDirbShadowMachinery.DIRB_FIXTURE_LINES)),
+                Path(tmpdir),
+            )
+        audit_expected, audit_divergences = _audit_dirb_expectation(list(legs.off_lines))
+        checks, _ = _dirb_gate_checks(legs, audit_expected=audit_expected)
+        return (
+            legs,
+            audit_expected,
+            audit_divergences,
+            checks,
+        )
+
+    def test_b_spellings_hold_exact_at_fixture_scale(self):
+        """Every checks-dict spelling carries exact-equality form."""
+        _, audit_expected, audit_divergences, checks = self._fixture_checks()
+        assert audit_expected == 0
+        assert audit_divergences == []
+        assert checks["input_identity"] == (True, True)
+        assert checks["input_rows_sanity"] == (False, True)
+        assert checks["added_empty"] == (True, True)
+        assert checks["removed_equals_uncapped_tally"] == (True, True)
+        assert checks["removed_equals_counter"] == (True, True)
+        assert checks["total_records_delta_equals_removed"] == (True, True)
+        assert checks["whitelist_bucket_identical"] == (True, True)
+        assert checks["denyallow_bucket_identical"] == (True, True)
+        assert checks["uncertain_keeps_stasis"] == (True, True)
+        assert checks["other_buckets_stable_both_directions"] == (True, True)
+        assert checks["coverer_membership_complete"] == (True, True)
+        assert checks["off_side_witnessing_empty"] == (True, True)
+        assert checks["reconciliation_matches_audit"] == (True, True)
+        assert checks["population_nonzero"] == (False, True)
+
+    def test_r2_literal_fails_verdict_with_forensics_on_zero_removal(self):
+        """A zero-removal fixture run yields verdict fail, never silent pass."""
+        _, _, _, checks = self._fixture_checks()
+        assert checks["population_nonzero"] == (False, True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            verdict, manifest = _evaluate_and_write_manifest(
+                checks=checks,
+                evidence={"input_rows": 3, "removed_count": 0},
+                population={"total": 0, "audit_expected": 0, "audit_divergences": []},
+                output_dir=output_dir,
+                filename_stem="dirb-shadow-v1",
+                report_type="dirb_shadow_gate",
+                flags=DIRB_SHADOW_FLAGS,
+            )
+            assert verdict == "fail"
+            assert manifest["verdict"] == "fail"
+            assert manifest["checks"]["population_nonzero"] == {
+                "observed": False,
+                "expected": True,
+                "ok": False,
+            }
+            assert (output_dir / "dirb-shadow-v1.json").is_file()
+            assert (output_dir / "dirb-shadow-v1.md").is_file()
+
+    def test_write_before_assert_leaves_dirb_forensics_on_forced_fail(self):
+        """A forced failing check yields verdict fail with dirb siblings on disk."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            verdict, manifest = _evaluate_and_write_manifest(
+                checks={"input_identity": (1, 2)},
+                evidence={},
+                population={},
+                output_dir=output_dir,
+                filename_stem="dirb-shadow-v1",
+                report_type="dirb_shadow_gate",
+                flags=DIRB_SHADOW_FLAGS,
+            )
+            assert verdict == "fail"
+            assert manifest["verdict"] == "fail"
+            assert manifest["report_type"] == "dirb_shadow_gate"
+            assert manifest["flags"] == DIRB_SHADOW_FLAGS
+            assert (output_dir / "dirb-shadow-v1.json").is_file()
+            assert (output_dir / "dirb-shadow-v1.md").is_file()
+            md_text = (output_dir / "dirb-shadow-v1.md").read_text(encoding="utf-8")
+            assert "Dirb Shadow Gate: FAIL" in md_text
+            assert "- Verdict: fail" in md_text
+
+    def test_corpus_gate_stays_gated_without_freeze(self):
+        """The corpus method stays slow-gated on the dirb present-flag.
+
+        The class-level slow mark lives on the class object while the
+        skipif mark lives on the method, so both owners are pinned: the
+        skip reason must name the dirb dataset id.
+        """
+        class_marks = {mark.name for mark in getattr(TestDirbShadowEquivalence, "pytestmark", [])}
+        method_marks = {
+            mark.name
+            for mark in (
+                TestDirbShadowEquivalence.test_dirb_full_corpus_shadow_equivalence.pytestmark
+            )
+        }
+        assert "slow" in class_marks
+        assert "skipif" in method_marks
+        assert DIRB_SHADOW_DATASET_ID in DIRB_FROZEN_SKIP_REASON
+
+
+# ----------------------------------------------------------------------
+# In-gate median-of-3 timing helper (Phase 21 plan 21-02, D-21-04 plus
+# D-21-08 plus carried-forward D-20-04).
+#
+# Records cost informationally with benchmark-grade hygiene
+# (gc.collect plus clear_caches between every run, perf_counter walls,
+# per-run output sha, statistics median) and digest-pinned merge, never
+# gating the verdict and never touching benchmark.py or any
+# compile_flags surface. Drives compile_rules directly over a
+# caller-supplied line factory; the slow gate passes its frozen corpus
+# factory plus the pinned digest at canonical-run time.
+# ----------------------------------------------------------------------
+
+
+# D-20-04 binding: any future benchmark-CLI stamping for the wcs flag
+# belongs to the flip milestone only -- this helper must never grow a
+# benchmark surface or a compile_flags echo.
+def _dirb_timing_medians(
+    line_factory: Callable[[], Iterable[str]],
+    *,
+    frozen_digest: str,
+    corpus_dir: Path | None = None,
+    runs: int = 3,
+) -> dict[str, object]:
+    """Measure median-of-N compile cost per flag state, informational only.
+
+    Per D-21-04 plus D-21-08 plus carried-forward D-20-04: reuses the
+    median-leg hygiene (gc.collect plus clear_caches between every run,
+    perf_counter walls, per-run output sha via _streaming_sha256,
+    statistics median rounded to six decimals) with zero benchmark
+    surface -- drives compile_rules directly, never the benchmark CLI,
+    and emits no passes, bar percent, or compile-flags echo fields, so no
+    consumer can mistake timing for a gate. OFF runs at production
+    defaults; ON adds only wildcard_covers_subs_pruning=True, so the dirb
+    flag is the sole mover. Digest-pinned merge: timing_corpus_digest
+    recomputes from corpus_dir when given, else echoes frozen_digest at
+    fixture scale; same_corpus is False on any mismatch so foreign-corpus
+    evidence can never bless a manifest. Each leg's output_sha256 is the
+    LAST run's digest for the gate's determinism cross-tie.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        workdir = Path(tmpdir)
+
+        def _measure(extra_kwargs: dict[str, object]) -> tuple[list[float], list[str]]:
+            durations: list[float] = []
+            shas: list[str] = []
+            for index in range(runs):
+                gc.collect()
+                clear_caches()
+                output_path = workdir / f"dirb_timing_{index}.txt"
+                start_ns = time.perf_counter_ns()
+                compile_rules(line_factory(), str(output_path), **extra_kwargs)
+                elapsed = round((time.perf_counter_ns() - start_ns) / 1_000_000_000, 6)
+                durations.append(elapsed)
+                shas.append(_streaming_sha256(output_path))
+            return durations, shas
+
+        off_durations, off_shas = _measure({})
+        on_durations, on_shas = _measure({"wildcard_covers_subs_pruning": True})
+
+    off_median = round(statistics.median(off_durations), 6)
+    on_median = round(statistics.median(on_durations), 6)
+    if off_median > 0:
+        relative_overhead: float | None = round(_overhead_percent(off_median, on_median), 2)
+    else:
+        # Zero baseline over a tiny fixture: no relative percent is
+        # definable, so the informational slot stays honestly null.
+        relative_overhead = None
+
+    if corpus_dir is not None:
+        timing_digest = manifest_digest(build_corpus_manifest(corpus_dir))
+    else:
+        timing_digest = frozen_digest
+
+    def _leg_block(durations: list[float], shas: list[str], median: float) -> dict[str, object]:
+        return {
+            "runs": runs,
+            "durations_seconds": list(durations),
+            "median_seconds": median,
+            "output_sha256_stable": len(set(shas)) == 1,
+            "output_sha256": shas[-1],
+        }
+
+    return {
+        "methodology": (
+            "in-gate median-of-N per leg over caller-supplied lines with "
+            "gc.collect plus clear_caches between every run; informational "
+            "only, never gating"
+        ),
+        "runs": runs,
+        "off": _leg_block(off_durations, off_shas, off_median),
+        "on": _leg_block(on_durations, on_shas, on_median),
+        "relative_overhead_percent": relative_overhead,
+        "timing_corpus_digest": timing_digest,
+        "same_corpus": timing_digest == frozen_digest,
+    }
+
+
+class TestDirbTimingMedians:
+    """Median-of-3 helper twins: hygiene, digest refusal, zero surface."""
+
+    TIMING_FIXTURE_LINES = [
+        "||*.autos^",
+        "||sub.autos^",
+        "||unrelated.xyz^",
+    ]
+
+    def _factory(self):
+        return _shadow_line_factory(list(self.TIMING_FIXTURE_LINES))
+
+    def test_median_helper_returns_three_runs_with_middle_median_and_stable_sha(self):
+        """Three durations per leg with the median equal to the middle value."""
+        block = _dirb_timing_medians(self._factory(), frozen_digest="fixture-scale")
+        assert block["runs"] == 3
+        assert len(block["off"]["durations_seconds"]) == 3
+        assert len(block["on"]["durations_seconds"]) == 3
+        assert block["off"]["median_seconds"] == sorted(block["off"]["durations_seconds"])[1]
+        assert block["on"]["median_seconds"] == sorted(block["on"]["durations_seconds"])[1]
+        assert block["off"]["output_sha256_stable"] is True
+        assert block["on"]["output_sha256_stable"] is True
+        assert block["same_corpus"] is True
+
+    def test_digest_mismatch_refuses_merge_with_same_corpus_false(self):
+        """Timing evidence against a foreign digest never blesses a manifest."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            corpus_dir = Path(tmpdir)
+            (corpus_dir / "a.txt").write_text("||*.autos^\n", encoding="utf-8")
+            block = _dirb_timing_medians(
+                self._factory(),
+                frozen_digest="0" * 64,
+                corpus_dir=corpus_dir,
+            )
+        assert block["same_corpus"] is False
+        assert block["timing_corpus_digest"] != "0" * 64
+
+    def test_timing_block_carries_no_gate_or_benchmark_surface(self):
+        """No passes, bar, or compile-flags echo anywhere in dirb timing."""
+        block = _dirb_timing_medians(self._factory(), frozen_digest="fixture-scale")
+        assert "passes" not in block
+        assert "bar_percent" not in block
+        assert "compile_flags" not in block
+        assert "on_compile_flags" not in block
+        assert "compile_flags" not in block["off"]
+        assert "compile_flags" not in block["on"]
+
+    def test_timing_keys_never_enter_the_verdict_checks_dict(self):
+        """A slow run can only go red via R2, never via wall-clock spread."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            legs = _run_dirb_corpus_legs(
+                _shadow_line_factory(list(self.TIMING_FIXTURE_LINES)),
+                Path(tmpdir),
+            )
+        checks, _ = _dirb_gate_checks(legs, audit_expected=0)
+        block = _dirb_timing_medians(self._factory(), frozen_digest="fixture-scale")
+        assert not [name for name in checks if "timing" in name]
+        assert not (set(block) & set(checks))
+        failing = sorted(
+            name for name, (observed, expected) in checks.items() if observed != expected
+        )
+        assert failing == ["input_rows_sanity", "population_nonzero"]

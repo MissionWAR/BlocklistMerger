@@ -60,3 +60,6 @@ Thumbs.db
 # Agents
 # ============================================
 .agent/
+# Local agent-tooling state must never stage into the public repo (IN-05).
+.claude/
+.gsd/
