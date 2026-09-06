@@ -887,13 +887,58 @@ class TestSaveStatsJson:
     def test_statistics_key_set_gate_rejects_unknown_keys(self):
         """Drift-gate teeth (HYG-03/IN-02): the key-set gate is not vacuous.
 
-        A producer-stats copy carrying one injected unknown key must NOT equal
-        the producer key set, proving the key-set equality gate can fail.
+        The drifted set derives from the COMMITTED fixture literals in
+        test_save_stats (hardcoded, never the producer helper) plus one
+        injected unknown key, and must NOT equal the live producer key
+        set — proving the key-set equality gate can fail. The anchor
+        equality pins those literals to the producer today, so a future
+        producer key addition without a fixture update fails loudly here
+        instead of drifting silently.
         """
+        # Committed fixture literals: exact key universe of the stats.update
+        # dict in test_save_stats above (each key also asserted per-key
+        # there); hardcoded so helper-side drift cannot ride along.
+        committed_keys = frozenset(
+            {
+                "files_processed",
+                "lines_raw",
+                "lines_clean",
+                "lines_output",
+                "comments_removed",
+                "cosmetic_removed",
+                "unsupported_removed",
+                "empty_removed",
+                "url_path_removed",
+                "invalid_removed",
+                "trimmed",
+                "abp_subdomain_pruned",
+                "tld_wildcard_pruned",
+                "denyallow_wildcard_pruned",
+                "apex_covered_wildcard_pruned",
+                "wildcard_covered_sub_pruned",
+                "duplicate_pruned",
+                "whitelist_conflict_pruned",
+                "local_hostname_pruned",
+                "formats_compressed",
+                "malformed_discarded",
+                "abp_kept",
+                "other_kept",
+                "rule_effect_block",
+                "rule_effect_exception",
+                "rule_effect_rewrite",
+                "rule_effect_disable",
+                "rule_effect_ignored",
+                "rule_effect_unsupported",
+                "rule_effect_uncertain",
+                "compression_policy_broadened",
+                "regex_preserved_no_pruning",
+            }
+        )
+        assert set(_new_pipeline_stats().keys()) == set(committed_keys)
         producer_keys = set(_new_pipeline_stats().keys())
-        drifted = dict(_new_pipeline_stats())
-        drifted["future_counter_not_yet_known"] = 0
-        assert set(drifted.keys()) != producer_keys
+        drifted_keys = set(committed_keys)
+        drifted_keys.add("future_counter_not_yet_known")
+        assert drifted_keys != producer_keys
 
 
 class TestPipelineCli:
