@@ -1597,14 +1597,8 @@ def _prune_redundant_rules(
                         covering=covering_tld,
                     )
                     continue
-                # 19-REVIEW IN-03 (HYG-01): guard the overwrite so the detail
-                # follows the actual witness source -- an earlier
-                # exception-derived covering must keep its exception detail
-                # instead of being relabeled with the wildcard detail.
-                # Keeps stay keeps either way (diagnostic-string only).
-                if uncertain_covering is None:
-                    uncertain_covering = abp_wildcards[tld][0]
-                    uncertain_reason = "tld_wildcard_modifier_scope_unproven"
+                uncertain_covering = uncertain_covering or abp_wildcards[tld][0]
+                uncertain_reason = "tld_wildcard_modifier_scope_unproven"
 
             pruning_reason: str | None = None
             covering_parent: RuleEntry | None = None
