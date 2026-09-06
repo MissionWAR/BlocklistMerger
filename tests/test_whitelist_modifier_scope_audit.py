@@ -4105,7 +4105,7 @@ class TestDirbShadowMachinery:
 
     def test_dirb_dataset_paths_never_reference_apex_frozen_dir(self):
         """Dirb evidence paths stay out of the apex frozen dir (T-21-06)."""
-        assert DIRB_SHADOW_DATASET_ID == "dirb-shadow-v1" or "DIRB_SHADOW_DATASET_ID" in os.environ
+        assert os.environ.get("DIRB_SHADOW_DATASET_ID", "dirb-shadow-v1") == DIRB_SHADOW_DATASET_ID
         assert "apex" not in str(DIRB_FROZEN_CORPUS_DIR)
         assert "apex" not in str(DIRB_FROZEN_MANIFEST_PATH)
         assert "apex" not in str(DIRB_TIMING_OFF_REPORT_PATH)
