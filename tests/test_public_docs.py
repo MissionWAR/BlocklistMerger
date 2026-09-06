@@ -137,6 +137,8 @@ def test_ignore_policy_source_runtime_boundary() -> None:
     # IN-03: the absent v2 stem is deliberate — git check-ignore evaluates
     # nonexistent paths, so this guards the documented flip-day stem pre-creation.
     assert _git_check_ignore("reports/shadow-gate/apex-shadow-v2.json") == 1
+    # 21-IN-03: dirb evidence is trackable explicitly, not just by bulk exclusion.
+    assert _git_check_ignore("reports/shadow-gate/dirb-shadow-v1.json") == 1
     # IN-05: local agent-tooling state must stay ignored, never staged publicly.
     assert _git_check_ignore(".claude/settings.local.json") == 0
     assert _git_check_ignore(".gsd/state.json") == 0

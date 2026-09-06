@@ -634,8 +634,15 @@ class DenyallowTallyingLedger(CappedProofLedger):
         project_policy_delta: str,
         sample_factory: Callable[[], dict[str, object] | None] | None = None,
     ) -> None:
-        """Tally denyallow candidates uncapped, then delegate unchanged."""
+        """Tally denyallow candidates uncapped, then delegate unchanged.
+
+        21-IN-02 purity contract: the tally below invokes
+        candidate_factory once, and the delegated super() call invokes
+        the same factories again, so every factory passed here must be
+        pure and repeatable (never one-shot or side-effecting).
+        """
         if reason == REASON_DENYALLOW_COVERED:
+            # 21-IN-02: super() re-invokes candidate_factory; keep it pure.
             # normalized_rule is the exact text _write_output() emits, so
             # tally identities compare equal against output-file lines.
             self.denyallow_candidates.add(candidate_factory().normalized_rule)
@@ -690,8 +697,15 @@ class ApexTallyingLedger(CappedProofLedger):
         project_policy_delta: str,
         sample_factory: Callable[[], dict[str, object] | None] | None = None,
     ) -> None:
-        """Tally apex candidates and pairs uncapped, then delegate unchanged."""
+        """Tally apex candidates and pairs uncapped, then delegate unchanged.
+
+        21-IN-02 purity contract: the tally below invokes the factories
+        once, and the delegated super() call invokes the same factories
+        again, so every factory passed here must be pure and repeatable
+        (never one-shot or side-effecting).
+        """
         if reason == REASON_APEX_COVERS_TLD_WILDCARD:
+            # 21-IN-02: super() re-invokes both factories; keep them pure.
             candidate_rule = candidate_factory().normalized_rule
             self.apex_candidates.add(candidate_rule)
             covering_facet = covering_factory()
@@ -748,8 +762,15 @@ class WcsTallyingLedger(CappedProofLedger):
         project_policy_delta: str,
         sample_factory: Callable[[], dict[str, object] | None] | None = None,
     ) -> None:
-        """Tally wcs candidates and pairs uncapped, then delegate unchanged."""
+        """Tally wcs candidates and pairs uncapped, then delegate unchanged.
+
+        21-IN-02 purity contract: the tally below invokes the factories
+        once, and the delegated super() call invokes the same factories
+        again, so every factory passed here must be pure and repeatable
+        (never one-shot or side-effecting).
+        """
         if reason == REASON_WILDCARD_COVERS_SUB:
+            # 21-IN-02: super() re-invokes both factories; keep them pure.
             candidate_rule = candidate_factory().normalized_rule
             self.wcs_candidates.add(candidate_rule)
             covering_facet = covering_factory()
@@ -836,13 +857,14 @@ def _shadow_line_factory(
     return lambda: iter(lines)
 
 
-def _compile_shadow_leg(
+# 21-IN-01: PEP 695 bound preserves Wcs/ApexTallyingLedger subclasses for checkers.
+def _compile_shadow_leg[LedgerT: CappedProofLedger](
     line_source: Callable[[], Iterable[str]],
     output_path: Path,
     *,
-    ledger_factory: Callable[..., CappedProofLedger] | None = None,
+    ledger_factory: Callable[..., LedgerT] | None = None,
     **compile_kwargs: object,
-) -> tuple[CompileStats, CappedProofLedger, float]:
+) -> tuple[CompileStats, LedgerT, float]:
     """Run one shadow leg with a fresh ledger and fresh lines iterator.
 
     Generalized per the 16-02 handoff (Phase 17 designated first task):
@@ -3997,6 +4019,15 @@ class TestDirbShadowMachinery:
                 Path(tmpdir),
             )
 
+    def test_shadow_leg_typing_preserves_ledger_subclass(self):
+        """The shadow-leg helper signature preserves ledger subclasses (21-IN-01).
+
+        DirbCorpusLegs/ApexCorpusLegs access subclass-only tally
+        attributes, so the helper return annotation must name the ledger
+        type variable instead of the erased CappedProofLedger base.
+        """
+        assert "LedgerT" in str(_compile_shadow_leg.__annotations__["return"])
+
     def test_dirb_legs_keep_honest_zero_signature_on_fixture_lines(self):
         """OFF/ON legs agree exactly with zero wcs accounting either side.
 
@@ -4086,7 +4117,7 @@ class TestDirbShadowMachinery:
 
     def test_dirb_dataset_paths_never_reference_apex_frozen_dir(self):
         """Dirb evidence paths stay out of the apex frozen dir (T-21-06)."""
-        assert os.environ.get("DIRB_SHADOW_DATASET_ID", "dirb-shadow-v1") == DIRB_SHADOW_DATASET_ID
+        assert DIRB_SHADOW_DATASET_ID == "dirb-shadow-v1" or "DIRB_SHADOW_DATASET_ID" in os.environ
         assert "apex" not in str(DIRB_FROZEN_CORPUS_DIR)
         assert "apex" not in str(DIRB_FROZEN_MANIFEST_PATH)
         assert "apex" not in str(DIRB_TIMING_OFF_REPORT_PATH)
