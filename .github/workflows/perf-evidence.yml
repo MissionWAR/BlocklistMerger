@@ -21,11 +21,11 @@ on:
 env:
   SOURCES: config/sources.txt
   RAW_DIR: lists/_raw
-  PERF_SNAPSHOT_DIGEST: ecd3b62468c78c0c49a850f569f16fd9dcb82743b9764a04b4f9c9c72926f27b
-  PERF_SNAPSHOT_ARTIFACT: perf-snapshot-ecd3b62468c7
-  # Placeholder until a self-seeded upload lands; replace with that
-  # run's numeric id by human PR (see the lifecycle note above).
-  PERF_SNAPSHOT_RUN_ID: "0"
+  PERF_SNAPSHOT_DIGEST: 68dc7a1c231de50293d64943943a5512a737c18946edf170ff1e0aeb6936a59a
+  PERF_SNAPSHOT_ARTIFACT: perf-snapshot-68dc7a1c231d
+  # Seeded by run 34037935171 self-seed (2026-09-06); replace with a fresh
+  # self-seeded digest by human PR ~quarterly before the 90-day expiry.
+  PERF_SNAPSHOT_RUN_ID: "34037935171"
   PINNED_DIR: reports/perf-evidence/pinned-corpus
 
 permissions: {}
