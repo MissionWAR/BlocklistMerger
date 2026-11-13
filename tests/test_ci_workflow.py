@@ -317,8 +317,8 @@ def test_manual_heavy_evidence_workflow_is_dispatch_only_and_read_only() -> None
     assert "\n    timeout-minutes: 60\n" in job
 
     assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in text
-    assert "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97" in text
-    assert "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" in text
+    assert "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0" in text
+    assert "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9" in text
 
 
 def test_manual_heavy_evidence_workflow_collects_only_retained_diagnostics() -> None:
