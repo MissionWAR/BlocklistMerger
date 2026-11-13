@@ -120,6 +120,34 @@ weekly on Tuesdays at 03:17 UTC, and every run can also start manually with
 artifacts (kept 90 days) plus an advisory-labeled delta table in the run step
 summary.
 
+Advisory regression alerts:
+
+- **When an alert opens:** A **15% or greater slowdown** on the **pinned** timing
+  leg immediately opens one tracked GitHub issue labeled `perf-regression`,
+  including the delta percentage, baseline reference, workflow run link, an
+  advisory runner-noise caveat, and any runner image, CPU, or Python changes
+  observed (slowdowns across changed environments are flagged as observed, not
+  proven code regressions). Live timing and memory legs never trigger alerts.
+- **Updates and recovery:** Later slower or partially recovered weeks update the
+  same open issue's history table and post a dated comment instead of creating
+  duplicates. The issue closes automatically with a recovery summary comment only
+  when a valid pinned run returns to or faster than the pre-episode baseline
+  anchor. Manual closures are respected without reopening or opening duplicate
+  issues while tracking waits for anchor recovery.
+- **Degraded weeks and isolation:** Missing baselines, drifted snapshots, corpus
+  re-pins, or failed measurement runs never trigger false alerts or false
+  closures (an open issue stays open across mid-episode corpus re-pins). If the
+  pinned timing leg and baseline are valid while live fetch or memory checks
+  fail, the alert still fires with those missing supporting legs noted. Alert
+  sync runs in a separate job with issue-only write access, and notification
+  failures stay advisory without failing the workflow or invalidating rolling
+  baselines.
+- **Manual smoke testing:** Maintainers can trigger `perf-evidence.yml` via
+  `workflow_dispatch` with `smoke_mode` set to `regression`,
+  `partial_recovery`, `recovery`, or `degraded` to verify the full alert
+  lifecycle on isolated `perf-regression-test` (`[SMOKE TEST]`) issues without
+  touching production baselines or production alert issues.
+
 What never blocks: benchmark compare exit codes never gate publishing, and the
 workflow is never a required check — a red or missing perf run never stops a
 release.
