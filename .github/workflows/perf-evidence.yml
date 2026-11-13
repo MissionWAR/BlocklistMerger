@@ -65,7 +65,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.14"
 
@@ -85,7 +85,7 @@ jobs:
         # Graceful by design: a missing snapshot (pre-seed, expiry) skips the
         # pinned legs below and the week degrades to raw-only, job stays green.
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: ${{ env.PERF_SNAPSHOT_ARTIFACT }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -198,7 +198,7 @@ jobs:
         # digest so seeded weeks stay green with or without a miss.
         if: always() && steps.self-seed.outputs.digest12 != '' && (github.event_name != 'workflow_dispatch' || (inputs.smoke_mode || 'none') == 'none')
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: perf-snapshot-${{ steps.self-seed.outputs.digest12 }}
           path: reports/perf-evidence/self-seed-stage/*.txt
@@ -303,7 +303,7 @@ jobs:
         # non-pinned leg failures preserve rolling baseline data (D-24-05).
         if: always() && steps.baseline.outputs.run-id != '' && (github.event_name != 'workflow_dispatch' || (inputs.smoke_mode || 'none') == 'none')
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: perf-evidence-baseline-report
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -332,7 +332,7 @@ jobs:
         # environment receipts. The dated bundle below keeps the per-week copy.
         if: always() && (github.event_name != 'workflow_dispatch' || (inputs.smoke_mode || 'none') == 'none')
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: perf-evidence-baseline-report
           path: reports/perf-evidence/baseline-stage/*.json
@@ -519,7 +519,7 @@ jobs:
       - name: Upload Perf Evidence
         if: always() && (github.event_name != 'workflow_dispatch' || (inputs.smoke_mode || 'none') == 'none')
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: perf-evidence-${{ steps.stamp.outputs.date }}-${{ github.run_id }}
           path: |
@@ -542,7 +542,7 @@ jobs:
 
       - name: Upload Smoke Evidence
         if: always() && github.event_name == 'workflow_dispatch' && inputs.smoke_mode != '' && inputs.smoke_mode != 'none'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: perf-evidence-smoke-${{ steps.stamp.outputs.date }}-${{ github.run_id }}
           path: reports/perf-evidence/smoke/**
@@ -626,7 +626,7 @@ jobs:
       - name: Upload Alert Handoff
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: perf-alert-handoff-${{ github.run_id }}
           path: reports/perf-evidence/alert-handoff/**
@@ -654,14 +654,14 @@ jobs:
         id: setup-python
         if: steps.checkout.outcome == 'success'
         continue-on-error: true
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.14"
 
       - name: Download Alert Handoff
         if: steps.checkout.outcome == 'success' && steps.setup-python.outcome == 'success'
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: perf-alert-handoff-${{ github.run_id }}
           path: alert-handoff
