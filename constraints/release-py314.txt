@@ -20,7 +20,7 @@ Pygments==2.21.0
 pytest==9.2.0
 requests==2.34.2
 requests-file==3.0.1
-ruff==0.17.4
+ruff==0.17.5
 tldextract==5.4.0
 urllib3==2.8.0
 yarl==1.25.1
